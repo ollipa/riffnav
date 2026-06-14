@@ -1,8 +1,16 @@
+use std::borrow::Cow;
+
 use super::model::{FileDiff, FileStatus};
 
 /// Split a unified diff into per-file sections. Anything before the first
 /// `diff --git` line (e.g. a `git show` commit header) is ignored.
 pub fn parse(input: &str) -> Vec<FileDiff> {
+    // git colorizes diffs when piping to a pager, so `pager.diff = riffnav` feeds
+    // us ANSI-wrapped lines the markers below wouldn't match. Strip the codes up
+    // front; delta re-colors from the plain text anyway.
+    let input = strip_ansi(input);
+    let input = input.as_ref();
+
     // Byte offsets where each file section begins, so we can slice `raw` verbatim.
     let mut starts = Vec::new();
     let mut offset = 0;
@@ -104,6 +112,39 @@ fn parse_one(raw: &str) -> FileDiff {
     }
 }
 
+/// Remove ANSI CSI escape sequences (SGR color codes and friends) from `input`,
+/// borrowing it unchanged when there are none — the common case of a plain diff
+/// piped in. git emits these only when it thinks it's writing to a terminal,
+/// which includes feeding its configured pager.
+fn strip_ansi(input: &str) -> Cow<'_, str> {
+    if !input.contains('\x1b') {
+        return Cow::Borrowed(input);
+    }
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            // A CSI sequence is ESC '[' then params/intermediates, terminated by
+            // a final byte in 0x40..=0x7e. Anything else after ESC we drop alone.
+            if bytes.get(i + 1) == Some(&b'[') {
+                i += 2;
+                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                    i += 1;
+                }
+                i += 1; // consume the final byte (no-op past end)
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // Only whole ASCII escape runs were removed, so what remains is valid UTF-8.
+    Cow::Owned(String::from_utf8_lossy(&out).into_owned())
+}
+
 /// Parse the path from a `--- `/`+++ ` header side, stripping the `a/`/`b/`
 /// prefix and any trailing tab-timestamp. `/dev/null` becomes `None`.
 fn side_path(s: &str) -> Option<String> {
@@ -202,6 +243,21 @@ mod tests {
         assert_eq!(f.path(), "img.png");
         assert_eq!(f.additions, 0);
         assert_eq!(f.deletions, 0);
+    }
+
+    #[test]
+    fn parses_colorized_diff_and_strips_codes() {
+        // What git feeds a pager: every line wrapped in SGR color codes.
+        let diff = "\x1b[1mdiff --git a/a.rs b/a.rs\x1b[m\n\
+                    \x1b[1m--- a/a.rs\x1b[m\n\x1b[1m+++ b/a.rs\x1b[m\n\
+                    \x1b[36m@@ -1 +1 @@\x1b[m\n\x1b[31m-old\x1b[m\n\x1b[32m+new\x1b[m\n";
+        let files = parse(diff);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path(), "a.rs");
+        assert_eq!(files[0].additions, 1);
+        assert_eq!(files[0].deletions, 1);
+        // raw is handed to delta, which re-colors, so it must be free of codes.
+        assert!(!files[0].raw.contains('\x1b'));
     }
 
     #[test]
