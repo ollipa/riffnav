@@ -86,6 +86,7 @@ optional. Settings resolve as **defaults < config file < CLI flags**.
 icon_style   = "nerd"    # nerd | unicode | ascii
 tree_width   = 32        # columns for the file-tree pane
 show_tree    = true
+start_focus  = "diff"    # "diff": open in the first file (n/p between files) | "tree"
 show_header  = true
 show_footer  = true
 open_depth   = 64        # expand folders shallower than this on launch

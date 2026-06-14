@@ -8,6 +8,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
+use serde::Deserialize;
 
 use crate::config::Config;
 use crate::delta::RenderCache;
@@ -23,7 +24,8 @@ const HALF_PAGE: i32 = 15;
 const STATUS_TTL: Duration = Duration::from_secs(3);
 
 /// Which pane the j/k keys act on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Focus {
     Tree,
     Diff,
@@ -91,8 +93,10 @@ impl App {
             show_header: cfg.show_header,
             show_footer: cfg.show_footer,
             tree_width: cfg.tree_width.max(MIN_DIFF_WIDTH),
+            // Start in the diff by default, so the first file is ready to read
+            // and scroll; the tree can't hold focus when it's hidden.
             focus: if cfg.show_tree {
-                Focus::Tree
+                cfg.start_focus
             } else {
                 Focus::Diff
             },
@@ -746,5 +750,27 @@ mod tests {
         // Before the first render diff_height is 0; a page must still advance.
         let app = app_with(vec![file("a.rs")]);
         assert_eq!(app.page(), 1);
+    }
+
+    #[test]
+    fn start_focus_follows_config_but_yields_when_tree_hidden() {
+        let diff_first = App::new(vec![file("a.rs")], false, false, &Config::default());
+        assert_eq!(diff_first.focus, Focus::Diff); // default: single-file view
+
+        let tree_cfg = Config {
+            start_focus: Focus::Tree,
+            ..Config::default()
+        };
+        let tree_first = App::new(vec![file("a.rs")], false, false, &tree_cfg);
+        assert_eq!(tree_first.focus, Focus::Tree);
+
+        // With the tree hidden there's nothing to focus but the diff.
+        let hidden_cfg = Config {
+            start_focus: Focus::Tree,
+            show_tree: false,
+            ..Config::default()
+        };
+        let hidden = App::new(vec![file("a.rs")], false, false, &hidden_cfg);
+        assert_eq!(hidden.focus, Focus::Diff);
     }
 }

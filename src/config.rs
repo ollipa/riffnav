@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::app::Focus;
 use crate::icons::IconStyle;
 
 /// User configuration, loaded from `config.toml`. Every field is optional in the
@@ -23,6 +24,10 @@ pub struct Config {
     pub tree_width: u16,
     /// Show the file tree on launch.
     pub show_tree: bool,
+    /// Where keyboard focus starts: `diff` reads the first file right away (a
+    /// single-file view — move between files with n/p), `tree` starts in the
+    /// file list. Ignored when the tree is hidden (focus is forced to the diff).
+    pub start_focus: Focus,
     /// Show the top summary bar.
     pub show_header: bool,
     /// Show the bottom hint/status bar.
@@ -39,6 +44,7 @@ impl Default for Config {
             icon_style: IconStyle::Nerd,
             tree_width: 32,
             show_tree: true,
+            start_focus: Focus::Diff,
             show_header: true,
             show_footer: true,
             open_depth: 64,
@@ -97,6 +103,20 @@ mod tests {
         assert!(c.show_header);
         assert_eq!(c.icon_style, IconStyle::Nerd);
         assert_eq!(c.side_by_side, None);
+        assert_eq!(c.start_focus, Focus::Diff);
+    }
+
+    #[test]
+    fn start_focus_parses_from_string() {
+        assert_eq!(
+            from_toml("start_focus = \"tree\"").unwrap().start_focus,
+            Focus::Tree
+        );
+        assert_eq!(
+            from_toml("start_focus = \"diff\"").unwrap().start_focus,
+            Focus::Diff
+        );
+        assert!(from_toml("start_focus = \"sideways\"").is_err());
     }
 
     #[test]

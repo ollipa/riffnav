@@ -15,6 +15,11 @@
 # Show the file tree on launch (toggle at runtime with `e`).
 # show_tree = true
 
+# Where focus starts: "diff" opens straight into the first file (a single-file
+# view — move between files with n/p), "tree" starts in the file list. Ignored
+# when the tree is hidden.
+# start_focus = "diff"
+
 # Show the top summary bar / bottom hint bar.
 # show_header = true
 # show_footer = true
