@@ -23,6 +23,7 @@ notify = "8.2.0"
 # size the scrollback when wrapping unified diffs (delta leaves those unwrapped).
 ratatui = { version = "0.30.1", features = ["unstable-rendered-line-info"] }
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
 toml = "1.1.2"
 
 [dev-dependencies]

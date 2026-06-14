@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -12,12 +12,15 @@ use ratatui::widgets::ListState;
 use crate::config::Config;
 use crate::delta::RenderCache;
 use crate::diff::FileDiff;
+use crate::herdr::Herdr;
 use crate::icons::IconStyle;
 use crate::tree::{self, Node, Row, RowKind};
 use crate::watch::Watch;
 
 const MIN_DIFF_WIDTH: u16 = 20;
 const HALF_PAGE: i32 = 15;
+/// How long a transient status message stays on screen before clearing itself.
+const STATUS_TTL: Duration = Duration::from_secs(3);
 
 /// Which pane the j/k keys act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +61,9 @@ pub struct App {
     quit: bool,
     pending_editor: Option<String>,
     watch: Option<Watch>,
+    herdr: Option<Herdr>,
+    /// When set, the current `status` clears itself once this instant passes.
+    status_deadline: Option<Instant>,
 }
 
 impl App {
@@ -99,6 +105,8 @@ impl App {
             quit: false,
             pending_editor: None,
             watch: None,
+            herdr: None,
+            status_deadline: None,
         }
     }
 
@@ -115,6 +123,50 @@ impl App {
 
     pub fn is_watching(&self) -> bool {
         self.watch.is_some()
+    }
+
+    /// Detect whether riffnav is running inside herdr, enabling the `z` zoom key.
+    /// A no-op (leaves `herdr` as `None`) when not inside herdr.
+    pub fn enable_herdr(&mut self) {
+        self.herdr = Herdr::detect();
+    }
+
+    pub fn in_herdr(&self) -> bool {
+        self.herdr.is_some()
+    }
+
+    /// Show a transient status message that auto-clears after [`STATUS_TTL`].
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = Some(msg.into());
+        self.status_deadline = Some(Instant::now() + STATUS_TTL);
+    }
+
+    fn clear_status(&mut self) {
+        self.status = None;
+        self.status_deadline = None;
+    }
+
+    /// Drop a timed status message once its display window has elapsed.
+    fn expire_status(&mut self) {
+        if let Some(deadline) = self.status_deadline
+            && Instant::now() >= deadline
+        {
+            self.clear_status();
+        }
+    }
+
+    /// Ask herdr to toggle zoom on our pane, reporting the outcome in the status
+    /// line. Only reachable when running inside herdr.
+    fn toggle_herdr_zoom(&mut self) {
+        let Some(herdr) = &self.herdr else { return };
+        let msg = match herdr.toggle_zoom() {
+            Ok(Some(true)) => "⊕ Zoomed".to_string(),
+            Ok(Some(false)) => "⊖ Unzoomed".to_string(),
+            Ok(None) => "⧉ Zoom toggled".to_string(),
+            // `{e:#}` includes the cause chain, not just the top-level context.
+            Err(e) => format!("herdr: {e:#}"),
+        };
+        self.set_status(msg);
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -145,13 +197,31 @@ impl App {
             if self.watch.is_some() {
                 self.watch_tick()?;
             } else {
-                self.handle_event()?;
+                self.wait_for_event()?;
             }
 
             // Suspending the TUI to run an editor needs the owned terminal.
             if let Some(path) = self.pending_editor.take() {
                 self.open_editor(terminal, &path)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Interactive (non-watch) input wait. Normally blocks for the next event,
+    /// but when a timed status is showing it waits only until that deadline so the
+    /// message clears itself without needing a keypress.
+    fn wait_for_event(&mut self) -> Result<()> {
+        match self.status_deadline {
+            Some(deadline) => {
+                let timeout = deadline.saturating_duration_since(Instant::now());
+                if event::poll(timeout)? {
+                    self.handle_event()?;
+                } else {
+                    self.clear_status();
+                }
+            }
+            None => self.handle_event()?,
         }
         Ok(())
     }
@@ -164,6 +234,7 @@ impl App {
         if event::poll(timeout)? {
             self.handle_event()?;
         }
+        self.expire_status();
         match self.watch.as_mut().expect("watch present").poll_reload() {
             Some(Ok(text)) => {
                 let files = crate::diff::parse(&text);
@@ -453,7 +524,7 @@ impl App {
             return Ok(());
         }
 
-        self.status = None;
+        self.clear_status();
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if ctrl => self.quit = true,
@@ -503,6 +574,8 @@ impl App {
                 self.status = Some(format!("Icons: {}", self.icon_style.name()));
             }
             KeyCode::Char('y') => self.copy_path(),
+            // Only bound inside herdr; an inert no-op elsewhere.
+            KeyCode::Char('z') if self.herdr.is_some() => self.toggle_herdr_zoom(),
             KeyCode::Char('o') => {
                 if let Some(idx) = self.selected_file() {
                     self.pending_editor = Some(self.files[idx].path().to_string());
@@ -612,5 +685,22 @@ mod tests {
         let app = App::new(vec![file("src/diff/parser.rs")], false, false, &cfg);
         assert!(!app.collapsed.contains("src"));
         assert!(app.collapsed.contains("src/diff"));
+    }
+
+    #[test]
+    fn status_clears_once_its_deadline_passes() {
+        let mut app = app_with(vec![file("a.rs")]);
+        app.set_status("hi");
+        assert!(app.status.is_some());
+
+        // Still within the display window: the message stays.
+        app.expire_status();
+        assert!(app.status.is_some());
+
+        // Past the deadline: the message clears itself.
+        app.status_deadline = Some(Instant::now());
+        app.expire_status();
+        assert!(app.status.is_none());
+        assert!(app.status_deadline.is_none());
     }
 }

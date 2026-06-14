@@ -69,6 +69,7 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `i` | Cycle icon style (nerd → unicode → ascii) |
 | `y` | Copy the selected file's path |
 | `o` | Open the selected file in `$EDITOR` |
+| `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
 | `?` | Toggle the help overlay |
 | `q` / `Esc` / `Ctrl-c` | Quit |
 
@@ -107,6 +108,15 @@ stdin. Changes are detected by a filesystem watcher (debounced) plus the polling
 interval as a safety net; the view only rebuilds when the diff actually changes,
 and your selected file is preserved across refreshes.
 
+## herdr integration
+
+When riffnav runs inside [herdr](https://herdr.dev) (detected via `HERDR_ENV=1`),
+the `z` key toggles **zoom** on riffnav's pane — maximizing it to fill the window,
+or restoring it. riffnav talks to herdr's [socket API][herdr-socket] over its Unix
+control socket (found via `HERDR_SOCKET_PATH` / `HERDR_SESSION`, or the default
+session socket). Outside herdr the key does nothing and isn't shown in the footer
+or help.
+
 ## How it works
 
 stdin → split per file (`diff --git`) → build the tree → on selection, run the
@@ -123,3 +133,4 @@ MIT
 [nerdfonts]: https://www.nerdfonts.com/
 [ratatui]: https://ratatui.rs/
 [ansi-to-tui]: https://github.com/ratatui/ansi-to-tui
+[herdr-socket]: https://herdr.dev/docs/socket-api/

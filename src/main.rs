@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod delta;
 mod diff;
+mod herdr;
 mod icons;
 mod tree;
 mod ui;
@@ -77,5 +78,6 @@ fn main() -> Result<()> {
             .max(0.05);
         app.enable_watch(watch_cmd, Duration::from_secs_f64(secs), input)?;
     }
+    app.enable_herdr();
     app.run()
 }

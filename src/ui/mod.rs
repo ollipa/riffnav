@@ -50,7 +50,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
     if app.finder.is_some() {
         render_finder(frame, frame.area(), app);
     } else if app.show_help {
-        render_help(frame, frame.area());
+        render_help(frame, frame.area(), app.in_herdr());
     }
 }
 
@@ -78,6 +78,12 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     if app.is_watching() {
         spans.push(Span::styled("   ● watch", Style::new().fg(Color::Green)));
     }
+    if app.in_herdr() {
+        spans.push(Span::styled(
+            "   ⧉ herdr",
+            Style::new().add_modifier(Modifier::DIM),
+        ));
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -96,16 +102,19 @@ fn render_diff_title(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let (text, style) = match &app.status {
         Some(status) => (format!(" {status} "), Style::new().fg(Color::Yellow)),
-        None => (
-            " j/k · n/p file · t: find · Tab focus · ?: help · q: quit ".to_string(),
-            Style::new().add_modifier(Modifier::DIM),
-        ),
+        None => {
+            let zoom = if app.in_herdr() { "z: zoom · " } else { "" };
+            (
+                format!(" j/k · n/p file · t: find · {zoom}Tab focus · ?: help · q: quit "),
+                Style::new().add_modifier(Modifier::DIM),
+            )
+        }
     };
     frame.render_widget(Paragraph::new(text).style(style), area);
 }
 
-fn render_help(frame: &mut Frame, area: Rect) {
-    let entries = [
+fn render_help(frame: &mut Frame, area: Rect, in_herdr: bool) {
+    let mut entries = vec![
         ("j / k", "move selection / scroll diff (per focus)"),
         ("n / p", "next / previous file"),
         ("Ctrl-d / Ctrl-u", "scroll diff half page"),
@@ -118,9 +127,12 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ("i", "cycle icon style (nerd/unicode/ascii)"),
         ("y", "copy file path"),
         ("o", "open file in $EDITOR"),
-        ("?", "toggle this help"),
-        ("q / Esc", "quit"),
     ];
+    if in_herdr {
+        entries.push(("z", "toggle herdr zoom"));
+    }
+    entries.push(("?", "toggle this help"));
+    entries.push(("q / Esc", "quit"));
     let lines: Vec<Line> = entries
         .iter()
         .map(|(key, desc)| {
