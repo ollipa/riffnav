@@ -111,7 +111,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ("Ctrl-d / Ctrl-u", "scroll diff half page"),
         ("g / G", "top / bottom of diff"),
         ("Enter / Space", "expand / collapse folder"),
-        ("Tab", "switch focus tree <-> diff"),
+        ("Tab / ← / →", "switch focus tree <-> diff"),
         ("t / /", "fuzzy find a file"),
         ("s", "toggle side-by-side / unified"),
         ("e", "toggle file tree"),

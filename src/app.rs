@@ -484,6 +484,12 @@ impl App {
                     Focus::Diff => Focus::Tree,
                 }
             }
+            KeyCode::Left => {
+                if self.show_tree {
+                    self.focus = Focus::Tree;
+                }
+            }
+            KeyCode::Right => self.focus = Focus::Diff,
             KeyCode::Char('s') => self.side_by_side = !self.side_by_side,
             KeyCode::Char('e') => {
                 self.show_tree = !self.show_tree;
