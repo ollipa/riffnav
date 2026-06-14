@@ -19,7 +19,9 @@ clap = { version = "4.6.1", features = ["derive"] }
 crossterm = { version = "0.29.0", features = ["use-dev-tty"] }
 fuzzy-matcher = "0.3.7"
 notify = "8.2.0"
-ratatui = "0.30.1"
+# unstable-rendered-line-info exposes Paragraph::line_count, which we use to
+# size the scrollback when wrapping unified diffs (delta leaves those unwrapped).
+ratatui = { version = "0.30.1", features = ["unstable-rendered-line-info"] }
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
 

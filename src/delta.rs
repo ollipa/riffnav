@@ -148,4 +148,25 @@ impl RenderCache {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+
+    /// Seed a render directly, bypassing delta. Tests run without delta on PATH,
+    /// so this is the only way to exercise the rendering path.
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(
+        &mut self,
+        file: usize,
+        width: u16,
+        side_by_side: bool,
+        text: Text<'static>,
+    ) {
+        let lines = text.lines.len().min(u16::MAX as usize) as u16;
+        self.entries.insert(
+            Key {
+                file,
+                width,
+                side_by_side,
+            },
+            Rendered { text, lines },
+        );
+    }
 }

@@ -214,6 +214,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::text::Text;
 
     fn file(path: &str, status: FileStatus, additions: u32, deletions: u32) -> FileDiff {
         FileDiff {
@@ -277,5 +278,37 @@ mod tests {
         };
         let mut app = sample_app(&cfg);
         insta::assert_snapshot!(render(&mut app, 64, 8));
+    }
+
+    /// delta leaves unified diffs unwrapped, so a line wider than the pane must
+    /// be wrapped by the viewer rather than truncated at the edge. Regression
+    /// test for long markdown lines losing their tail.
+    #[test]
+    fn unified_long_line_wraps_not_truncated() {
+        let cfg = Config {
+            icon_style: IconStyle::Ascii,
+            ..Config::default()
+        };
+        let mut app = sample_app(&cfg); // unified mode, first file selected
+        let (width, height) = (64, 12);
+        let diff_width = width - app.tree_width; // the pane delta wraps to
+
+        // One line several pane-widths long, with no spaces so wrapping has to
+        // break mid-token — exactly the case delta truncates in side-by-side.
+        let long = "X".repeat(diff_width as usize * 3 + 5);
+        let idx = app.selected_file().expect("a file is selected");
+        app.cache
+            .insert_for_test(idx, diff_width, false, Text::from(long.clone()));
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| draw(f, &mut app, diff_width)).unwrap();
+        let out = buffer_text(terminal.backend().buffer());
+
+        let shown = out.chars().filter(|&c| c == 'X').count();
+        assert_eq!(
+            shown,
+            long.len(),
+            "every column must survive wrapping; truncation would drop the tail\n{out}"
+        );
     }
 }

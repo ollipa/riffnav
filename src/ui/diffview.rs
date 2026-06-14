@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Text;
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::App;
 
@@ -28,11 +28,24 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
         return;
     };
 
-    let max_scroll = lines.saturating_sub(area.height);
+    // delta wraps side-by-side output to the pane width itself, so its line
+    // count is exact and we render as-is. Unified output is left unwrapped (delta
+    // assumes a downstream pager), so we wrap it here — otherwise long lines are
+    // truncated at the pane edge — and measure the wrapped height so scrolling
+    // can still reach the bottom.
+    let mut paragraph = Paragraph::new(text);
+    let height = if app.side_by_side {
+        lines
+    } else {
+        paragraph = paragraph.wrap(Wrap { trim: false });
+        paragraph.line_count(area.width).min(u16::MAX as usize) as u16
+    };
+
+    let max_scroll = height.saturating_sub(area.height);
     let scroll = app.diff_scroll.min(max_scroll);
     app.diff_scroll = scroll;
 
-    frame.render_widget(Paragraph::new(text).scroll((scroll, 0)), area);
+    frame.render_widget(paragraph.scroll((scroll, 0)), area);
 }
 
 fn placeholder(frame: &mut Frame, area: Rect, msg: &str) {
