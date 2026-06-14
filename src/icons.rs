@@ -2,7 +2,10 @@
 //! project's font requirement); `Unicode` and `Ascii` are progressively safer
 //! fallbacks cycled with the `i` key.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum IconStyle {
     Nerd,
     Unicode,
@@ -71,26 +74,26 @@ pub fn file_icon(path: &str, style: IconStyle) -> &'static str {
     }
     let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
     match ext {
-        "rs" => "\u{e7a8}",                                   //
-        "go" => "\u{e627}",                                   //
-        "py" => "\u{e606}",                                   //
-        "js" | "mjs" | "cjs" => "\u{e74e}",                   //
-        "ts" => "\u{e628}",                                   //
-        "jsx" | "tsx" => "\u{e7ba}",                          //
-        "json" => "\u{e60b}",                                 //
-        "toml" => "\u{e6b2}",                                 //
-        "yaml" | "yml" => "\u{e615}",                         //
-        "md" | "markdown" => "\u{e73e}",                      //
-        "sh" | "bash" | "zsh" | "fish" => "\u{e795}",         //
-        "c" => "\u{e61e}",                                    //
-        "h" | "hpp" => "\u{f0fd}",                            //
-        "cpp" | "cc" | "cxx" => "\u{e61d}",                   //
-        "html" | "htm" => "\u{e736}",                         //
-        "css" => "\u{e749}",                                  //
-        "scss" | "sass" => "\u{e603}",                        //
+        "rs" => "\u{e7a8}",                                            //
+        "go" => "\u{e627}",                                            //
+        "py" => "\u{e606}",                                            //
+        "js" | "mjs" | "cjs" => "\u{e74e}",                            //
+        "ts" => "\u{e628}",                                            //
+        "jsx" | "tsx" => "\u{e7ba}",                                   //
+        "json" => "\u{e60b}",                                          //
+        "toml" => "\u{e6b2}",                                          //
+        "yaml" | "yml" => "\u{e615}",                                  //
+        "md" | "markdown" => "\u{e73e}",                               //
+        "sh" | "bash" | "zsh" | "fish" => "\u{e795}",                  //
+        "c" => "\u{e61e}",                                             //
+        "h" | "hpp" => "\u{f0fd}",                                     //
+        "cpp" | "cc" | "cxx" => "\u{e61d}",                            //
+        "html" | "htm" => "\u{e736}",                                  //
+        "css" => "\u{e749}",                                           //
+        "scss" | "sass" => "\u{e603}",                                 //
         "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" => "\u{f1c5}", //
-        "lock" => "\u{f023}",                                 //
-        "txt" | "text" => "\u{f0f6}",                         //
-        _ => "\u{f15b}",                                      //  default file
+        "lock" => "\u{f023}",                                          //
+        "txt" | "text" => "\u{f0f6}",                                  //
+        _ => "\u{f15b}",                                               //  default file
     }
 }

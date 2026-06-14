@@ -9,13 +9,13 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
 
+use crate::config::Config;
 use crate::delta::RenderCache;
 use crate::diff::FileDiff;
 use crate::icons::IconStyle;
 use crate::tree::{self, Node, Row, RowKind};
+use crate::watch::Watch;
 
-/// Total width of the file-tree pane, including its 1-column right border.
-pub const TREE_WIDTH: u16 = 32;
 const MIN_DIFF_WIDTH: u16 = 20;
 const HALF_PAGE: i32 = 15;
 
@@ -42,6 +42,9 @@ pub struct App {
     pub diff_scroll: u16,
     pub side_by_side: bool,
     pub show_tree: bool,
+    pub show_header: bool,
+    pub show_footer: bool,
+    pub tree_width: u16,
     pub focus: Focus,
     pub show_help: bool,
     pub status: Option<String>,
@@ -54,12 +57,13 @@ pub struct App {
     last_width: u16,
     quit: bool,
     pending_editor: Option<String>,
+    watch: Option<Watch>,
 }
 
 impl App {
-    pub fn new(files: Vec<FileDiff>, side_by_side: bool, config_sbs: bool) -> Self {
+    pub fn new(files: Vec<FileDiff>, side_by_side: bool, config_sbs: bool, cfg: &Config) -> Self {
         let nodes = tree::build(&files);
-        let collapsed = HashSet::new();
+        let collapsed = tree::initial_collapsed(&nodes, cfg.open_depth);
         let rows = tree::flatten(&nodes, &collapsed);
         let first_file = rows
             .iter()
@@ -74,11 +78,18 @@ impl App {
             tree_state,
             diff_scroll: 0,
             side_by_side,
-            show_tree: true,
-            focus: Focus::Tree,
+            show_tree: cfg.show_tree,
+            show_header: cfg.show_header,
+            show_footer: cfg.show_footer,
+            tree_width: cfg.tree_width.max(MIN_DIFF_WIDTH),
+            focus: if cfg.show_tree {
+                Focus::Tree
+            } else {
+                Focus::Diff
+            },
             show_help: false,
             status: None,
-            icon_style: IconStyle::Nerd,
+            icon_style: cfg.icon_style,
             finder: None,
             cache: RenderCache::new(config_sbs),
             matcher: SkimMatcherV2::default(),
@@ -87,7 +98,23 @@ impl App {
             last_width: 0,
             quit: false,
             pending_editor: None,
+            watch: None,
         }
+    }
+
+    /// Turn on watch mode: refresh the diff when the working tree changes.
+    pub fn enable_watch(
+        &mut self,
+        cmd: String,
+        interval: Duration,
+        initial_diff: String,
+    ) -> Result<()> {
+        self.watch = Some(Watch::new(cmd, interval, initial_diff)?);
+        Ok(())
+    }
+
+    pub fn is_watching(&self) -> bool {
+        self.watch.is_some()
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -114,7 +141,12 @@ impl App {
             }
 
             terminal.draw(|frame| crate::ui::draw(frame, self, diff_width))?;
-            self.handle_event()?;
+
+            if self.watch.is_some() {
+                self.watch_tick()?;
+            } else {
+                self.handle_event()?;
+            }
 
             // Suspending the TUI to run an editor needs the owned terminal.
             if let Some(path) = self.pending_editor.take() {
@@ -124,8 +156,59 @@ impl App {
         Ok(())
     }
 
+    /// One watch-mode iteration: wait briefly for input, then service any due
+    /// reload. The bounded wait keeps filesystem changes responsive even when no
+    /// key is pressed.
+    fn watch_tick(&mut self) -> Result<()> {
+        let timeout = self.watch.as_ref().expect("watch present").poll_timeout();
+        if event::poll(timeout)? {
+            self.handle_event()?;
+        }
+        match self.watch.as_mut().expect("watch present").poll_reload() {
+            Some(Ok(text)) => {
+                let files = crate::diff::parse(&text);
+                self.reload_files(files);
+            }
+            Some(Err(e)) => self.status = Some(format!("watch error: {e}")),
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// Swap in a freshly parsed file set (a watch refresh), rebuilding the tree
+    /// while preserving the selected file by path where it still exists.
+    fn reload_files(&mut self, files: Vec<FileDiff>) {
+        let prev_path = self
+            .selected_file()
+            .map(|i| self.files[i].path().to_string());
+
+        self.files = files;
+        self.nodes = tree::build(&self.files);
+        self.rows = tree::flatten(&self.nodes, &self.collapsed);
+        self.cache.clear();
+        self.last_width = 0; // force a re-render at the next draw
+        self.finder = None; // indices changed; a stale finder would mislead
+
+        let target = prev_path
+            .as_deref()
+            .and_then(|p| self.files.iter().position(|f| f.path() == p))
+            .and_then(|di| {
+                self.rows.iter().position(
+                    |r| matches!(r.kind, RowKind::File { diff_index } if diff_index == di),
+                )
+            })
+            .or_else(|| {
+                self.rows
+                    .iter()
+                    .position(|r| matches!(r.kind, RowKind::File { .. }))
+            });
+        self.tree_state.select(Some(target.unwrap_or(0)));
+        self.diff_scroll = 0;
+        self.status = Some(format!("↻ refreshed · {} files", self.files.len()));
+    }
+
     fn diff_pane_width(&self, total: u16) -> u16 {
-        let used = if self.show_tree { TREE_WIDTH } else { 0 };
+        let used = if self.show_tree { self.tree_width } else { 0 };
         total.saturating_sub(used).max(MIN_DIFF_WIDTH)
     }
 
@@ -183,7 +266,10 @@ impl App {
     /// Expand/collapse the selected directory and re-flatten the visible rows.
     fn toggle_fold(&mut self) {
         let path = match self.rows.get(self.selected_index()) {
-            Some(Row { kind: RowKind::Dir { path, .. }, .. }) => path.clone(),
+            Some(Row {
+                kind: RowKind::Dir { path, .. },
+                ..
+            }) => path.clone(),
             _ => return,
         };
         if !self.collapsed.remove(&path) {
@@ -234,7 +320,11 @@ impl App {
         let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
         let mut acc = String::new();
         for part in &parts[..parts.len().saturating_sub(1)] {
-            acc = if acc.is_empty() { part.to_string() } else { format!("{acc}/{part}") };
+            acc = if acc.is_empty() {
+                part.to_string()
+            } else {
+                format!("{acc}/{part}")
+            };
             self.collapsed.remove(&acc);
         }
         self.rows = tree::flatten(&self.nodes, &self.collapsed);
@@ -435,9 +525,13 @@ mod tests {
         }
     }
 
+    fn app_with(files: Vec<FileDiff>) -> App {
+        App::new(files, false, false, &Config::default())
+    }
+
     #[test]
     fn finder_empty_query_lists_all_files() {
-        let mut app = App::new(vec![file("a.rs"), file("b.rs")], false, false);
+        let mut app = app_with(vec![file("a.rs"), file("b.rs")]);
         app.open_finder();
         app.finder_recompute();
         assert_eq!(app.finder.as_ref().unwrap().matches.len(), 2);
@@ -445,8 +539,12 @@ mod tests {
 
     #[test]
     fn finder_ranks_best_match_first() {
-        let files = vec![file("src/main.rs"), file("src/diff/parser.rs"), file("README.md")];
-        let mut app = App::new(files, false, false);
+        let files = vec![
+            file("src/main.rs"),
+            file("src/diff/parser.rs"),
+            file("README.md"),
+        ];
+        let mut app = app_with(files);
         app.open_finder();
         for c in "parser".chars() {
             app.finder.as_mut().unwrap().query.push(c);
@@ -459,7 +557,7 @@ mod tests {
     #[test]
     fn reveal_file_expands_collapsed_ancestors() {
         let files = vec![file("src/diff/parser.rs")];
-        let mut app = App::new(files, false, false);
+        let mut app = app_with(files);
         app.collapsed.insert("src".to_string());
         app.collapsed.insert("src/diff".to_string());
         app.rows = tree::flatten(&app.nodes, &app.collapsed);
@@ -469,5 +567,44 @@ mod tests {
             app.rows[app.selected_index()].kind,
             RowKind::File { diff_index: 0 }
         ));
+    }
+
+    #[test]
+    fn reload_keeps_selection_by_path() {
+        let mut app = app_with(vec![file("a.rs"), file("b.rs"), file("c.rs")]);
+        // Select c.rs, then reload with the order shuffled and a file added.
+        let c_row = app
+            .rows
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::File { diff_index } if app.files[diff_index].path() == "c.rs"))
+            .unwrap();
+        app.tree_state.select(Some(c_row));
+        app.reload_files(vec![file("z.rs"), file("c.rs"), file("a.rs")]);
+        assert_eq!(
+            app.selected_file().map(|i| app.files[i].path()),
+            Some("c.rs")
+        );
+    }
+
+    #[test]
+    fn reload_falls_back_to_first_file_when_selection_gone() {
+        let mut app = app_with(vec![file("a.rs"), file("b.rs")]);
+        app.reload_files(vec![file("x.rs"), file("y.rs")]);
+        assert_eq!(
+            app.selected_file().map(|i| app.files[i].path()),
+            Some("x.rs")
+        );
+    }
+
+    #[test]
+    fn open_depth_collapses_deep_folders() {
+        // open_depth = 1: root dirs open, their subdirs collapsed.
+        let cfg = Config {
+            open_depth: 1,
+            ..Config::default()
+        };
+        let app = App::new(vec![file("src/diff/parser.rs")], false, false, &cfg);
+        assert!(!app.collapsed.contains("src"));
+        assert!(app.collapsed.contains("src/diff"));
     }
 }

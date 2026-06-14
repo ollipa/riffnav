@@ -7,23 +7,27 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::app::{App, Focus, TREE_WIDTH};
+use crate::app::{App, Focus};
 
 pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
     let tree_focused = app.focus == Focus::Tree;
     let diff_focused = app.focus == Focus::Diff;
 
+    // The header and footer collapse to zero rows when disabled in config.
+    let header_h = if app.show_header { 1 } else { 0 };
+    let footer_h = if app.show_footer { 1 } else { 0 };
     let [header, body, footer] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(header_h),
         Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(footer_h),
     ])
     .areas(frame.area());
 
     // The diff pane fills the body, minus the tree when it's shown.
     let diff_area = if app.show_tree {
         let [tree_area, diff_area] =
-            Layout::horizontal([Constraint::Length(TREE_WIDTH), Constraint::Min(0)]).areas(body);
+            Layout::horizontal([Constraint::Length(app.tree_width), Constraint::Min(0)])
+                .areas(body);
         filetree::render(frame, tree_area, app, tree_focused);
         diff_area
     } else {
@@ -33,10 +37,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
     let [diff_title, diff_body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(diff_area);
 
-    render_header(frame, header, app);
+    if app.show_header {
+        render_header(frame, header, app);
+    }
     render_diff_title(frame, diff_title, app, diff_focused);
     diffview::render(frame, diff_body, app, diff_width);
-    render_footer(frame, footer, app);
+    if app.show_footer {
+        render_footer(frame, footer, app);
+    }
 
     // Overlays (mutually exclusive): the finder takes precedence over help.
     if app.finder.is_some() {
@@ -48,8 +56,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     let (adds, dels) = app.totals();
-    let mode = if app.side_by_side { "side-by-side" } else { "unified" };
-    let line = Line::from(vec![
+    let mode = if app.side_by_side {
+        "side-by-side"
+    } else {
+        "unified"
+    };
+    let mut spans = vec![
         Span::styled(
             " riffnav ",
             Style::new().add_modifier(Modifier::BOLD | Modifier::REVERSED),
@@ -58,9 +70,15 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!("+{adds}"), Style::new().fg(Color::Green)),
         Span::raw("  "),
         Span::styled(format!("-{dels}"), Style::new().fg(Color::Red)),
-        Span::styled(format!("    {mode}"), Style::new().add_modifier(Modifier::DIM)),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+        Span::styled(
+            format!("    {mode}"),
+            Style::new().add_modifier(Modifier::DIM),
+        ),
+    ];
+    if app.is_watching() {
+        spans.push(Span::styled("   ● watch", Style::new().fg(Color::Green)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_diff_title(frame: &mut Frame, area: Rect, app: &App, focused: bool) {

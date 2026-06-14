@@ -1,0 +1,25 @@
+# riffnav configuration — copy to ~/.config/riffnav/config.toml
+# (or $XDG_CONFIG_HOME/riffnav/config.toml) and uncomment what you want to change.
+# Every key is optional; omitted keys use the defaults shown here. CLI flags
+# (e.g. -s/-u) override anything set here.
+
+# Initial layout. Omit to follow your `delta.side-by-side` git config default.
+# side_by_side = false
+
+# File-tree glyphs: "nerd" (needs a Nerd Font) | "unicode" | "ascii".
+# icon_style = "nerd"
+
+# Columns reserved for the file-tree pane, including its right border.
+# tree_width = 32
+
+# Show the file tree on launch (toggle at runtime with `e`).
+# show_tree = true
+
+# Show the top summary bar / bottom hint bar.
+# show_header = true
+# show_footer = true
+
+# Expand folders shallower than this depth on launch; deeper folders start
+# collapsed. The large default expands everything; set e.g. 1 to collapse
+# nested directories by default.
+# open_depth = 64
