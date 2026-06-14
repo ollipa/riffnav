@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
@@ -20,6 +22,8 @@ pub struct App {
     pub side_by_side: Option<bool>,
     pub cache: RenderCache,
     quit: bool,
+    // Diff-pane width of the last render; a change means the terminal resized.
+    last_width: u16,
     // Retained so collapsible folders (Phase 3) can re-flatten into `rows`.
     #[allow(dead_code)]
     nodes: Vec<Node>,
@@ -44,6 +48,7 @@ impl App {
             side_by_side,
             cache: RenderCache::default(),
             quit: false,
+            last_width: 0,
             nodes,
         }
     }
@@ -60,6 +65,13 @@ impl App {
     fn event_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
             let diff_width = diff_pane_width(terminal.size()?.width);
+
+            // On resize, drop renders made at the old width so the cache stays
+            // bounded and the current file re-renders to the new width.
+            if diff_width != self.last_width {
+                self.cache.clear();
+                self.last_width = diff_width;
+            }
 
             // Render the selected file (lazily, cached) before drawing.
             if let Some(idx) = self.selected_file() {
@@ -91,20 +103,45 @@ impl App {
             .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions))
     }
 
+    fn select(&mut self, index: usize) {
+        if index != self.selected_index() {
+            self.tree_state.select(Some(index));
+            self.diff_scroll = 0;
+        }
+    }
+
+    /// Move the selection by `delta` rows (directories included).
     fn move_selection(&mut self, delta: isize) {
         if self.rows.is_empty() {
             return;
         }
         let max = self.rows.len() as isize - 1;
-        let next = (self.selected_index() as isize + delta).clamp(0, max) as usize;
-        if next != self.selected_index() {
-            self.tree_state.select(Some(next));
-            self.diff_scroll = 0;
+        self.select((self.selected_index() as isize + delta).clamp(0, max) as usize);
+    }
+
+    /// Jump to the next/previous file row, skipping directories.
+    fn jump_file(&mut self, forward: bool) {
+        let cur = self.selected_index();
+        let is_file = |i: &usize| matches!(self.rows[*i].kind, RowKind::File { .. });
+        let next = if forward {
+            (cur + 1..self.rows.len()).find(is_file)
+        } else {
+            (0..cur).rev().find(is_file)
+        };
+        if let Some(i) = next {
+            self.select(i);
         }
     }
 
     fn handle_event(&mut self) -> Result<()> {
-        let Event::Key(key) = event::read()? else {
+        let mut ev = event::read()?;
+        // Coalesce a burst of resize events (e.g. a drag) into the last one so
+        // we redraw once instead of thrashing delta at every intermediate width.
+        while matches!(ev, Event::Resize(..)) && event::poll(Duration::ZERO)? {
+            ev = event::read()?;
+        }
+
+        let Event::Key(key) = ev else {
             return Ok(());
         };
         if key.kind != KeyEventKind::Press {
@@ -116,6 +153,8 @@ impl App {
             KeyCode::Char('c') if ctrl => self.quit = true,
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
+            KeyCode::Char('n') => self.jump_file(true),
+            KeyCode::Char('p') | KeyCode::Char('N') => self.jump_file(false),
             KeyCode::Char('d') if ctrl => {
                 self.diff_scroll = self.diff_scroll.saturating_add(HALF_PAGE)
             }

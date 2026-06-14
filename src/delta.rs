@@ -99,4 +99,9 @@ impl RenderCache {
     pub fn get(&self, file: usize, width: u16, side_by_side: Option<bool>) -> Option<&Rendered> {
         self.entries.get(&Key { file, width, side_by_side })
     }
+
+    /// Drop all cached renders (e.g. after a resize changes the wrap width).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 }

@@ -26,7 +26,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                     ]))
                 }
                 RowKind::File { diff_index } => {
-                    let status = app.files[diff_index].status;
+                    let file = &app.files[diff_index];
+                    let status = file.status;
+                    let adds = format!("+{}", file.additions);
+                    let dels = format!("-{}", file.deletions);
+
+                    // Right-align the "+a -b" badge: pad between the name and badge.
+                    let inner = (area.width as usize).saturating_sub(1); // minus border
+                    let left = row.depth * 2 + 2 + row.name.chars().count();
+                    let badge = adds.len() + 1 + dels.len();
+                    let pad = inner.saturating_sub(left + badge).max(1);
+
                     ListItem::new(Line::from(vec![
                         Span::raw(indent),
                         Span::styled(
@@ -34,6 +44,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                             Style::new().fg(status_color(status)),
                         ),
                         Span::raw(row.name.clone()),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(adds, Style::new().fg(Color::Green).add_modifier(Modifier::DIM)),
+                        Span::raw(" "),
+                        Span::styled(dels, Style::new().fg(Color::Red).add_modifier(Modifier::DIM)),
                     ]))
                 }
             }
