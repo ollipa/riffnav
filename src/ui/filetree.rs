@@ -8,14 +8,14 @@ use crate::app::App;
 use crate::diff::FileStatus;
 use crate::tree::RowKind;
 
-pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
+pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     let items: Vec<ListItem> = app
         .rows
         .iter()
         .map(|row| {
             let indent = "  ".repeat(row.depth);
             match row.kind {
-                RowKind::Dir { expanded } => {
+                RowKind::Dir { expanded, .. } => {
                     let marker = if expanded { "▾" } else { "▸" };
                     ListItem::new(Line::from(vec![
                         Span::raw(indent),
@@ -54,8 +54,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
 
+    let border_style = if focused {
+        Style::new().fg(Color::Cyan)
+    } else {
+        Style::new().add_modifier(Modifier::DIM)
+    };
     let list = List::new(items)
-        .block(Block::new().borders(Borders::RIGHT))
+        .block(Block::new().borders(Borders::RIGHT).border_style(border_style))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
     frame.render_stateful_widget(list, area, &mut app.tree_state);

@@ -32,6 +32,14 @@ fn main() -> Result<()> {
 
     delta::ensure_available()?;
 
-    let side_by_side = cli.side_by_side.then_some(true);
-    app::App::new(files, side_by_side).run()
+    // Initial layout: CLI flags win, else follow the user's delta config default.
+    let config_sbs = delta::detect_side_by_side();
+    let side_by_side = if cli.side_by_side {
+        true
+    } else if cli.unified {
+        false
+    } else {
+        config_sbs
+    };
+    app::App::new(files, side_by_side, config_sbs).run()
 }

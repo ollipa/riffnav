@@ -19,18 +19,37 @@ pub fn ensure_available() -> Result<()> {
     }
 }
 
+/// Whether the user's gitconfig turns on `delta.side-by-side` by default. delta
+/// 0.19 has no per-invocation flag to force this *off*, so riffnav needs to know
+/// the default to decide how to render unified mode (see `run`).
+pub fn detect_side_by_side() -> bool {
+    Command::new("git")
+        .args(["config", "--get", "delta.side-by-side"])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Render one file's diff through delta and return its raw ANSI bytes.
 ///
 /// delta emits color even when its stdout is a pipe, so no force-color flag is
 /// needed; we only force truecolor and fix the wrap width to the diff pane.
-fn run(diff_text: &str, width: u16, side_by_side: Option<bool>) -> Result<Vec<u8>> {
+///
+/// `config_sbs` is the user's `delta.side-by-side` default. To render unified
+/// when that default is on, we must pass `--no-gitconfig` (delta exposes no
+/// `--side-by-side=false`); this keeps syntax highlighting but drops the user's
+/// custom theme. When the default is already unified we pass nothing and the
+/// theme is preserved.
+fn run(diff_text: &str, width: u16, side_by_side: bool, config_sbs: bool) -> Result<Vec<u8>> {
     let mut cmd = Command::new("delta");
     cmd.arg("--paging=never")
         .arg("--true-color=always")
         .arg("--width")
         .arg(width.to_string());
-    if side_by_side == Some(true) {
+    if side_by_side {
         cmd.arg("--side-by-side");
+    } else if config_sbs {
+        cmd.arg("--no-gitconfig");
     }
 
     let mut child = cmd
@@ -66,27 +85,27 @@ pub struct Rendered {
 struct Key {
     file: usize,
     width: u16,
-    side_by_side: Option<bool>,
+    side_by_side: bool,
 }
 
 /// Caches delta renders keyed by `(file, width, side_by_side)` so revisiting a
-/// file — or redrawing at the same size — never re-runs delta.
-#[derive(Default)]
+/// file — or redrawing at the same size — never re-runs delta. `config_sbs` is a
+/// session constant (the user's gitconfig default), so it isn't part of the key.
 pub struct RenderCache {
     entries: HashMap<Key, Rendered>,
+    config_sbs: bool,
 }
 
 impl RenderCache {
+    pub fn new(config_sbs: bool) -> Self {
+        Self { entries: HashMap::new(), config_sbs }
+    }
+
     /// Render `raw` for the given key if not already cached.
-    pub fn ensure(
-        &mut self,
-        file: usize,
-        raw: &str,
-        width: u16,
-        side_by_side: Option<bool>,
-    ) -> Result<()> {
+    pub fn ensure(&mut self, file: usize, raw: &str, width: u16, side_by_side: bool) -> Result<()> {
+        let config_sbs = self.config_sbs;
         if let Entry::Vacant(slot) = self.entries.entry(Key { file, width, side_by_side }) {
-            let bytes = run(raw, width, side_by_side)?;
+            let bytes = run(raw, width, side_by_side, config_sbs)?;
             let text = bytes
                 .into_text()
                 .context("converting delta output to ratatui text")?;
@@ -96,7 +115,7 @@ impl RenderCache {
         Ok(())
     }
 
-    pub fn get(&self, file: usize, width: u16, side_by_side: Option<bool>) -> Option<&Rendered> {
+    pub fn get(&self, file: usize, width: u16, side_by_side: bool) -> Option<&Rendered> {
         self.entries.get(&Key { file, width, side_by_side })
     }
 

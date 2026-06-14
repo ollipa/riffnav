@@ -9,9 +9,13 @@ use crate::diff::FileDiff;
     about = "A git diff pager with a file tree, powered by delta"
 )]
 pub struct Cli {
-    /// Force side-by-side view (otherwise your delta config decides).
-    #[arg(short = 's', long)]
+    /// Start in side-by-side view (default follows your delta config).
+    #[arg(short = 's', long, conflicts_with = "unified")]
     pub side_by_side: bool,
+
+    /// Start in unified view (default follows your delta config).
+    #[arg(short = 'u', long)]
+    pub unified: bool,
 
     /// Print the parsed file list and exit (debug; no TUI).
     #[arg(long, hide = true)]

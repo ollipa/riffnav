@@ -1,13 +1,13 @@
 use crate::diff::FileDiff;
 
-/// A node in the file tree. Directories own children; files point back at their
-/// index in the flat `Vec<FileDiff>`.
+/// A node in the file tree. Directories carry their full path (used as the key
+/// for expand/collapse state); files point back at their index in `Vec<FileDiff>`.
 #[derive(Debug)]
 pub enum Node {
     Dir {
         name: String,
+        path: String,
         children: Vec<Node>,
-        expanded: bool,
     },
     File {
         name: String,
@@ -20,13 +20,13 @@ pub fn build(files: &[FileDiff]) -> Vec<Node> {
     let mut roots = Vec::new();
     for (idx, file) in files.iter().enumerate() {
         let parts: Vec<&str> = file.path().split('/').filter(|p| !p.is_empty()).collect();
-        insert(&mut roots, &parts, idx);
+        insert(&mut roots, &parts, idx, "");
     }
     sort(&mut roots);
     roots
 }
 
-fn insert(nodes: &mut Vec<Node>, parts: &[&str], diff_index: usize) {
+fn insert(nodes: &mut Vec<Node>, parts: &[&str], diff_index: usize, parent: &str) {
     match parts {
         [] => {}
         [name] => nodes.push(Node::File {
@@ -34,6 +34,11 @@ fn insert(nodes: &mut Vec<Node>, parts: &[&str], diff_index: usize) {
             diff_index,
         }),
         [head, tail @ ..] => {
+            let path = if parent.is_empty() {
+                (*head).to_string()
+            } else {
+                format!("{parent}/{head}")
+            };
             let pos = nodes
                 .iter()
                 .position(|n| matches!(n, Node::Dir { name, .. } if name == head));
@@ -42,14 +47,14 @@ fn insert(nodes: &mut Vec<Node>, parts: &[&str], diff_index: usize) {
                 None => {
                     nodes.push(Node::Dir {
                         name: (*head).to_string(),
+                        path: path.clone(),
                         children: Vec::new(),
-                        expanded: true,
                     });
                     nodes.len() - 1
                 }
             };
             if let Node::Dir { children, .. } = &mut nodes[dir] {
-                insert(children, tail, diff_index);
+                insert(children, tail, diff_index, &path);
             }
         }
     }
@@ -98,8 +103,21 @@ mod tests {
     fn nests_and_sorts_dirs_before_files() {
         let files = vec![file("README.md"), file("src/main.rs"), file("src/diff/parser.rs")];
         let roots = build(&files);
-        // "src" dir sorts before "README.md" file.
         assert!(matches!(&roots[0], Node::Dir { name, .. } if name == "src"));
         assert!(matches!(&roots[1], Node::File { name, .. } if name == "README.md"));
+    }
+
+    #[test]
+    fn dirs_carry_full_paths() {
+        let files = vec![file("src/diff/parser.rs")];
+        let roots = build(&files);
+        let Node::Dir { path, children, .. } = &roots[0] else {
+            panic!("expected src dir");
+        };
+        assert_eq!(path, "src");
+        let Node::Dir { path, .. } = &children[0] else {
+            panic!("expected src/diff dir");
+        };
+        assert_eq!(path, "src/diff");
     }
 }
