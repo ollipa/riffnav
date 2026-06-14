@@ -22,29 +22,48 @@ Enter
 Sleep 1.5s
 Show
 
-# Walk the tree.
-Type@400ms "jjj"
+# Walk down the tree — the diff on the right updates as the selection moves.
+Type@450ms "jjj"
 Sleep 800ms
 
-# Fuzzy-find a file.
+# Jump to the top folder and fold / unfold it.
+Type@250ms "kkkkk"
+Sleep 500ms
+Enter
+Sleep 1s
+Enter
+Sleep 800ms
+
+# Fuzzy-find a file by name.
 Type "/"
 Sleep 500ms
-Type@150ms "parser"
+Type@150ms "stats"
 Sleep 800ms
 Enter
 Sleep 1s
 
-# Scroll the diff, flip to side-by-side, back.
+# Focus the diff and scroll it.
 Tab
-Type@120ms "dddd"
-Sleep 800ms
+Sleep 400ms
+Ctrl+D
+Sleep 700ms
+Ctrl+D
+Sleep 700ms
+Ctrl+U
+Sleep 700ms
+
+# Flip to side-by-side and back, then cycle icon styles.
 Type "s"
 Sleep 1.5s
 Type "s"
 Sleep 800ms
+Type "i"
+Sleep 1s
 
-# Help overlay, then quit.
+# Show the help overlay, close it, and quit.
 Type "?"
 Sleep 1.5s
+Escape
+Sleep 400ms
 Type "q"
 Sleep 500ms
