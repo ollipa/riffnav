@@ -2,6 +2,7 @@ mod app;
 mod cli;
 mod delta;
 mod diff;
+mod icons;
 mod tree;
 mod ui;
 

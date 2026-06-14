@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::app::{App, Focus, TREE_WIDTH};
 
@@ -38,7 +38,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
     diffview::render(frame, diff_body, app, diff_width);
     render_footer(frame, footer, app);
 
-    if app.show_help {
+    // Overlays (mutually exclusive): the finder takes precedence over help.
+    if app.finder.is_some() {
+        render_finder(frame, frame.area(), app);
+    } else if app.show_help {
         render_help(frame, frame.area());
     }
 }
@@ -76,7 +79,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let (text, style) = match &app.status {
         Some(status) => (format!(" {status} "), Style::new().fg(Color::Yellow)),
         None => (
-            " j/k · n/p file · Ctrl-d/u scroll · Tab focus · ?: help · q: quit ".to_string(),
+            " j/k · n/p file · t: find · Tab focus · ?: help · q: quit ".to_string(),
             Style::new().add_modifier(Modifier::DIM),
         ),
     };
@@ -91,8 +94,10 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ("g / G", "top / bottom of diff"),
         ("Enter / Space", "expand / collapse folder"),
         ("Tab", "switch focus tree <-> diff"),
+        ("t / /", "fuzzy find a file"),
         ("s", "toggle side-by-side / unified"),
         ("e", "toggle file tree"),
+        ("i", "cycle icon style (nerd/unicode/ascii)"),
         ("y", "copy file path"),
         ("o", "open file in $EDITOR"),
         ("?", "toggle this help"),
@@ -116,6 +121,58 @@ fn render_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" Keybindings (?/Esc to close) ")),
         popup,
+    );
+}
+
+fn render_finder(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(finder) = &app.finder else {
+        return;
+    };
+
+    let popup = centered_rect(72, 18, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered().title(format!(
+        " Find file ({} matches · Enter open · Esc cancel) ",
+        finder.matches.len()
+    ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let [query_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("› ", Style::new().fg(Color::Cyan)),
+            Span::raw(&finder.query),
+            Span::styled("▏", Style::new().add_modifier(Modifier::SLOW_BLINK)),
+        ])),
+        query_area,
+    );
+
+    let items: Vec<ListItem> = finder
+        .matches
+        .iter()
+        .map(|&i| {
+            let file = &app.files[i];
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{} ", file.status.sigil()),
+                    Style::new().fg(filetree::status_color(file.status)),
+                ),
+                Span::raw(file.path().to_string()),
+            ]))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    if !finder.matches.is_empty() {
+        state.select(Some(finder.selected));
+    }
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        list_area,
+        &mut state,
     );
 }
 

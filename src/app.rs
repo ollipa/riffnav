@@ -4,11 +4,14 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
 
 use crate::delta::RenderCache;
 use crate::diff::FileDiff;
+use crate::icons::IconStyle;
 use crate::tree::{self, Node, Row, RowKind};
 
 /// Total width of the file-tree pane, including its 1-column right border.
@@ -23,6 +26,15 @@ pub enum Focus {
     Diff,
 }
 
+/// State of the fuzzy file-finder overlay.
+pub struct Finder {
+    pub query: String,
+    /// File indices that match `query`, best first.
+    pub matches: Vec<usize>,
+    /// Index into `matches` of the highlighted row.
+    pub selected: usize,
+}
+
 pub struct App {
     pub files: Vec<FileDiff>,
     pub rows: Vec<Row>,
@@ -33,7 +45,10 @@ pub struct App {
     pub focus: Focus,
     pub show_help: bool,
     pub status: Option<String>,
+    pub icon_style: IconStyle,
+    pub finder: Option<Finder>,
     pub cache: RenderCache,
+    matcher: SkimMatcherV2,
     nodes: Vec<Node>,
     collapsed: HashSet<String>,
     last_width: u16,
@@ -63,7 +78,10 @@ impl App {
             focus: Focus::Tree,
             show_help: false,
             status: None,
+            icon_style: IconStyle::Nerd,
+            finder: None,
             cache: RenderCache::new(config_sbs),
+            matcher: SkimMatcherV2::default(),
             nodes,
             collapsed,
             last_width: 0,
@@ -177,6 +195,59 @@ impl App {
             .select(Some(sel.min(self.rows.len().saturating_sub(1))));
     }
 
+    fn open_finder(&mut self) {
+        self.finder = Some(Finder {
+            query: String::new(),
+            matches: (0..self.files.len()).collect(),
+            selected: 0,
+        });
+    }
+
+    /// Recompute finder matches after the query changes.
+    fn finder_recompute(&mut self) {
+        let query = match &self.finder {
+            Some(f) => f.query.clone(),
+            None => return,
+        };
+        let matches: Vec<usize> = if query.is_empty() {
+            (0..self.files.len()).collect()
+        } else {
+            let mut scored: Vec<(i64, usize)> = self
+                .files
+                .iter()
+                .enumerate()
+                .filter_map(|(i, f)| self.matcher.fuzzy_match(f.path(), &query).map(|s| (s, i)))
+                .collect();
+            scored.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
+            scored.into_iter().map(|(_, i)| i).collect()
+        };
+        if let Some(f) = self.finder.as_mut() {
+            f.selected = f.selected.min(matches.len().saturating_sub(1));
+            f.matches = matches;
+        }
+    }
+
+    /// Select a file by diff index, expanding any collapsed ancestor folders so
+    /// its row is visible. Used when jumping from the finder.
+    fn reveal_file(&mut self, diff_index: usize) {
+        let path = self.files[diff_index].path().to_string();
+        let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+        let mut acc = String::new();
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            acc = if acc.is_empty() { part.to_string() } else { format!("{acc}/{part}") };
+            self.collapsed.remove(&acc);
+        }
+        self.rows = tree::flatten(&self.nodes, &self.collapsed);
+        if let Some(i) = self
+            .rows
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::File { diff_index: d } if d == diff_index))
+        {
+            self.tree_state.select(Some(i));
+            self.diff_scroll = 0;
+        }
+    }
+
     fn copy_path(&mut self) {
         let Some(idx) = self.selected_file() else {
             self.status = Some("No file selected to copy".into());
@@ -224,6 +295,63 @@ impl App {
             return Ok(());
         }
 
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // The fuzzy finder captures all input while open.
+        if self.finder.is_some() {
+            match key.code {
+                KeyCode::Esc => self.finder = None,
+                KeyCode::Enter => {
+                    let target = self
+                        .finder
+                        .as_ref()
+                        .and_then(|f| f.matches.get(f.selected).copied());
+                    self.finder = None;
+                    if let Some(idx) = target {
+                        self.reveal_file(idx);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(f) = self.finder.as_mut() {
+                        f.query.pop();
+                    }
+                    self.finder_recompute();
+                }
+                KeyCode::Up => {
+                    if let Some(f) = self.finder.as_mut() {
+                        f.selected = f.selected.saturating_sub(1);
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(f) = self.finder.as_mut()
+                        && f.selected + 1 < f.matches.len()
+                    {
+                        f.selected += 1;
+                    }
+                }
+                KeyCode::Char('p') if ctrl => {
+                    if let Some(f) = self.finder.as_mut() {
+                        f.selected = f.selected.saturating_sub(1);
+                    }
+                }
+                KeyCode::Char('n') if ctrl => {
+                    if let Some(f) = self.finder.as_mut()
+                        && f.selected + 1 < f.matches.len()
+                    {
+                        f.selected += 1;
+                    }
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    if let Some(f) = self.finder.as_mut() {
+                        f.query.push(c);
+                    }
+                    self.finder_recompute();
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // The help overlay swallows all input until dismissed.
         if self.show_help {
             if matches!(
@@ -236,7 +364,6 @@ impl App {
         }
 
         self.status = None;
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if ctrl => self.quit = true,
@@ -274,6 +401,11 @@ impl App {
                     self.focus = Focus::Diff;
                 }
             }
+            KeyCode::Char('t') | KeyCode::Char('/') => self.open_finder(),
+            KeyCode::Char('i') => {
+                self.icon_style = self.icon_style.next();
+                self.status = Some(format!("Icons: {}", self.icon_style.name()));
+            }
             KeyCode::Char('y') => self.copy_path(),
             KeyCode::Char('o') => {
                 if let Some(idx) = self.selected_file() {
@@ -284,5 +416,58 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::FileStatus;
+
+    fn file(path: &str) -> FileDiff {
+        FileDiff {
+            old_path: None,
+            new_path: Some(path.to_string()),
+            status: FileStatus::Modified,
+            additions: 0,
+            deletions: 0,
+            raw: String::new(),
+        }
+    }
+
+    #[test]
+    fn finder_empty_query_lists_all_files() {
+        let mut app = App::new(vec![file("a.rs"), file("b.rs")], false, false);
+        app.open_finder();
+        app.finder_recompute();
+        assert_eq!(app.finder.as_ref().unwrap().matches.len(), 2);
+    }
+
+    #[test]
+    fn finder_ranks_best_match_first() {
+        let files = vec![file("src/main.rs"), file("src/diff/parser.rs"), file("README.md")];
+        let mut app = App::new(files, false, false);
+        app.open_finder();
+        for c in "parser".chars() {
+            app.finder.as_mut().unwrap().query.push(c);
+        }
+        app.finder_recompute();
+        let best = app.finder.as_ref().unwrap().matches[0];
+        assert_eq!(app.files[best].path(), "src/diff/parser.rs");
+    }
+
+    #[test]
+    fn reveal_file_expands_collapsed_ancestors() {
+        let files = vec![file("src/diff/parser.rs")];
+        let mut app = App::new(files, false, false);
+        app.collapsed.insert("src".to_string());
+        app.collapsed.insert("src/diff".to_string());
+        app.rows = tree::flatten(&app.nodes, &app.collapsed);
+        app.reveal_file(0);
+        // The file's row is now visible and selected.
+        assert!(matches!(
+            app.rows[app.selected_index()].kind,
+            RowKind::File { diff_index: 0 }
+        ));
     }
 }
