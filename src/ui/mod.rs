@@ -118,6 +118,7 @@ fn render_help(frame: &mut Frame, area: Rect, in_herdr: bool) {
         ("j / k", "move selection / scroll diff (per focus)"),
         ("n / p", "next / previous file"),
         ("Ctrl-d / Ctrl-u", "scroll diff half page"),
+        ("PgDn / PgUp", "page down / up (per focus)"),
         ("g / G", "top / bottom of diff"),
         ("Enter / Space", "expand / collapse folder"),
         ("Tab / ← / →", "switch focus tree <-> diff"),

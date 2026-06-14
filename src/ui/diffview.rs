@@ -7,6 +7,9 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::app::App;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
+    // Record the viewport height so PageUp/PageDown can jump by a screenful.
+    app.diff_height = area.height;
+
     let Some(idx) = app.selected_file() else {
         placeholder(
             frame,

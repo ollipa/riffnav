@@ -60,6 +60,7 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `j` / `k` (or `↑` / `↓`) | Move selection (tree) / scroll (diff), per focus |
 | `n` / `p` (or `N`) | Next / previous file |
 | `Ctrl-d` / `Ctrl-u` | Scroll diff half a page |
+| `PgDn` / `PgUp` | Page down / up (scroll diff or move tree, per focus) |
 | `g` / `G` | Top / bottom of the diff |
 | `Enter` / `Space` | Expand / collapse the selected folder |
 | `Tab` | Switch focus between tree and diff |

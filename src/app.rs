@@ -43,6 +43,8 @@ pub struct App {
     pub rows: Vec<Row>,
     pub tree_state: ListState,
     pub diff_scroll: u16,
+    /// Height of the diff viewport at the last render, used to size page jumps.
+    pub diff_height: u16,
     pub side_by_side: bool,
     pub show_tree: bool,
     pub show_header: bool,
@@ -83,6 +85,7 @@ impl App {
             rows,
             tree_state,
             diff_scroll: 0,
+            diff_height: 0,
             side_by_side,
             show_tree: cfg.show_tree,
             show_header: cfg.show_header,
@@ -334,6 +337,23 @@ impl App {
         self.diff_scroll = (self.diff_scroll as i32 + delta).max(0) as u16;
     }
 
+    /// One PageUp/PageDown step: the diff viewport height less a line of overlap,
+    /// so a line of context carries across the jump. At least one line.
+    fn page(&self) -> i32 {
+        i32::from(self.diff_height.saturating_sub(1)).max(1)
+    }
+
+    /// Page through the focused pane — scroll the diff, or jump the tree
+    /// selection, by roughly one screenful.
+    fn page_move(&mut self, down: bool) {
+        let delta = if down { self.page() } else { -self.page() };
+        if self.focus == Focus::Tree {
+            self.move_selection(delta as isize);
+        } else {
+            self.scroll_diff(delta);
+        }
+    }
+
     /// Expand/collapse the selected directory and re-flatten the visible rows.
     fn toggle_fold(&mut self) {
         let path = match self.rows.get(self.selected_index()) {
@@ -546,6 +566,8 @@ impl App {
             KeyCode::Char('p') | KeyCode::Char('N') => self.jump_file(false),
             KeyCode::Char('d') if ctrl => self.scroll_diff(HALF_PAGE),
             KeyCode::Char('u') if ctrl => self.scroll_diff(-HALF_PAGE),
+            KeyCode::PageDown => self.page_move(true),
+            KeyCode::PageUp => self.page_move(false),
             KeyCode::Char('g') => self.diff_scroll = 0,
             KeyCode::Char('G') => self.diff_scroll = u16::MAX, // clamped on draw
             KeyCode::Enter | KeyCode::Char(' ') => self.toggle_fold(),
@@ -702,5 +724,27 @@ mod tests {
         app.expire_status();
         assert!(app.status.is_none());
         assert!(app.status_deadline.is_none());
+    }
+
+    #[test]
+    fn page_keys_scroll_diff_by_a_screenful() {
+        let mut app = app_with(vec![file("a.rs")]);
+        app.focus = Focus::Diff;
+        app.diff_height = 20;
+
+        // PageDown advances by the viewport height less a line of overlap.
+        app.page_move(true);
+        assert_eq!(app.diff_scroll, 19);
+
+        // PageUp comes back and never scrolls above the top.
+        app.page_move(false);
+        assert_eq!(app.diff_scroll, 0);
+    }
+
+    #[test]
+    fn page_is_at_least_one_line() {
+        // Before the first render diff_height is 0; a page must still advance.
+        let app = app_with(vec![file("a.rs")]);
+        assert_eq!(app.page(), 1);
     }
 }
