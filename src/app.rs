@@ -66,6 +66,9 @@ pub struct App {
     pending_editor: Option<String>,
     watch: Option<Watch>,
     herdr: Option<Herdr>,
+    /// Whether we've zoomed our own herdr pane, so we can restore it on exit
+    /// rather than leaving herdr maximized behind us.
+    zoomed: bool,
     /// When set, the current `status` clears itself once this instant passes.
     status_deadline: Option<Instant>,
 }
@@ -113,6 +116,7 @@ impl App {
             pending_editor: None,
             watch: None,
             herdr: None,
+            zoomed: false,
             status_deadline: None,
         }
     }
@@ -167,8 +171,10 @@ impl App {
     fn toggle_herdr_zoom(&mut self) {
         let Some(herdr) = &self.herdr else { return };
         let msg = match herdr.toggle_zoom() {
-            Ok(Some(true)) => "⊕ Zoomed".to_string(),
-            Ok(Some(false)) => "⊖ Unzoomed".to_string(),
+            Ok(Some(zoomed)) => {
+                self.zoomed = zoomed;
+                if zoomed { "⊕ Zoomed" } else { "⊖ Unzoomed" }.to_string()
+            }
             Ok(None) => "⧉ Zoom toggled".to_string(),
             // `{e:#}` includes the cause chain, not just the top-level context.
             Err(e) => format!("herdr: {e:#}"),
@@ -176,10 +182,24 @@ impl App {
         self.set_status(msg);
     }
 
+    /// Undo a zoom we toggled on, so closing riffnav leaves herdr's layout the
+    /// way we found it. Best-effort: we're shutting down, so a herdr error is
+    /// ignored rather than surfaced.
+    fn restore_herdr_zoom(&mut self) {
+        if !self.zoomed {
+            return;
+        }
+        if let Some(herdr) = &self.herdr {
+            let _ = herdr.toggle_zoom();
+        }
+        self.zoomed = false;
+    }
+
     pub fn run(&mut self) -> Result<()> {
         let mut terminal = ratatui::init();
         let result = self.event_loop(&mut terminal);
         ratatui::restore();
+        self.restore_herdr_zoom();
         result
     }
 

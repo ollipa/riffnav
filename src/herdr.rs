@@ -57,7 +57,7 @@ impl Herdr {
         if let Some(err) = resp.error {
             bail!("{}", err.message);
         }
-        Ok(resp.result.and_then(|r| r.zoomed))
+        Ok(resp.result.and_then(|r| r.zoom).and_then(|z| z.zoomed))
     }
 
     /// Send one newline-delimited JSON request and read the JSON response.
@@ -102,7 +102,15 @@ struct Response {
 
 #[derive(Deserialize)]
 struct ZoomResult {
-    /// Absent or null for no-op toggles, so the new state can be unknown.
+    /// herdr nests the zoom payload one level down under `zoom`; absent on
+    /// responses that don't carry one.
+    zoom: Option<ZoomState>,
+}
+
+#[derive(Deserialize)]
+struct ZoomState {
+    /// The pane's zoom state after the toggle. Absent or null for no-op toggles
+    /// (e.g. a lone pane), so the new state can be unknown.
     zoomed: Option<bool>,
 }
 
@@ -216,7 +224,7 @@ mod socket_tests {
         let dir = temp_dir("zoomed");
         let herdr = fake_herdr(
             &dir,
-            r#"{"id":"riffnav-zoom","result":{"type":"pane_zoom","zoomed":true}}"#,
+            r#"{"id":"riffnav-zoom","result":{"type":"pane_zoom","zoom":{"changed":true,"zoomed":true,"pane_id":"w1-1"}}}"#,
         );
         assert_eq!(herdr.toggle_zoom().unwrap(), Some(true));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -227,7 +235,7 @@ mod socket_tests {
         let dir = temp_dir("unzoomed");
         let herdr = fake_herdr(
             &dir,
-            r#"{"id":"riffnav-zoom","result":{"type":"pane_zoom","zoomed":false}}"#,
+            r#"{"id":"riffnav-zoom","result":{"type":"pane_zoom","zoom":{"changed":true,"zoomed":false,"pane_id":"w1-1"}}}"#,
         );
         assert_eq!(herdr.toggle_zoom().unwrap(), Some(false));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -252,7 +260,7 @@ mod socket_tests {
         let dir = temp_dir("multiline");
         let herdr = fake_herdr(
             &dir,
-            "{\n  \"id\": \"riffnav-zoom\",\n  \"result\": {\n    \"type\": \"pane_zoom\",\n    \"zoomed\": true,\n    \"layout\": { \"panes\": [\"1-1\"] }\n  }\n}",
+            "{\n  \"id\": \"riffnav-zoom\",\n  \"result\": {\n    \"type\": \"pane_zoom\",\n    \"zoom\": {\n      \"zoomed\": true,\n      \"layout\": { \"panes\": [\"1-1\"] }\n    }\n  }\n}",
         );
         assert_eq!(herdr.toggle_zoom().unwrap(), Some(true));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -263,7 +271,7 @@ mod socket_tests {
         let dir = temp_dir("noop");
         let herdr = fake_herdr(
             &dir,
-            r#"{"id":"riffnav-zoom","result":{"type":"pane_zoom","reason":"single_pane"}}"#,
+            r#"{"id":"riffnav-zoom","result":{"type":"pane_zoom","zoom":{"changed":false,"reason":"single_pane"}}}"#,
         );
         assert_eq!(herdr.toggle_zoom().unwrap(), None);
         std::fs::remove_dir_all(&dir).unwrap();
