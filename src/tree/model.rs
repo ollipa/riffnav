@@ -101,7 +101,11 @@ mod tests {
 
     #[test]
     fn nests_and_sorts_dirs_before_files() {
-        let files = vec![file("README.md"), file("src/main.rs"), file("src/diff/parser.rs")];
+        let files = vec![
+            file("README.md"),
+            file("src/main.rs"),
+            file("src/diff/parser.rs"),
+        ];
         let roots = build(&files);
         assert!(matches!(&roots[0], Node::Dir { name, .. } if name == "src"));
         assert!(matches!(&roots[1], Node::File { name, .. } if name == "README.md"));

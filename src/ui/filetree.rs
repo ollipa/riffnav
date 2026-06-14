@@ -37,7 +37,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                     let dels = format!("-{}", file.deletions);
 
                     // Right-align the "+a -b" badge: pad between the name and badge.
-                    let icon_w = if icon.is_empty() { 0 } else { icon.chars().count() + 1 };
+                    let icon_w = if icon.is_empty() {
+                        0
+                    } else {
+                        icon.chars().count() + 1
+                    };
                     let left = row.depth * 2 + 2 + icon_w + row.name.chars().count();
                     let badge = adds.len() + 1 + dels.len();
                     let pad = inner.saturating_sub(left + badge).max(1);
@@ -75,7 +79,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
         Style::new().add_modifier(Modifier::DIM)
     };
     let list = List::new(items)
-        .block(Block::new().borders(Borders::RIGHT).border_style(border_style))
+        .block(
+            Block::new()
+                .borders(Borders::RIGHT)
+                .border_style(border_style),
+        )
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
     frame.render_stateful_widget(list, area, &mut app.tree_state);

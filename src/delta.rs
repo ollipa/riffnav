@@ -11,7 +11,10 @@ use ratatui::text::Text;
 pub fn ensure_available() -> Result<()> {
     match Command::new("delta").arg("--version").output() {
         Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => bail!("`delta` failed to run: {}", String::from_utf8_lossy(&out.stderr)),
+        Ok(out) => bail!(
+            "`delta` failed to run: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
         Err(e) => bail!(
             "`delta` was not found on PATH ({e}).\n\
              riffnav renders diffs with delta — install it from https://github.com/dandavison/delta"
@@ -26,7 +29,11 @@ pub fn detect_side_by_side() -> bool {
     Command::new("git")
         .args(["config", "--get", "delta.side-by-side"])
         .output()
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().eq_ignore_ascii_case("true"))
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .eq_ignore_ascii_case("true")
+        })
         .unwrap_or(false)
 }
 
@@ -98,13 +105,20 @@ pub struct RenderCache {
 
 impl RenderCache {
     pub fn new(config_sbs: bool) -> Self {
-        Self { entries: HashMap::new(), config_sbs }
+        Self {
+            entries: HashMap::new(),
+            config_sbs,
+        }
     }
 
     /// Render `raw` for the given key if not already cached.
     pub fn ensure(&mut self, file: usize, raw: &str, width: u16, side_by_side: bool) -> Result<()> {
         let config_sbs = self.config_sbs;
-        if let Entry::Vacant(slot) = self.entries.entry(Key { file, width, side_by_side }) {
+        if let Entry::Vacant(slot) = self.entries.entry(Key {
+            file,
+            width,
+            side_by_side,
+        }) {
             let bytes = run(raw, width, side_by_side, config_sbs)?;
             let text = bytes
                 .into_text()
@@ -116,7 +130,11 @@ impl RenderCache {
     }
 
     pub fn get(&self, file: usize, width: u16, side_by_side: bool) -> Option<&Rendered> {
-        self.entries.get(&Key { file, width, side_by_side })
+        self.entries.get(&Key {
+            file,
+            width,
+            side_by_side,
+        })
     }
 
     /// Drop all cached renders (e.g. after a resize changes the wrap width).

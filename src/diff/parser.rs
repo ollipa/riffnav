@@ -111,13 +111,18 @@ fn side_path(s: &str) -> Option<String> {
     if s == "/dev/null" {
         return None;
     }
-    let s = s.strip_prefix("a/").or_else(|| s.strip_prefix("b/")).unwrap_or(s);
+    let s = s
+        .strip_prefix("a/")
+        .or_else(|| s.strip_prefix("b/"))
+        .unwrap_or(s);
     Some(s.to_string())
 }
 
 /// `Binary files a/x and b/y differ` -> (old, new) paths.
 fn binary_paths(line: &str) -> Option<(Option<String>, Option<String>)> {
-    let rest = line.strip_prefix("Binary files ")?.strip_suffix(" differ")?;
+    let rest = line
+        .strip_prefix("Binary files ")?
+        .strip_suffix(" differ")?;
     let (a, b) = rest.split_once(" and ")?;
     Some((side_path(a), side_path(b)))
 }

@@ -94,7 +94,12 @@ fn dump_mode(diff: &str) -> Result<()> {
     let styled_spans: usize = text
         .lines
         .iter()
-        .map(|l| l.spans.iter().filter(|s| s.style != Default::default()).count())
+        .map(|l| {
+            l.spans
+                .iter()
+                .filter(|s| s.style != Default::default())
+                .count()
+        })
         .sum();
 
     println!("--- spike --dump: delta + ansi-to-tui pipeline ---");

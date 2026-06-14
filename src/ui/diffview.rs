@@ -8,7 +8,11 @@ use crate::app::App;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
     let Some(idx) = app.selected_file() else {
-        placeholder(frame, area, "\n  Select a file in the tree to view its diff.");
+        placeholder(
+            frame,
+            area,
+            "\n  Select a file in the tree to view its diff.",
+        );
         return;
     };
 
