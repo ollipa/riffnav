@@ -42,6 +42,11 @@ pub fn detect_side_by_side() -> bool {
 /// delta emits color even when its stdout is a pipe, so no force-color flag is
 /// needed; we only force truecolor and fix the wrap width to the diff pane.
 ///
+/// `--wrap-max-lines unlimited` overrides delta's default of 2: without it a
+/// long line wraps at most twice and the rest is truncated with a `→` marker
+/// (very visible in side-by-side mode on prose-heavy files like markdown). We
+/// want every column preserved, wrapped onto as many rows as it needs.
+///
 /// `config_sbs` is the user's `delta.side-by-side` default. To render unified
 /// when that default is on, we must pass `--no-gitconfig` (delta exposes no
 /// `--side-by-side=false`); this keeps syntax highlighting but drops the user's
@@ -51,6 +56,8 @@ fn run(diff_text: &str, width: u16, side_by_side: bool, config_sbs: bool) -> Res
     let mut cmd = Command::new("delta");
     cmd.arg("--paging=never")
         .arg("--true-color=always")
+        .arg("--wrap-max-lines")
+        .arg("unlimited")
         .arg("--width")
         .arg(width.to_string());
     if side_by_side {
