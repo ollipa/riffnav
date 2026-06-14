@@ -204,3 +204,78 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
         height,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::diff::{FileDiff, FileStatus};
+    use crate::icons::IconStyle;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    fn file(path: &str, status: FileStatus, additions: u32, deletions: u32) -> FileDiff {
+        FileDiff {
+            old_path: None,
+            new_path: Some(path.to_string()),
+            status,
+            additions,
+            deletions,
+            raw: String::new(),
+        }
+    }
+
+    /// Render the buffer to plain text (symbols only, trailing space trimmed) so
+    /// snapshots are stable and readable regardless of styling.
+    fn buffer_text(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                line.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
+        out
+    }
+
+    fn sample_app(cfg: &Config) -> App {
+        let files = vec![
+            file("README.md", FileStatus::Modified, 3, 1),
+            file("src/main.rs", FileStatus::Modified, 12, 4),
+            file("src/diff/parser.rs", FileStatus::Added, 40, 0),
+        ];
+        App::new(files, false, false, cfg)
+    }
+
+    fn render(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let diff_width = width.saturating_sub(app.tree_width);
+        terminal.draw(|f| draw(f, app, diff_width)).unwrap();
+        buffer_text(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn renders_tree_and_layout() {
+        // ASCII icons keep the snapshot free of private-use glyphs.
+        let cfg = Config {
+            icon_style: IconStyle::Ascii,
+            ..Config::default()
+        };
+        let mut app = sample_app(&cfg);
+        insta::assert_snapshot!(render(&mut app, 64, 12));
+    }
+
+    #[test]
+    fn hides_tree_when_disabled() {
+        let cfg = Config {
+            icon_style: IconStyle::Ascii,
+            show_tree: false,
+            ..Config::default()
+        };
+        let mut app = sample_app(&cfg);
+        insta::assert_snapshot!(render(&mut app, 64, 8));
+    }
+}

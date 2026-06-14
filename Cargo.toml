@@ -1,7 +1,15 @@
 [package]
 name = "riffnav"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2024"
+description = "A git diff pager with a file tree, powered by delta"
+authors = ["Olli Paakkunainen <olli@paakkunainen.fi>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/ollipa/riffnav"
+keywords = ["git", "diff", "delta", "tui", "pager"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["/.local", "/.github", "/demo.tape"]
 
 [dependencies]
 ansi-to-tui = "8.0.1"
@@ -14,3 +22,6 @@ notify = "8.2.0"
 ratatui = "0.30.1"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
+
+[dev-dependencies]
+insta = "1.48.0"

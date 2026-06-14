@@ -1,0 +1,12 @@
+---
+source: src/ui/mod.rs
+expression: "render(&mut app, 64, 8)"
+---
+ riffnav   3 files   +55  -5    unified
+ src/diff/parser.rs
+  rendering…
+
+
+
+
+ j/k · n/p file · t: find · Tab focus · ?: help · q: quit
