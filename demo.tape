@@ -9,6 +9,11 @@
 Output demo.gif
 
 Set Shell "bash"
+# riffnav's default icons are Nerd Font glyphs, so the recording font must be a
+# Nerd Font — otherwise they render as tofu boxes. Change this to whichever Nerd
+# Font you have installed (or press `i` in the app / set icon_style = "unicode"
+# to avoid Nerd glyphs entirely).
+Set FontFamily "ZedMono Nerd Font Mono"
 Set FontSize 16
 Set Width 1100
 Set Height 640
