@@ -2,25 +2,13 @@
 
 A git diff pager with a GitHub-style file tree, powered by [delta][delta].
 
+> 🤖 **Built with AI.** riffnav — its code, tests, and docs — was written with AI assistance
+
 `riffnav` reads a unified diff on stdin, renders each file with `delta`, and wraps
 it in a terminal UI: a navigable file tree on the left, the rendered diff on the
 right. It's a Rust take on [diffnav][diffnav].
 
 ![riffnav demo](demo.gif)
-
-> **Built with AI.** riffnav — its code, tests, and docs — was written with AI
-> assistance (Claude Code).
-
-```text
- riffnav   3 files   +55  -5    unified
-v src/                         │ src/diff/parser.rs
-  v diff/                      │  @@ -0,0 +1,40 @@
-    A parser.rs          +40 -0│  +use crate::diff::FileDiff;
-  M main.rs              +12 -4│  +
-M README.md               +3 -1│  +pub fn parse(input: &str) -> Vec<FileDiff> {
-                               │   …
- j/k · n/p file · t: find · Tab focus · ?: help · q: quit
-```
 
 ## Requirements
 
