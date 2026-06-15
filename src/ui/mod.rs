@@ -105,7 +105,9 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         None => {
             let zoom = if app.in_herdr() { "z: zoom · " } else { "" };
             (
-                format!(" j/k · n/p file · t: find · {zoom}Tab focus · ?: help · q: quit "),
+                format!(
+                    " j/k · n/p file · t: find · T: theme · {zoom}Tab focus · ?: help · q: quit "
+                ),
                 Style::new().add_modifier(Modifier::DIM),
             )
         }
@@ -126,6 +128,7 @@ fn render_help(frame: &mut Frame, area: Rect, in_herdr: bool) {
         ("s", "toggle side-by-side / unified"),
         ("e", "toggle file tree"),
         ("i", "cycle icon style (nerd/unicode/ascii)"),
+        ("T", "cycle diff theme (delta/github-dark/github-light)"),
         ("y", "copy file path"),
         ("o", "open file in $EDITOR"),
     ];
@@ -310,8 +313,13 @@ mod tests {
         // break mid-token — exactly the case delta truncates in side-by-side.
         let long = "X".repeat(diff_width as usize * 3 + 5);
         let idx = app.selected_file().expect("a file is selected");
-        app.cache
-            .insert_for_test(idx, diff_width, false, Text::from(long.clone()));
+        app.cache.insert_for_test(
+            idx,
+            diff_width,
+            false,
+            app.diff_theme,
+            Text::from(long.clone()),
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| draw(f, &mut app, diff_width)).unwrap();

@@ -23,7 +23,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
     // before we write back the clamped scroll offset.
     let rendered = app
         .cache
-        .get(idx, diff_width, app.side_by_side)
+        .get(idx, diff_width, app.side_by_side, app.diff_theme)
         .map(|r| (r.text.clone(), r.lines));
 
     let Some((text, lines)) = rendered else {

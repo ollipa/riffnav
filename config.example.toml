@@ -9,6 +9,12 @@
 # File-tree glyphs: "nerd" (needs a Nerd Font) | "unicode" | "ascii".
 # icon_style = "nerd"
 
+# Diff color theme (cycle at runtime with `T`):
+#   "github-dark"  – GitHub dark-mode diff colors (default)
+#   "github-light" – GitHub light-mode colors (best on a light terminal)
+#   "delta"        – inherit your gitconfig/delta theme
+# diff_theme = "github-dark"
+
 # Columns reserved for the file-tree pane, including its right border.
 # tree_width = 32
 

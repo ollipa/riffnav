@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::app::Focus;
 use crate::icons::IconStyle;
+use crate::theme::DiffTheme;
 
 /// User configuration, loaded from `config.toml`. Every field is optional in the
 /// file; anything omitted falls back to [`Config::default`] (via `serde(default)`).
@@ -20,6 +21,9 @@ pub struct Config {
     pub side_by_side: Option<bool>,
     /// File-tree glyphs: `nerd` | `unicode` | `ascii`.
     pub icon_style: IconStyle,
+    /// Diff color theme: `delta` (inherit gitconfig) | `github-dark` |
+    /// `github-light`. Cycle at runtime with the `T` key.
+    pub diff_theme: DiffTheme,
     /// Columns reserved for the file-tree pane, including its right border.
     pub tree_width: u16,
     /// Show the file tree on launch.
@@ -42,6 +46,7 @@ impl Default for Config {
         Self {
             side_by_side: None,
             icon_style: IconStyle::Nerd,
+            diff_theme: DiffTheme::GitHubDark,
             tree_width: 32,
             show_tree: true,
             start_focus: Focus::Diff,
@@ -144,5 +149,21 @@ mod tests {
     #[test]
     fn unknown_key_is_rejected() {
         assert!(from_toml("treewidth = 10").is_err());
+    }
+
+    #[test]
+    fn diff_theme_parses_and_defaults_to_github_dark() {
+        assert_eq!(from_toml("").unwrap().diff_theme, DiffTheme::GitHubDark);
+        assert_eq!(
+            from_toml("diff_theme = \"delta\"").unwrap().diff_theme,
+            DiffTheme::Delta
+        );
+        assert_eq!(
+            from_toml("diff_theme = \"github-light\"")
+                .unwrap()
+                .diff_theme,
+            DiffTheme::GitHubLight
+        );
+        assert!(from_toml("diff_theme = \"solarized\"").is_err());
     }
 }

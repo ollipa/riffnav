@@ -15,6 +15,7 @@ use crate::delta::RenderCache;
 use crate::diff::FileDiff;
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
+use crate::theme::DiffTheme;
 use crate::tree::{self, Node, Row, RowKind};
 use crate::watch::Watch;
 
@@ -56,6 +57,7 @@ pub struct App {
     pub show_help: bool,
     pub status: Option<String>,
     pub icon_style: IconStyle,
+    pub diff_theme: DiffTheme,
     pub finder: Option<Finder>,
     pub cache: RenderCache,
     matcher: SkimMatcherV2,
@@ -106,6 +108,7 @@ impl App {
             show_help: false,
             status: None,
             icon_style: cfg.icon_style,
+            diff_theme: cfg.diff_theme,
             finder: None,
             cache: RenderCache::new(config_sbs),
             matcher: SkimMatcherV2::default(),
@@ -216,7 +219,8 @@ impl App {
 
             if let Some(idx) = self.selected_file() {
                 let raw = &self.files[idx].raw;
-                self.cache.ensure(idx, raw, diff_width, self.side_by_side)?;
+                self.cache
+                    .ensure(idx, raw, diff_width, self.side_by_side, self.diff_theme)?;
             }
 
             terminal.draw(|frame| crate::ui::draw(frame, self, diff_width))?;
@@ -453,6 +457,14 @@ impl App {
         }
     }
 
+    /// Cycle the diff color theme and report it. The render cache is keyed by
+    /// theme, so the next draw re-renders (and caches) the new look; cycling back
+    /// to a theme already seen is instant.
+    fn cycle_theme(&mut self) {
+        self.diff_theme = self.diff_theme.next();
+        self.set_status(format!("Diff theme: {}", self.diff_theme.name()));
+    }
+
     fn copy_path(&mut self) {
         let Some(idx) = self.selected_file() else {
             self.status = Some("No file selected to copy".into());
@@ -619,6 +631,7 @@ impl App {
                 self.icon_style = self.icon_style.next();
                 self.status = Some(format!("Icons: {}", self.icon_style.name()));
             }
+            KeyCode::Char('T') => self.cycle_theme(),
             KeyCode::Char('y') => self.copy_path(),
             // Only bound inside herdr; an inert no-op elsewhere.
             KeyCode::Char('z') if self.herdr.is_some() => self.toggle_herdr_zoom(),

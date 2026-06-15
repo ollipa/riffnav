@@ -68,6 +68,7 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `s` | Toggle side-by-side / unified |
 | `e` | Toggle the file tree |
 | `i` | Cycle icon style (nerd → unicode → ascii) |
+| `T` | Cycle diff theme (delta → github-dark → github-light) |
 | `y` | Copy the selected file's path |
 | `o` | Open the selected file in `$EDITOR` |
 | `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
@@ -84,6 +85,7 @@ optional. Settings resolve as **defaults < config file < CLI flags**.
 # ~/.config/riffnav/config.toml
 # side_by_side = false   # omit to follow your delta.side-by-side default
 icon_style   = "nerd"    # nerd | unicode | ascii
+diff_theme   = "github-dark" # github-dark | github-light | delta (inherit gitconfig)
 tree_width   = 32        # columns for the file-tree pane
 show_tree    = true
 start_focus  = "diff"    # "diff": open in the first file (n/p between files) | "tree"

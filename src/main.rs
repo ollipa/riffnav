@@ -5,6 +5,7 @@ mod delta;
 mod diff;
 mod herdr;
 mod icons;
+mod theme;
 mod tree;
 mod ui;
 mod watch;

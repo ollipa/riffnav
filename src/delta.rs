@@ -7,6 +7,8 @@ use ansi_to_tui::IntoText;
 use anyhow::{Context, Result, bail};
 use ratatui::text::Text;
 
+use crate::theme::DiffTheme;
+
 /// Verify `delta` is callable, with an actionable error if it isn't.
 pub fn ensure_available() -> Result<()> {
     match Command::new("delta").arg("--version").output() {
@@ -52,7 +54,17 @@ pub fn detect_side_by_side() -> bool {
 /// `--side-by-side=false`); this keeps syntax highlighting but drops the user's
 /// custom theme. When the default is already unified we pass nothing and the
 /// theme is preserved.
-fn run(diff_text: &str, width: u16, side_by_side: bool, config_sbs: bool) -> Result<Vec<u8>> {
+///
+/// A non-`Delta` `theme` takes full control of the colors: it always passes
+/// `--no-gitconfig` (so the user's gitconfig styles can't fight ours) plus the
+/// theme's explicit style flags.
+fn run(
+    diff_text: &str,
+    width: u16,
+    side_by_side: bool,
+    config_sbs: bool,
+    theme: DiffTheme,
+) -> Result<Vec<u8>> {
     let mut cmd = Command::new("delta");
     cmd.arg("--paging=never")
         .arg("--true-color=always")
@@ -62,8 +74,17 @@ fn run(diff_text: &str, width: u16, side_by_side: bool, config_sbs: bool) -> Res
         .arg(width.to_string());
     if side_by_side {
         cmd.arg("--side-by-side");
-    } else if config_sbs {
+    }
+    if theme == DiffTheme::Delta {
+        // Baseline: only force-disable gitconfig when we need to override an
+        // `delta.side-by-side = true` default to render unified.
+        if !side_by_side && config_sbs {
+            cmd.arg("--no-gitconfig");
+        }
+    } else {
+        // Themed: ignore gitconfig entirely and apply our own styles on top.
         cmd.arg("--no-gitconfig");
+        cmd.args(theme.delta_args());
     }
 
     let mut child = cmd
@@ -100,11 +121,14 @@ struct Key {
     file: usize,
     width: u16,
     side_by_side: bool,
+    theme: DiffTheme,
 }
 
-/// Caches delta renders keyed by `(file, width, side_by_side)` so revisiting a
-/// file — or redrawing at the same size — never re-runs delta. `config_sbs` is a
-/// session constant (the user's gitconfig default), so it isn't part of the key.
+/// Caches delta renders keyed by `(file, width, side_by_side, theme)` so
+/// revisiting a file — or redrawing at the same size and theme — never re-runs
+/// delta. Switching themes re-renders (and caches separately), so toggling back
+/// is instant. `config_sbs` is a session constant (the user's gitconfig
+/// default), so it isn't part of the key.
 pub struct RenderCache {
     entries: HashMap<Key, Rendered>,
     config_sbs: bool,
@@ -119,14 +143,22 @@ impl RenderCache {
     }
 
     /// Render `raw` for the given key if not already cached.
-    pub fn ensure(&mut self, file: usize, raw: &str, width: u16, side_by_side: bool) -> Result<()> {
+    pub fn ensure(
+        &mut self,
+        file: usize,
+        raw: &str,
+        width: u16,
+        side_by_side: bool,
+        theme: DiffTheme,
+    ) -> Result<()> {
         let config_sbs = self.config_sbs;
         if let Entry::Vacant(slot) = self.entries.entry(Key {
             file,
             width,
             side_by_side,
+            theme,
         }) {
-            let bytes = run(raw, width, side_by_side, config_sbs)?;
+            let bytes = run(raw, width, side_by_side, config_sbs, theme)?;
             let text = bytes
                 .into_text()
                 .context("converting delta output to ratatui text")?;
@@ -136,11 +168,18 @@ impl RenderCache {
         Ok(())
     }
 
-    pub fn get(&self, file: usize, width: u16, side_by_side: bool) -> Option<&Rendered> {
+    pub fn get(
+        &self,
+        file: usize,
+        width: u16,
+        side_by_side: bool,
+        theme: DiffTheme,
+    ) -> Option<&Rendered> {
         self.entries.get(&Key {
             file,
             width,
             side_by_side,
+            theme,
         })
     }
 
@@ -157,6 +196,7 @@ impl RenderCache {
         file: usize,
         width: u16,
         side_by_side: bool,
+        theme: DiffTheme,
         text: Text<'static>,
     ) {
         let lines = text.lines.len().min(u16::MAX as usize) as u16;
@@ -165,6 +205,7 @@ impl RenderCache {
                 file,
                 width,
                 side_by_side,
+                theme,
             },
             Rendered { text, lines },
         );
