@@ -635,7 +635,12 @@ impl App {
             KeyCode::PageUp => self.page_move(false),
             KeyCode::Char('g') => self.diff_scroll = 0,
             KeyCode::Char('G') => self.diff_scroll = u16::MAX, // clamped on draw
-            KeyCode::Enter | KeyCode::Char(' ') => self.toggle_fold(),
+            KeyCode::Enter => self.toggle_fold(),
+            // less-style paging of the diff: Space forward, b back. Diff-focused
+            // only — in the tree, Enter folds and paging the selection with Space
+            // would surprise.
+            KeyCode::Char(' ') if self.focus == Focus::Diff => self.page_move(true),
+            KeyCode::Char('b') if self.focus == Focus::Diff => self.page_move(false),
             KeyCode::Tab => {
                 self.focus = match self.focus {
                     Focus::Tree => Focus::Diff,
