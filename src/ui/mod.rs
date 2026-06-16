@@ -75,6 +75,13 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().add_modifier(Modifier::DIM),
         ),
     ];
+    let viewed = app.viewed_count();
+    if viewed > 0 {
+        spans.push(Span::styled(
+            format!("   ✓ {viewed}/{} viewed", app.files.len()),
+            Style::new().fg(Color::Green),
+        ));
+    }
     if app.is_watching() {
         spans.push(Span::styled("   ● watch", Style::new().fg(Color::Green)));
     }
@@ -107,7 +114,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             let zoom = if app.in_herdr() { "z: zoom · " } else { "" };
             (
                 format!(
-                    " j/k · n/p file · t: find · T: theme · {web}{zoom}Tab focus · ?: help · q: quit "
+                    " j/k · n/p file · v: viewed · t: find · T: theme · {web}{zoom}Tab focus · ?: help · q: quit "
                 ),
                 Style::new().add_modifier(Modifier::DIM),
             )
@@ -133,6 +140,7 @@ fn render_help(frame: &mut Frame, area: Rect, in_herdr: bool, has_forge: bool) {
         ("T", "cycle diff theme (delta/github-dark/github-light)"),
         ("y", "copy file path"),
         ("o", "open file in $EDITOR"),
+        ("v / V", "mark viewed / jump to next unviewed"),
     ];
     if has_forge {
         entries.push(("W", "open PR diff in browser"));

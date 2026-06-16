@@ -32,6 +32,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                 RowKind::File { diff_index } => {
                     let file = &app.files[diff_index];
                     let status = file.status;
+                    let viewed = app.is_viewed(diff_index);
                     let icon = icons::file_icon(file.path(), style);
                     let adds = format!("+{}", file.additions);
                     let dels = format!("-{}", file.deletions);
@@ -46,17 +47,27 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                     let badge = adds.len() + 1 + dels.len();
                     let pad = inner.saturating_sub(left + badge).max(1);
 
+                    // A reviewed file shows a green ✓ in place of its A/M/D sigil
+                    // and dims its name — same column widths, so nothing shifts.
+                    let (sigil, sigil_color) = if viewed {
+                        ('✓', Color::Green)
+                    } else {
+                        (status.sigil(), status_color(status))
+                    };
+                    let name_style = if viewed {
+                        Style::new().add_modifier(Modifier::DIM)
+                    } else {
+                        Style::new()
+                    };
+
                     let mut spans = vec![
                         Span::raw(indent),
-                        Span::styled(
-                            format!("{} ", status.sigil()),
-                            Style::new().fg(status_color(status)),
-                        ),
+                        Span::styled(format!("{sigil} "), Style::new().fg(sigil_color)),
                     ];
                     if !icon.is_empty() {
-                        spans.push(Span::raw(format!("{icon} ")));
+                        spans.push(Span::styled(format!("{icon} "), name_style));
                     }
-                    spans.push(Span::raw(row.name.clone()));
+                    spans.push(Span::styled(row.name.clone(), name_style));
                     spans.push(Span::raw(" ".repeat(pad)));
                     spans.push(Span::styled(
                         adds,

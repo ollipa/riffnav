@@ -34,3 +34,12 @@
 # collapsed. The large default expands everything; set e.g. 1 to collapse
 # nested directories by default.
 # open_depth = 64
+
+# How long (days) to keep "viewed" review marks (toggled with `v`). Marks are
+# saved per repo + branch; a branch untouched for longer is forgotten, as are
+# older marks within an active branch.
+# review_retention_days = 90
+
+# After marking a file viewed with `v`, jump to the next unviewed file so review
+# flows file-to-file. Set false to keep the selection put. Unmarking never moves.
+# review_auto_advance = true

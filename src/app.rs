@@ -16,6 +16,7 @@ use crate::diff::FileDiff;
 use crate::forge::Forge;
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
+use crate::review::ReviewStore;
 use crate::theme::DiffTheme;
 use crate::tree::{self, Node, Row, RowKind};
 use crate::watch::Watch;
@@ -61,6 +62,14 @@ pub struct App {
     pub diff_theme: DiffTheme,
     pub finder: Option<Finder>,
     pub cache: RenderCache,
+    /// Persistent "viewed" review state, keyed per repo+branch. Session-only
+    /// (no persistence) until [`App::enable_review`] runs, or when not in a repo.
+    review: ReviewStore,
+    /// One content hash per file in `files`, parallel by index, used to look up
+    /// viewed state. Recomputed whenever `files` changes.
+    file_hashes: Vec<u128>,
+    /// Whether marking a file viewed advances to the next unviewed file.
+    review_auto_advance: bool,
     matcher: SkimMatcherV2,
     nodes: Vec<Node>,
     collapsed: HashSet<String>,
@@ -81,6 +90,10 @@ pub struct App {
 
 impl App {
     pub fn new(files: Vec<FileDiff>, side_by_side: bool, config_sbs: bool, cfg: &Config) -> Self {
+        let file_hashes = files
+            .iter()
+            .map(|f| crate::review::file_hash(&f.raw))
+            .collect();
         let nodes = tree::build(&files);
         let collapsed = tree::initial_collapsed(&nodes, cfg.open_depth);
         let rows = tree::flatten(&nodes, &collapsed);
@@ -115,6 +128,9 @@ impl App {
             diff_theme: cfg.diff_theme,
             finder: None,
             cache: RenderCache::new(config_sbs),
+            review: ReviewStore::disabled(),
+            file_hashes,
+            review_auto_advance: cfg.review_auto_advance,
             matcher: SkimMatcherV2::default(),
             nodes,
             collapsed,
@@ -163,6 +179,72 @@ impl App {
 
     pub fn has_forge(&self) -> bool {
         self.forge.is_some()
+    }
+
+    /// Load persistent "viewed" review state for the current repo+branch (and
+    /// garbage-collect stale state). A no-op outside a git repo, where the store
+    /// stays session-only. Called once at startup, after `files` are in place.
+    pub fn enable_review(&mut self, retention_days: u64) {
+        self.review = ReviewStore::load(retention_days);
+    }
+
+    /// Whether the file at `diff_index` is marked viewed.
+    pub fn is_viewed(&self, diff_index: usize) -> bool {
+        self.file_hashes
+            .get(diff_index)
+            .is_some_and(|h| self.review.is_viewed(*h))
+    }
+
+    /// How many of the current files are marked viewed.
+    pub fn viewed_count(&self) -> usize {
+        self.review.count_viewed(&self.file_hashes)
+    }
+
+    /// Toggle the selected file's viewed mark, persisting the change and
+    /// reporting the new state plus overall progress.
+    fn toggle_viewed(&mut self) {
+        let Some(idx) = self.selected_file() else {
+            self.set_status("No file selected to mark viewed");
+            return;
+        };
+        let path = self.files[idx].path().to_string();
+        let now_viewed = self.review.toggle(self.file_hashes[idx], &path);
+        self.review.save();
+        let progress = format!("{}/{}", self.viewed_count(), self.files.len());
+        self.set_status(if now_viewed {
+            format!("✓ Viewed {path}  ({progress})")
+        } else {
+            format!("Unviewed {path}  ({progress})")
+        });
+        // Flow to the next file to review — but only on marking, not unmarking,
+        // and keep the status above so progress stays visible.
+        if now_viewed
+            && self.review_auto_advance
+            && let Some(i) = self.next_unviewed_after(self.selected_index())
+        {
+            self.select(i);
+        }
+    }
+
+    /// The next unviewed file row after `from`, wrapping around, or `None` when
+    /// every file is viewed.
+    fn next_unviewed_after(&self, from: usize) -> Option<usize> {
+        let n = self.rows.len();
+        if n == 0 {
+            return None;
+        }
+        (1..=n).map(|off| (from + off) % n).find(|&i| {
+            matches!(self.rows[i].kind, RowKind::File { diff_index } if !self.is_viewed(diff_index))
+        })
+    }
+
+    /// Select the next unviewed file after the cursor, reporting when everything
+    /// has been reviewed.
+    fn jump_unviewed(&mut self) {
+        match self.next_unviewed_after(self.selected_index()) {
+            Some(i) => self.select(i),
+            None => self.set_status("All files reviewed ✓"),
+        }
     }
 
     /// Show a transient status message that auto-clears after [`STATUS_TTL`].
@@ -232,6 +314,7 @@ impl App {
         let result = self.event_loop(&mut terminal);
         ratatui::restore();
         self.restore_herdr_zoom();
+        self.review.save(); // safety net; toggles already persist eagerly
         result
     }
 
@@ -314,6 +397,11 @@ impl App {
             .map(|i| self.files[i].path().to_string());
 
         self.files = files;
+        self.file_hashes = self
+            .files
+            .iter()
+            .map(|f| crate::review::file_hash(&f.raw))
+            .collect();
         self.nodes = tree::build(&self.files);
         self.rows = tree::flatten(&self.nodes, &self.collapsed);
         self.cache.clear();
@@ -667,6 +755,8 @@ impl App {
             }
             KeyCode::Char('T') => self.cycle_theme(),
             KeyCode::Char('y') => self.copy_path(),
+            KeyCode::Char('v') => self.toggle_viewed(),
+            KeyCode::Char('V') => self.jump_unviewed(),
             // Only bound inside herdr; an inert no-op elsewhere.
             KeyCode::Char('z') if self.herdr.is_some() => self.toggle_herdr_zoom(),
             // Only bound when a supported forge (e.g. GitHub) is detected.
@@ -701,6 +791,78 @@ mod tests {
 
     fn app_with(files: Vec<FileDiff>) -> App {
         App::new(files, false, false, &Config::default())
+    }
+
+    /// Like `file`, but with a distinct `raw` so each file hashes differently —
+    /// the viewed state is keyed on diff content, and the bare `file` helper
+    /// leaves `raw` empty (all-identical hashes).
+    fn file_with_raw(path: &str) -> FileDiff {
+        FileDiff {
+            raw: format!("diff --git a/{path} b/{path}\n@@ -1 +1 @@\n-old\n+new\n"),
+            ..file(path)
+        }
+    }
+
+    /// An app with auto-advance off, so `toggle_viewed` exercises only the
+    /// mark/unmark logic without moving the selection out from under the test.
+    fn app_no_advance(files: Vec<FileDiff>) -> App {
+        let cfg = Config {
+            review_auto_advance: false,
+            ..Config::default()
+        };
+        App::new(files, false, false, &cfg)
+    }
+
+    #[test]
+    fn toggle_viewed_marks_only_selected_and_counts() {
+        let mut app = app_no_advance(vec![file_with_raw("a.rs"), file_with_raw("b.rs")]);
+        assert_eq!(app.viewed_count(), 0);
+
+        // The first file is selected on launch; mark it viewed.
+        let first = app.selected_file().unwrap();
+        app.toggle_viewed();
+        assert_eq!(app.viewed_count(), 1);
+        assert!(app.is_viewed(first));
+        // The other file is untouched — content-keyed, not position-keyed.
+        assert!(!app.is_viewed(if first == 0 { 1 } else { 0 }));
+
+        // Toggling again clears it (selection didn't move: auto-advance off).
+        app.toggle_viewed();
+        assert_eq!(app.viewed_count(), 0);
+        assert!(!app.is_viewed(first));
+    }
+
+    #[test]
+    fn jump_unviewed_skips_viewed_files() {
+        let mut app = app_no_advance(vec![file_with_raw("a.rs"), file_with_raw("b.rs")]);
+        // Mark the selected (first) file viewed, then jump: lands on the other.
+        app.toggle_viewed();
+        app.jump_unviewed();
+        assert!(!app.is_viewed(app.selected_file().unwrap()));
+
+        // With everything viewed, the selection holds where it is.
+        app.toggle_viewed();
+        let before = app.selected_index();
+        app.jump_unviewed();
+        assert_eq!(app.selected_index(), before);
+    }
+
+    #[test]
+    fn marking_viewed_auto_advances_to_next_unviewed() {
+        // Default config has auto-advance on.
+        let mut app = app_with(vec![file_with_raw("a.rs"), file_with_raw("b.rs")]);
+        let first = app.selected_file().unwrap();
+        app.toggle_viewed();
+        // Selection moved off the just-viewed file to the remaining unviewed one.
+        let now = app.selected_file().unwrap();
+        assert_ne!(now, first);
+        assert!(!app.is_viewed(now));
+
+        // Marking the last file leaves the selection put (nothing left to go to).
+        app.toggle_viewed();
+        let before = app.selected_index();
+        app.toggle_viewed(); // unmarking never advances either
+        assert_eq!(app.selected_index(), before);
     }
 
     #[test]

@@ -70,6 +70,7 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `i` | Cycle icon style (nerd → unicode → ascii) |
 | `T` | Cycle diff theme (delta → github-dark → github-light) |
 | `y` | Copy the selected file's path |
+| `v` / `V` | Mark the file viewed / jump to the next unviewed file |
 | `o` | Open the selected file in `$EDITOR` |
 | `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
 | `?` | Toggle the help overlay |
@@ -92,9 +93,26 @@ start_focus  = "diff"    # "diff": open in the first file (n/p between files) | 
 show_header  = true
 show_footer  = true
 open_depth   = 64        # expand folders shallower than this on launch
+review_retention_days = 90 # days to keep "viewed" marks before GC
+review_auto_advance = true # jump to next unviewed file after marking viewed
 ```
 
 See [`config.example.toml`](config.example.toml) for the annotated version.
+
+## Reviewing changes
+
+Press `v` to mark the selected file **viewed** — it gets a green `✓` and dims in
+the tree — and `V` to jump to the next unviewed file. Marking viewed also
+advances to the next unviewed file by default (`review_auto_advance`), so review
+flows file-to-file. The header shows your progress (`✓ 3/8 viewed`).
+
+Viewed marks persist across runs, scoped per repository **and** branch (like
+GitHub's per-PR "Viewed" checkbox), and are keyed on the *content* of each
+change: edit a file you'd marked viewed and it reverts to unviewed automatically,
+just as GitHub un-ticks a file the author pushes to. State lives under
+`$XDG_STATE_HOME/riffnav/viewed/` and is garbage-collected by age
+(`review_retention_days`, default 90). Outside a git repo (e.g. an arbitrary diff
+piped in) marking still works for the session but isn't persisted.
 
 ## Watch mode
 

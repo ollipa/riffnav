@@ -39,6 +39,13 @@ pub struct Config {
     /// Expand folders shallower than this depth on launch; deeper folders start
     /// collapsed. The large default means everything starts expanded.
     pub open_depth: usize,
+    /// Days to keep "viewed" review marks before they're garbage-collected:
+    /// whole branch files untouched for longer are swept on launch, and older
+    /// entries within an active file are pruned on save.
+    pub review_retention_days: u64,
+    /// After marking a file viewed with `v`, jump to the next unviewed file so
+    /// review flows file-to-file. Unmarking never moves.
+    pub review_auto_advance: bool,
 }
 
 impl Default for Config {
@@ -53,6 +60,8 @@ impl Default for Config {
             show_header: true,
             show_footer: true,
             open_depth: 64,
+            review_retention_days: 90,
+            review_auto_advance: true,
         }
     }
 }
