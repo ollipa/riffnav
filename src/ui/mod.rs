@@ -50,7 +50,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
     if app.finder.is_some() {
         render_finder(frame, frame.area(), app);
     } else if app.show_help {
-        render_help(frame, frame.area(), app.in_herdr());
+        render_help(frame, frame.area(), app.in_herdr(), app.has_forge());
     }
 }
 
@@ -103,10 +103,11 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let (text, style) = match &app.status {
         Some(status) => (format!(" {status} "), Style::new().fg(Color::Yellow)),
         None => {
+            let web = if app.has_forge() { "W: web · " } else { "" };
             let zoom = if app.in_herdr() { "z: zoom · " } else { "" };
             (
                 format!(
-                    " j/k · n/p file · t: find · T: theme · {zoom}Tab focus · ?: help · q: quit "
+                    " j/k · n/p file · t: find · T: theme · {web}{zoom}Tab focus · ?: help · q: quit "
                 ),
                 Style::new().add_modifier(Modifier::DIM),
             )
@@ -115,7 +116,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(text).style(style), area);
 }
 
-fn render_help(frame: &mut Frame, area: Rect, in_herdr: bool) {
+fn render_help(frame: &mut Frame, area: Rect, in_herdr: bool, has_forge: bool) {
     let mut entries = vec![
         ("j / k", "move selection / scroll diff (per focus)"),
         ("n / p", "next / previous file"),
@@ -132,6 +133,9 @@ fn render_help(frame: &mut Frame, area: Rect, in_herdr: bool) {
         ("y", "copy file path"),
         ("o", "open file in $EDITOR"),
     ];
+    if has_forge {
+        entries.push(("W", "open PR diff in browser"));
+    }
     if in_herdr {
         entries.push(("z", "toggle herdr zoom"));
     }

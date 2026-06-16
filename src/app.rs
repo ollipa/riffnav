@@ -13,6 +13,7 @@ use serde::Deserialize;
 use crate::config::Config;
 use crate::delta::RenderCache;
 use crate::diff::FileDiff;
+use crate::forge::Forge;
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
 use crate::theme::DiffTheme;
@@ -68,6 +69,9 @@ pub struct App {
     pending_editor: Option<String>,
     watch: Option<Watch>,
     herdr: Option<Herdr>,
+    /// The detected source-code forge (e.g. GitHub), enabling the `W` web-diff
+    /// key; `None` when no supported forge backs this repo.
+    forge: Option<Forge>,
     /// Whether we've zoomed our own herdr pane, so we can restore it on exit
     /// rather than leaving herdr maximized behind us.
     zoomed: bool,
@@ -119,6 +123,7 @@ impl App {
             pending_editor: None,
             watch: None,
             herdr: None,
+            forge: None,
             zoomed: false,
             status_deadline: None,
         }
@@ -147,6 +152,17 @@ impl App {
 
     pub fn in_herdr(&self) -> bool {
         self.herdr.is_some()
+    }
+
+    /// Detect a supported source-code forge (currently GitHub via `gh`), enabling
+    /// the `W` key to open the branch's PR diff in the browser. Leaves `forge` as
+    /// `None` — and the key inert — when none is available.
+    pub fn enable_forge(&mut self) {
+        self.forge = Forge::detect();
+    }
+
+    pub fn has_forge(&self) -> bool {
+        self.forge.is_some()
     }
 
     /// Show a transient status message that auto-clears after [`STATUS_TTL`].
@@ -181,6 +197,19 @@ impl App {
             Ok(None) => "⧉ Zoom toggled".to_string(),
             // `{e:#}` includes the cause chain, not just the top-level context.
             Err(e) => format!("herdr: {e:#}"),
+        };
+        self.set_status(msg);
+    }
+
+    /// Open the current branch's PR diff on the detected forge in the browser,
+    /// reporting the outcome in the status line. Only reachable when a forge was
+    /// detected. The forge's CLI launches the browser, so this returns promptly.
+    fn open_web_diff(&mut self) {
+        let Some(forge) = &self.forge else { return };
+        let msg = match forge.open_web_diff() {
+            Ok(()) => format!("Opened {} PR diff in browser", forge.name()),
+            // `{e:#}` includes the cause chain (e.g. gh's own message).
+            Err(e) => format!("{}: {e:#}", forge.name()),
         };
         self.set_status(msg);
     }
@@ -635,6 +664,8 @@ impl App {
             KeyCode::Char('y') => self.copy_path(),
             // Only bound inside herdr; an inert no-op elsewhere.
             KeyCode::Char('z') if self.herdr.is_some() => self.toggle_herdr_zoom(),
+            // Only bound when a supported forge (e.g. GitHub) is detected.
+            KeyCode::Char('W') if self.forge.is_some() => self.open_web_diff(),
             KeyCode::Char('o') => {
                 if let Some(idx) = self.selected_file() {
                     self.pending_editor = Some(self.files[idx].path().to_string());

@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod delta;
 mod diff;
+mod forge;
 mod herdr;
 mod icons;
 mod theme;
@@ -80,5 +81,6 @@ fn main() -> Result<()> {
         app.enable_watch(watch_cmd, Duration::from_secs_f64(secs), input)?;
     }
     app.enable_herdr();
+    app.enable_forge();
     app.run()
 }
