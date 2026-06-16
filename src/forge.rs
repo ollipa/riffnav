@@ -129,22 +129,34 @@ mod tests {
 
     #[test]
     fn scp_like_ssh() {
-        assert_eq!(parse_host("git@github.com:ollipa/riffnav.git").unwrap(), "github.com");
+        assert_eq!(
+            parse_host("git@github.com:ollipa/riffnav.git").unwrap(),
+            "github.com"
+        );
     }
 
     #[test]
     fn https_with_dot_git() {
-        assert_eq!(parse_host("https://github.com/ollipa/riffnav.git").unwrap(), "github.com");
+        assert_eq!(
+            parse_host("https://github.com/ollipa/riffnav.git").unwrap(),
+            "github.com"
+        );
     }
 
     #[test]
     fn https_with_credentials() {
-        assert_eq!(parse_host("https://user@github.com/o/r").unwrap(), "github.com");
+        assert_eq!(
+            parse_host("https://user@github.com/o/r").unwrap(),
+            "github.com"
+        );
     }
 
     #[test]
     fn ssh_url_with_port() {
-        assert_eq!(parse_host("ssh://git@github.com:22/o/r.git").unwrap(), "github.com");
+        assert_eq!(
+            parse_host("ssh://git@github.com:22/o/r.git").unwrap(),
+            "github.com"
+        );
     }
 
     #[test]
