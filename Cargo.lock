@@ -1637,6 +1637,7 @@ dependencies = [
  "serde_json",
  "toml",
  "twox-hash",
+ "unicode-width",
 ]
 
 [[package]]

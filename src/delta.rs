@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use ansi_to_tui::IntoText;
 use anyhow::{Context, Result, bail};
 use ratatui::text::Text;
+use unicode_width::UnicodeWidthChar;
 
 use crate::theme::DiffTheme;
 
@@ -110,6 +111,85 @@ fn run(
     Ok(output.stdout)
 }
 
+/// Reproduce delta's background-color-erase as literal spaces.
+///
+/// In unified mode delta extends a diff line's background to the right edge by
+/// setting the line's background and then emitting `ESC[K` (erase to end of
+/// line); a terminal fills the rest of the row with the active background. But
+/// `ansi_to_tui` doesn't honor `ESC[K`, so that fill is dropped and only the
+/// glyphs carry the background — the bug where unified mode shows the +/- tint
+/// only behind the text. (Side-by-side mode pads with real spaces instead and
+/// never emits `ESC[K`, so it's unaffected.)
+///
+/// This rewrites each erase-to-end `ESC[K` (empty or `0` parameter) into the
+/// spaces it stands for — enough to reach `width` columns — which inherit
+/// whatever background delta left active, exactly reproducing the terminal fill.
+/// Lines already at or past `width` (delta leaves long lines unwrapped) get no
+/// padding, so the downstream wrap is unaffected.
+fn expand_bce(bytes: &[u8], width: u16) -> Vec<u8> {
+    let width = width as usize;
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut col = 0usize; // visible columns emitted on the current line
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // CSI sequence: ESC [ params(0x20..=0x3f) final(0x40..=0x7e).
+        if b == 0x1b && bytes.get(i + 1) == Some(&b'[') {
+            let mut j = i + 2;
+            while j < bytes.len() && !(0x40..=0x7e).contains(&bytes[j]) {
+                j += 1;
+            }
+            let Some(&final_byte) = bytes.get(j) else {
+                // Unterminated escape at EOF: copy the rest verbatim.
+                out.extend_from_slice(&bytes[i..]);
+                break;
+            };
+            if final_byte == b'K' && matches!(&bytes[i + 2..j], b"" | b"0") {
+                // Erase to end of line → pad to the right edge with spaces that
+                // carry the background delta set just before this sequence.
+                let pad = width.saturating_sub(col);
+                out.resize(out.len() + pad, b' ');
+                col += pad;
+            } else {
+                // Any other CSI (SGR colors, other erases): copy as-is, no width.
+                out.extend_from_slice(&bytes[i..=j]);
+            }
+            i = j + 1;
+            continue;
+        }
+        if b == b'\n' {
+            out.push(b);
+            col = 0;
+            i += 1;
+            continue;
+        }
+        // A printable run: decode one UTF-8 char to advance the column count.
+        let len = utf8_len(b);
+        let end = (i + len).min(bytes.len());
+        if let Some(ch) = std::str::from_utf8(&bytes[i..end])
+            .ok()
+            .and_then(|s| s.chars().next())
+        {
+            col += ch.width().unwrap_or(0);
+        }
+        out.extend_from_slice(&bytes[i..end]);
+        i = end;
+    }
+    out
+}
+
+/// Byte length of a UTF-8 sequence from its leading byte (1 for a stray
+/// continuation byte, so the scanner always makes progress).
+fn utf8_len(lead: u8) -> usize {
+    match lead {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        _ => 1,
+    }
+}
+
 /// A delta-rendered file, ready to drop into the diff viewport.
 pub struct Rendered {
     pub text: Text<'static>,
@@ -158,7 +238,13 @@ impl RenderCache {
             side_by_side,
             theme,
         }) {
-            let bytes = run(raw, width, side_by_side, config_sbs, theme)?;
+            let mut bytes = run(raw, width, side_by_side, config_sbs, theme)?;
+            // Unified mode relies on terminal background-color-erase to fill each
+            // line's tint to the edge; ansi_to_tui ignores it, so do it ourselves.
+            // Side-by-side already pads with real spaces and needs no fixup.
+            if !side_by_side {
+                bytes = expand_bce(&bytes, width);
+            }
             let text = bytes
                 .into_text()
                 .context("converting delta output to ratatui text")?;
@@ -209,5 +295,49 @@ impl RenderCache {
             },
             Rendered { text, lines },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bce_pads_to_width_with_active_background() {
+        // delta's shape: set bg, text, reset, re-set bg, ESC[K, reset.
+        let input = b"\x1b[42mhi\x1b[0m\x1b[42m\x1b[K\x1b[0m";
+        let out = expand_bce(input, 5);
+        // "hi" is 2 cols, so the erase becomes 3 spaces inside the trailing bg.
+        assert_eq!(out, b"\x1b[42mhi\x1b[0m\x1b[42m   \x1b[0m");
+    }
+
+    #[test]
+    fn bce_counts_wide_chars() {
+        // Two 2-col CJK glyphs occupy 4 columns, so only 1 space reaches width 5.
+        let input = "\u{4e16}\u{754c}\x1b[K".as_bytes();
+        let out = expand_bce(input, 5);
+        assert_eq!(out, "\u{4e16}\u{754c} ".as_bytes());
+    }
+
+    #[test]
+    fn bce_resets_column_each_line() {
+        let input = b"ab\x1b[K\ncd\x1b[K";
+        let out = expand_bce(input, 4);
+        assert_eq!(out, b"ab  \ncd  ");
+    }
+
+    #[test]
+    fn bce_skips_overlong_lines() {
+        // Lines already at/past the width get no padding (delta leaves long
+        // unified lines unwrapped for the downstream pager to wrap).
+        let input = b"abcdef\x1b[K";
+        let out = expand_bce(input, 4);
+        assert_eq!(out, b"abcdef");
+    }
+
+    #[test]
+    fn bce_leaves_non_erase_sequences_untouched() {
+        let input = b"\x1b[1mbold\x1b[0m";
+        assert_eq!(expand_bce(input, 10), input);
     }
 }
