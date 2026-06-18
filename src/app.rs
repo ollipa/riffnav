@@ -178,6 +178,39 @@ impl App {
         self.autodiff.as_ref().map(|a| a.source.label())
     }
 
+    pub fn is_autodiff(&self) -> bool {
+        self.autodiff.is_some()
+    }
+
+    /// Cycle to the next auto-diff source (the `d` key): re-run the matching git
+    /// command and reload the file set. Only reachable in auto-diff mode. The
+    /// branch-vs-base view is skipped when no base was detected, and a source
+    /// that yields nothing reloads to an empty set with an explanatory status.
+    fn cycle_diff_source(&mut self) {
+        let Some(auto) = &self.autodiff else { return };
+        let next = auto.source.next(auto.base.is_some());
+        let base = auto.base.clone();
+        // The immutable borrow of `self.autodiff` ends here (next/base are owned),
+        // freeing `self` for the mutable reload below.
+        match crate::autodiff::load(next, base.as_deref()) {
+            Ok(text) => {
+                let files = crate::diff::parse(&text);
+                self.reload_files(files);
+                if let Some(auto) = &mut self.autodiff {
+                    auto.source = next;
+                }
+                let summary = if self.files.is_empty() {
+                    format!("◆ {} · no changes", next.label())
+                } else {
+                    format!("◆ {} · {} files", next.label(), self.files.len())
+                };
+                self.set_status(summary);
+            }
+            // `{e:#}` includes git's own message (e.g. a bad base ref).
+            Err(e) => self.set_status(format!("diff source: {e:#}")),
+        }
+    }
+
     /// Detect whether riffnav is running inside herdr, enabling the `z` zoom key.
     /// A no-op (leaves `herdr` as `None`) when not inside herdr.
     pub fn enable_herdr(&mut self) {
@@ -799,6 +832,8 @@ impl App {
             KeyCode::Char('y') => self.copy_path(),
             KeyCode::Char('v') => self.toggle_viewed(),
             KeyCode::Char('V') => self.jump_unviewed(),
+            // Only bound on a bare launch (auto-diff mode); inert otherwise.
+            KeyCode::Char('d') if self.autodiff.is_some() => self.cycle_diff_source(),
             // Only bound inside herdr; an inert no-op elsewhere.
             KeyCode::Char('z') if self.herdr.is_some() => self.toggle_herdr_zoom(),
             // Only bound when a supported forge (e.g. GitHub) is detected.

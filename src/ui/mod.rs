@@ -50,7 +50,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
     if app.finder.is_some() {
         render_finder(frame, frame.area(), app);
     } else if app.show_help {
-        render_help(frame, frame.area(), app.in_herdr(), app.has_forge());
+        render_help(
+            frame,
+            frame.area(),
+            app.in_herdr(),
+            app.has_forge(),
+            app.is_autodiff(),
+        );
     }
 }
 
@@ -116,11 +122,12 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let (text, style) = match &app.status {
         Some(status) => (format!(" {status} "), Style::new().fg(Color::Yellow)),
         None => {
+            let src = if app.is_autodiff() { "d: source · " } else { "" };
             let web = if app.has_forge() { "W: web · " } else { "" };
             let zoom = if app.in_herdr() { "z: zoom · " } else { "" };
             (
                 format!(
-                    " j/k · n/p file · v: viewed · t: find · T: theme · {web}{zoom}Tab focus · ?: help · q: quit "
+                    " j/k · n/p file · v: viewed · {src}t: find · T: theme · {web}{zoom}Tab focus · ?: help · q: quit "
                 ),
                 Style::new().add_modifier(Modifier::DIM),
             )
@@ -129,7 +136,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(text).style(style), area);
 }
 
-fn render_help(frame: &mut Frame, area: Rect, in_herdr: bool, has_forge: bool) {
+fn render_help(frame: &mut Frame, area: Rect, in_herdr: bool, has_forge: bool, auto_diff: bool) {
     let mut entries = vec![
         ("j / k", "move selection / scroll diff (per focus)"),
         ("n / p", "next / previous file"),
@@ -148,6 +155,9 @@ fn render_help(frame: &mut Frame, area: Rect, in_herdr: bool, has_forge: bool) {
         ("o", "open file in $EDITOR"),
         ("v / V", "mark viewed / jump to next unviewed"),
     ];
+    if auto_diff {
+        entries.push(("d", "cycle git diff source"));
+    }
     if has_forge {
         entries.push(("W", "open PR diff in browser"));
     }

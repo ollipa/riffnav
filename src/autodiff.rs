@@ -17,12 +17,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-/// Which slice of the branch / working tree to render as a diff.
-///
-/// The adaptive startup default ([`load_initial`]) only ever picks
-/// `AllUncommitted` or `Committed`; `Staged`/`Unstaged` become reachable when
-/// Phase 2 wires the runtime view-toggle.
-#[allow(dead_code)] // Staged/Unstaged: see above — toggled in Phase 2.
+/// Which slice of the branch / working tree to render as a diff. The runtime
+/// toggle (`d`) cycles through these in [`DiffSource::CYCLE`] order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffSource {
     /// Staged + unstaged working-tree changes vs `HEAD`, plus untracked files
@@ -66,15 +62,36 @@ impl DiffSource {
     fn includes_untracked(self) -> bool {
         matches!(self, Self::AllUncommitted | Self::Unstaged)
     }
+
+    /// The order the runtime view-toggle (`d`) steps through.
+    const CYCLE: [DiffSource; 4] = [
+        Self::AllUncommitted,
+        Self::Staged,
+        Self::Unstaged,
+        Self::Committed,
+    ];
+
+    /// The next source when cycling. `has_base` drops the branch-vs-base view
+    /// when no base was detected (it can't be produced); the working-tree views
+    /// are always available, so cycling always lands somewhere valid.
+    pub fn next(self, has_base: bool) -> DiffSource {
+        let here = Self::CYCLE.iter().position(|&s| s == self).unwrap_or(0);
+        for step in 1..=Self::CYCLE.len() {
+            let cand = Self::CYCLE[(here + step) % Self::CYCLE.len()];
+            if has_base || cand != Self::Committed {
+                return cand;
+            }
+        }
+        self
+    }
 }
 
 /// Live auto-diff state carried by the app on a bare launch: which view is
 /// shown and the base branch (if any) the branch-vs-base view compares against.
 pub struct AutoDiff {
     pub source: DiffSource,
-    /// Detected base branch, read in Phase 2 to re-run the branch-vs-base view
-    /// when toggling sources. Unused in Phase 1 (the header only labels it).
-    #[allow(dead_code)]
+    /// Detected base branch, used to re-run the branch-vs-base view when toggling
+    /// sources. `None` when no base could be found (that view is then skipped).
     pub base: Option<String>,
 }
 
@@ -238,6 +255,26 @@ mod tests {
         assert!(DiffSource::Unstaged.includes_untracked());
         assert!(!DiffSource::Staged.includes_untracked());
         assert!(!DiffSource::Committed.includes_untracked());
+    }
+
+    #[test]
+    fn cycle_with_a_base_visits_all_four_then_wraps() {
+        use DiffSource::*;
+        let mut cur = AllUncommitted;
+        for &expected in &[Staged, Unstaged, Committed] {
+            cur = cur.next(true);
+            assert_eq!(cur, expected);
+        }
+        assert_eq!(cur.next(true), AllUncommitted); // wraps back to the start
+    }
+
+    #[test]
+    fn cycle_without_a_base_never_lands_on_branch_vs_base() {
+        let mut cur = DiffSource::AllUncommitted;
+        for _ in 0..6 {
+            cur = cur.next(false);
+            assert_ne!(cur, DiffSource::Committed);
+        }
     }
 
     #[test]
