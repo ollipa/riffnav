@@ -36,10 +36,13 @@ struct Input {
 ///   refreshable source);
 /// - bare launch (stdin is a terminal): auto-diff from the current git repo;
 /// - otherwise: a unified diff piped/redirected on stdin (the original path).
-fn acquire(cli: &cli::Cli, watch_cmd: &str) -> Result<Input> {
+fn acquire(cli: &cli::Cli, config: &config::Config, watch_cmd: &str) -> Result<Input> {
     if cli.watch {
         let text = watch::run_once(watch_cmd).context("failed to run watch command")?;
-        return Ok(Input { text, autodiff: None });
+        return Ok(Input {
+            text,
+            autodiff: None,
+        });
     }
 
     if std::io::stdin().is_terminal() {
@@ -49,8 +52,16 @@ fn acquire(cli: &cli::Cli, watch_cmd: &str) -> Result<Input> {
                  pipe a unified diff (e.g. `git diff | riffnav`) or run inside a repo"
             );
         }
-        let base = autodiff::detect_base();
-        let (source, text) = autodiff::load_initial(base.as_deref())?;
+        // Base and starting view resolve as detect/adaptive < config < CLI.
+        let base = cli
+            .base
+            .clone()
+            .or_else(|| config.base_branch.clone())
+            .or_else(autodiff::detect_base);
+        let (source, text) = match cli.diff.or(config.diff_source) {
+            Some(source) => (source, autodiff::load(source, base.as_deref())?),
+            None => autodiff::load_initial(base.as_deref())?,
+        };
         return Ok(Input {
             text,
             autodiff: Some((source, base)),
@@ -61,7 +72,10 @@ fn acquire(cli: &cli::Cli, watch_cmd: &str) -> Result<Input> {
     std::io::stdin()
         .read_to_string(&mut text)
         .context("failed to read diff from stdin")?;
-    Ok(Input { text, autodiff: None })
+    Ok(Input {
+        text,
+        autodiff: None,
+    })
 }
 
 fn main() -> Result<()> {
@@ -73,7 +87,7 @@ fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| DEFAULT_WATCH_CMD.to_string());
 
-    let input = acquire(&cli, &watch_cmd)?;
+    let input = acquire(&cli, &config, &watch_cmd)?;
 
     // `--list` is a debug helper: print the parsed files for whatever source was
     // selected (piped diff, or the auto-diff on a bare launch) and exit.

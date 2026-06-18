@@ -40,6 +40,9 @@ git diff HEAD~3 | riffnav
 git show <commit> | riffnav
 ```
 
+Or run it bare inside a repo to diff the current branch automatically — see
+[Run without a piped diff](#run-without-a-piped-diff).
+
 ### Use it as git's pager
 
 ```sh
@@ -71,6 +74,7 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `T` | Cycle diff theme (delta → github-dark → github-light) |
 | `y` | Copy the selected file's path |
 | `v` / `V` | Mark the file viewed / jump to the next unviewed file |
+| `d` | Cycle the diff source — uncommitted → staged → unstaged → branch-vs-base (only on a [bare launch](#run-without-a-piped-diff)) |
 | `o` | Open the selected file in `$EDITOR` |
 | `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
 | `?` | Toggle the help overlay |
@@ -95,6 +99,8 @@ show_footer  = true
 open_depth   = 64        # expand folders shallower than this on launch
 review_retention_days = 90 # days to keep "viewed" marks before GC
 review_auto_advance = true # jump to next unviewed file after marking viewed
+# base_branch = "main"     # base for "branch vs base"; omit to auto-detect
+# diff_source = "all"      # bare-launch view: all|committed|staged|unstaged (omit = adaptive)
 ```
 
 See [`config.example.toml`](config.example.toml) for the annotated version.
@@ -113,6 +119,33 @@ just as GitHub un-ticks a file the author pushes to. State lives under
 `$XDG_STATE_HOME/riffnav/viewed/` and is garbage-collected by age
 (`review_retention_days`, default 90). Outside a git repo (e.g. an arbitrary diff
 piped in) marking still works for the session but isn't persisted.
+
+## Run without a piped diff
+
+Launch `riffnav` bare — no diff on stdin, not watch mode — inside a git repo and
+it diffs the repo for you. By default it shows your **uncommitted** changes
+(staged, unstaged, and untracked files); when the working tree is clean it falls
+back to what your **branch adds over its base** (`git diff <base>...HEAD`, like a
+PR diff).
+
+```sh
+riffnav            # in a repo: uncommitted changes, or branch-vs-base if clean
+riffnav --diff committed   # force the branch-vs-base (PR) view
+riffnav --base develop     # compare against a specific base branch
+```
+
+Press `d` to cycle what's shown:
+
+- **all uncommitted** — staged + unstaged + untracked
+- **staged** — `git diff --staged`
+- **unstaged** — `git diff`
+- **branch vs base** — `git diff <base>...HEAD`
+
+The base branch is detected from `origin/HEAD` (falling back to a local
+`main`/`master`); set it with `--base <ref>` or the `base_branch` config key.
+Choose the starting view with `--diff <all|committed|staged|unstaged>` or the
+`diff_source` config key. Piping a diff in (or `--watch`) behaves exactly as
+before — the bare launch is just an extra entry point.
 
 ## Watch mode
 

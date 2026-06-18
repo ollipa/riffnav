@@ -122,7 +122,11 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let (text, style) = match &app.status {
         Some(status) => (format!(" {status} "), Style::new().fg(Color::Yellow)),
         None => {
-            let src = if app.is_autodiff() { "d: source · " } else { "" };
+            let src = if app.is_autodiff() {
+                "d: source · "
+            } else {
+                ""
+            };
             let web = if app.has_forge() { "W: web · " } else { "" };
             let zoom = if app.in_herdr() { "z: zoom · " } else { "" };
             (

@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::app::Focus;
+use crate::autodiff::DiffSource;
 use crate::icons::IconStyle;
 use crate::theme::DiffTheme;
 
@@ -46,6 +47,14 @@ pub struct Config {
     /// After marking a file viewed with `v`, jump to the next unviewed file so
     /// review flows file-to-file. Unmarking never moves.
     pub review_auto_advance: bool,
+    /// Base branch for the branch-vs-base auto-diff view on a bare launch.
+    /// `None` auto-detects (origin/HEAD, then a local main/master). CLI `--base`
+    /// overrides this.
+    pub base_branch: Option<String>,
+    /// Which diff a bare launch shows. `None` is the adaptive default
+    /// (uncommitted changes, or branch-vs-base when the tree is clean). CLI
+    /// `--diff` overrides this.
+    pub diff_source: Option<DiffSource>,
 }
 
 impl Default for Config {
@@ -62,6 +71,8 @@ impl Default for Config {
             open_depth: 64,
             review_retention_days: 90,
             review_auto_advance: true,
+            base_branch: None,
+            diff_source: None,
         }
     }
 }
@@ -158,6 +169,25 @@ mod tests {
     #[test]
     fn unknown_key_is_rejected() {
         assert!(from_toml("treewidth = 10").is_err());
+    }
+
+    #[test]
+    fn auto_diff_keys_parse_and_default_to_unset() {
+        // Unset means auto-detect the base and use the adaptive starting view.
+        let d = from_toml("").unwrap();
+        assert_eq!(d.base_branch, None);
+        assert_eq!(d.diff_source, None);
+
+        let c = from_toml("base_branch = \"develop\"\ndiff_source = \"committed\"").unwrap();
+        assert_eq!(c.base_branch.as_deref(), Some("develop"));
+        assert_eq!(c.diff_source, Some(DiffSource::Committed));
+
+        // The friendly "all" spelling maps to the uncommitted view.
+        assert_eq!(
+            from_toml("diff_source = \"all\"").unwrap().diff_source,
+            Some(DiffSource::AllUncommitted)
+        );
+        assert!(from_toml("diff_source = \"nonsense\"").is_err());
     }
 
     #[test]

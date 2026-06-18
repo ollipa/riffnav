@@ -18,14 +18,21 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 /// Which slice of the branch / working tree to render as a diff. The runtime
-/// toggle (`d`) cycles through these in [`DiffSource::CYCLE`] order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// toggle (`d`) cycles through these in [`DiffSource::CYCLE`] order. The names in
+/// the attributes are the spellings accepted by `--diff` and the `diff_source`
+/// config key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
 pub enum DiffSource {
     /// Staged + unstaged working-tree changes vs `HEAD`, plus untracked files
     /// (`git diff HEAD`, with untracked files synthesized in).
+    #[serde(rename = "all", alias = "uncommitted")]
+    #[value(name = "all", alias = "uncommitted")]
     AllUncommitted,
     /// What the current branch adds over its base, three-dot merge-base
     /// (`git diff <base>...HEAD`) — mirrors a pull-request diff.
+    #[serde(alias = "base")]
+    #[value(alias = "base")]
     Committed,
     /// Staged changes only (`git diff --staged`).
     Staged,
@@ -110,7 +117,15 @@ pub fn detect_base() -> Option<String> {
     }
     ["main", "master"]
         .into_iter()
-        .find(|name| git(&["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")]).is_some())
+        .find(|name| {
+            git(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{name}"),
+            ])
+            .is_some()
+        })
         .map(str::to_string)
 }
 
