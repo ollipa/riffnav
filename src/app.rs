@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::config::Config;
 use crate::delta::RenderCache;
-use crate::diff::FileDiff;
+use crate::diff::{FileDiff, FileStatus};
 use crate::forge::Forge;
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
@@ -331,8 +331,9 @@ impl App {
 
             if let Some(idx) = self.selected_file() {
                 let raw = &self.files[idx].raw;
+                let side_by_side = self.side_by_side_for(idx);
                 self.cache
-                    .ensure(idx, raw, diff_width, self.side_by_side, self.diff_theme)?;
+                    .ensure(idx, raw, diff_width, side_by_side, self.diff_theme)?;
             }
 
             terminal.draw(|frame| crate::ui::draw(frame, self, diff_width))?;
@@ -441,6 +442,13 @@ impl App {
             RowKind::File { diff_index } => Some(diff_index),
             RowKind::Dir { .. } => None,
         }
+    }
+
+    /// The view mode actually used to render `idx`. Added files always render
+    /// unified: side-by-side would just show an empty left pane and waste the
+    /// scarce horizontal space, so they ignore the global toggle.
+    pub fn side_by_side_for(&self, idx: usize) -> bool {
+        self.side_by_side && self.files[idx].status != FileStatus::Added
     }
 
     pub fn totals(&self) -> (u32, u32) {
@@ -830,6 +838,18 @@ mod tests {
         app.toggle_viewed();
         assert_eq!(app.viewed_count(), 0);
         assert!(!app.is_viewed(first));
+    }
+
+    #[test]
+    fn added_files_render_unified_even_in_side_by_side() {
+        let added = FileDiff {
+            status: FileStatus::Added,
+            ..file("new.rs")
+        };
+        // side_by_side enabled globally; only the added file overrides it.
+        let app = App::new(vec![file("mod.rs"), added], true, false, &Config::default());
+        assert!(app.side_by_side_for(0), "modified file honors the toggle");
+        assert!(!app.side_by_side_for(1), "added file forces unified");
     }
 
     #[test]

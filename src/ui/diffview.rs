@@ -19,11 +19,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
         return;
     };
 
+    // Added files always render unified (an empty left pane wastes space), so
+    // resolve the effective mode once and use it for both the cache lookup and
+    // the wrap decision below.
+    let side_by_side = app.side_by_side_for(idx);
+
     // Pull what we need out of the cache as owned values so the borrow ends
     // before we write back the clamped scroll offset.
     let rendered = app
         .cache
-        .get(idx, diff_width, app.side_by_side, app.diff_theme)
+        .get(idx, diff_width, side_by_side, app.diff_theme)
         .map(|r| (r.text.clone(), r.lines));
 
     let Some((text, lines)) = rendered else {
@@ -37,7 +42,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
     // truncated at the pane edge — and measure the wrapped height so scrolling
     // can still reach the bottom.
     let mut paragraph = Paragraph::new(text);
-    let height = if app.side_by_side {
+    let height = if side_by_side {
         lines
     } else {
         paragraph = paragraph.wrap(Wrap { trim: false });
