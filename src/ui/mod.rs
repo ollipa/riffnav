@@ -82,6 +82,12 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(Color::Green),
         ));
     }
+    if let Some(label) = app.autodiff_label() {
+        spans.push(Span::styled(
+            format!("   ◆ {label}"),
+            Style::new().fg(Color::Cyan),
+        ));
+    }
     if app.is_watching() {
         spans.push(Span::styled("   ● watch", Style::new().fg(Color::Green)));
     }

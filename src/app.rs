@@ -10,6 +10,7 @@ use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
 use serde::Deserialize;
 
+use crate::autodiff::{AutoDiff, DiffSource};
 use crate::config::Config;
 use crate::delta::RenderCache;
 use crate::diff::{FileDiff, FileStatus};
@@ -77,6 +78,9 @@ pub struct App {
     quit: bool,
     pending_editor: Option<String>,
     watch: Option<Watch>,
+    /// Auto-diff state when launched bare (no piped diff): the active git-derived
+    /// source and the base it can compare against. `None` for a piped/watch diff.
+    autodiff: Option<AutoDiff>,
     herdr: Option<Herdr>,
     /// The detected source-code forge (e.g. GitHub), enabling the `W` web-diff
     /// key; `None` when no supported forge backs this repo.
@@ -138,6 +142,7 @@ impl App {
             quit: false,
             pending_editor: None,
             watch: None,
+            autodiff: None,
             herdr: None,
             forge: None,
             zoomed: false,
@@ -158,6 +163,19 @@ impl App {
 
     pub fn is_watching(&self) -> bool {
         self.watch.is_some()
+    }
+
+    /// Enter auto-diff mode (bare launch): record which git-derived source is
+    /// shown and the base branch it can compare against, so the header can label
+    /// the view. The diff text itself was already loaded and parsed into `files`.
+    pub fn enable_autodiff(&mut self, source: DiffSource, base: Option<String>) {
+        self.autodiff = Some(AutoDiff { source, base });
+    }
+
+    /// The active auto-diff source's label (e.g. "all uncommitted"), or `None`
+    /// when the diff came from stdin or a watch command.
+    pub fn autodiff_label(&self) -> Option<&'static str> {
+        self.autodiff.as_ref().map(|a| a.source.label())
     }
 
     /// Detect whether riffnav is running inside herdr, enabling the `z` zoom key.
