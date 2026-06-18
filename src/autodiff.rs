@@ -8,8 +8,10 @@
 //! to what the branch adds over its base (the "PR view"). The base branch is
 //! detected from `origin/HEAD`, falling back to a local `main`/`master`.
 //!
-//! Piped-stdin and `--watch` launches never reach this module; bare launch is
-//! the only new entry path.
+//! `git diff` never reports untracked files, so the working-tree views fold them
+//! in explicitly (see [`untracked_diff`]) — otherwise a brand-new file would be
+//! invisible until staged. Piped-stdin and `--watch` launches never reach this
+//! module; bare launch is the only new entry path.
 
 use std::process::Command;
 
@@ -23,7 +25,8 @@ use anyhow::{Context, Result, bail};
 #[allow(dead_code)] // Staged/Unstaged: see above — toggled in Phase 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffSource {
-    /// Staged + unstaged working-tree changes vs `HEAD` (`git diff HEAD`).
+    /// Staged + unstaged working-tree changes vs `HEAD`, plus untracked files
+    /// (`git diff HEAD`, with untracked files synthesized in).
     AllUncommitted,
     /// What the current branch adds over its base, three-dot merge-base
     /// (`git diff <base>...HEAD`) — mirrors a pull-request diff.
@@ -55,6 +58,13 @@ impl DiffSource {
             Self::Staged => owned(&["diff", "--staged"]),
             Self::Unstaged => owned(&["diff"]),
         }
+    }
+
+    /// Whether this view should fold in untracked files. The working-tree views
+    /// do; the staged and branch-vs-base views legitimately exclude them (an
+    /// untracked file is neither staged nor part of the branch's history).
+    fn includes_untracked(self) -> bool {
+        matches!(self, Self::AllUncommitted | Self::Unstaged)
     }
 }
 
@@ -91,14 +101,21 @@ pub fn detect_base() -> Option<String> {
 /// git's own stderr. The branch-vs-base source needs a `base`; without one it is
 /// an error to ask for it.
 pub fn load(source: DiffSource, base: Option<&str>) -> Result<String> {
-    let base = match source {
+    let tracked = match source {
         DiffSource::Committed => {
-            base.context("no base branch detected to compare the branch against")?
+            let base = base.context("no base branch detected to compare the branch against")?;
+            run_git(&source.args(base))
         }
         // The other sources never read `base`; pass an empty placeholder.
-        _ => "",
+        _ => run_git(&source.args("")),
     };
-    run_git(&source.args(base))
+    if source.includes_untracked() {
+        // `git diff [HEAD]` fails on an unborn branch (no commits yet); treat that
+        // as "no tracked changes" so untracked files still surface.
+        Ok(tracked.unwrap_or_default() + &untracked_diff())
+    } else {
+        tracked
+    }
 }
 
 /// Pick the startup source adaptively and load it: prefer uncommitted work, and
@@ -151,6 +168,46 @@ fn run_git(args: &[String]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Synthetic "added file" diffs for every untracked, non-ignored file, so the
+/// working-tree views show brand-new files that `git diff` omits by design.
+/// `.gitignore`d files are excluded (`--exclude-standard`).
+fn untracked_diff() -> String {
+    let Some(list) = git_raw(&["ls-files", "--others", "--exclude-standard", "-z"]) else {
+        return String::new();
+    };
+    // `-z` is NUL-separated, so paths with spaces/newlines stay intact.
+    let mut out = String::new();
+    for path in list.split('\0').filter(|p| !p.is_empty()) {
+        if let Some(diff) = diff_against_devnull(path) {
+            out.push_str(&diff);
+        }
+    }
+    out
+}
+
+/// `git diff --no-index /dev/null <path>` renders an untracked file as fully
+/// added. `--no-index` exits non-zero whenever the inputs differ (always the
+/// case here), so success is judged by whether it produced output, not by the
+/// exit status.
+fn diff_against_devnull(path: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["diff", "--no-index", "--", "/dev/null", path])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Run `git` and return raw, untrimmed stdout on success (or `None` on failure).
+/// Used where output framing matters — e.g. NUL-separated lists — unlike [`git`],
+/// which trims.
+fn git_raw(args: &[&str]) -> Option<String> {
+    let out = Command::new("git").args(args).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +230,14 @@ mod tests {
     #[test]
     fn committed_without_a_base_is_an_error() {
         assert!(load(DiffSource::Committed, None).is_err());
+    }
+
+    #[test]
+    fn only_working_tree_views_fold_in_untracked_files() {
+        assert!(DiffSource::AllUncommitted.includes_untracked());
+        assert!(DiffSource::Unstaged.includes_untracked());
+        assert!(!DiffSource::Staged.includes_untracked());
+        assert!(!DiffSource::Committed.includes_untracked());
     }
 
     #[test]
