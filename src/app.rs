@@ -186,6 +186,22 @@ impl App {
     /// stays session-only. Called once at startup, after `files` are in place.
     pub fn enable_review(&mut self, retention_days: u64) {
         self.review = ReviewStore::load(retention_days);
+        // With viewed state now loaded, resume on the first file still needing
+        // review instead of the top of the list. Opening straight onto already-
+        // reviewed files would just make the user scroll past them.
+        self.select_first_unviewed();
+    }
+
+    /// Move the selection to the first unviewed file, scanning from the top. A
+    /// no-op when there are no files or every file is already viewed, so the
+    /// initial first-file selection stands. Run once at startup, after viewed
+    /// state loads.
+    fn select_first_unviewed(&mut self) {
+        if let Some(i) = self.rows.iter().position(
+            |r| matches!(r.kind, RowKind::File { diff_index } if !self.is_viewed(diff_index)),
+        ) {
+            self.select(i);
+        }
     }
 
     /// Whether the file at `diff_index` is marked viewed.
@@ -883,6 +899,41 @@ mod tests {
         let before = app.selected_index();
         app.toggle_viewed(); // unmarking never advances either
         assert_eq!(app.selected_index(), before);
+    }
+
+    #[test]
+    fn startup_opens_on_first_unviewed_file() {
+        let mut app = app_no_advance(vec![
+            file_with_raw("a.rs"),
+            file_with_raw("b.rs"),
+            file_with_raw("c.rs"),
+        ]);
+        // Fresh: selection sits on the first file.
+        assert_eq!(app.selected_file(), Some(0));
+
+        // Mark a.rs viewed (auto-advance off keeps the cursor put), then re-run
+        // the startup selection: it skips the viewed file and lands on b.rs.
+        app.toggle_viewed();
+        app.select_first_unviewed();
+        assert_eq!(
+            app.selected_file().map(|i| app.files[i].path()),
+            Some("b.rs")
+        );
+    }
+
+    #[test]
+    fn startup_holds_on_first_file_when_all_viewed() {
+        let mut app = app_no_advance(vec![file_with_raw("a.rs"), file_with_raw("b.rs")]);
+        // Mark both files viewed.
+        app.toggle_viewed();
+        app.jump_unviewed();
+        app.toggle_viewed();
+
+        // Back to the top, then run the startup selection: nothing is unviewed,
+        // so it holds on the first file rather than jumping.
+        app.tree_state.select(Some(0));
+        app.select_first_unviewed();
+        assert_eq!(app.selected_file(), Some(0));
     }
 
     #[test]
