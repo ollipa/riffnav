@@ -414,6 +414,8 @@ impl App {
             // Suspending the TUI to run an editor needs the owned terminal.
             if let Some(path) = self.pending_editor.take() {
                 self.open_editor(terminal, &path)?;
+                // The file may have changed; re-read its diff from git.
+                self.refresh_file(&path);
             }
         }
         Ok(())
@@ -492,6 +494,46 @@ impl App {
         self.tree_state.select(Some(target.unwrap_or(0)));
         self.diff_scroll = 0;
         self.status = Some(format!("↻ refreshed · {} files", self.files.len()));
+    }
+
+    /// After a file is opened in `$EDITOR` (the `o` key), re-run git for just
+    /// that file and splice the fresh diff back in, so edits made while it was
+    /// open show on return. Only meaningful in auto-diff mode — a piped diff has
+    /// no git source to re-read — so it's a no-op otherwise. A file whose changes
+    /// were fully reverted drops out of the tree.
+    fn refresh_file(&mut self, path: &str) {
+        let Some(auto) = &self.autodiff else { return };
+        let (source, base) = (auto.source, auto.base.clone());
+        // The immutable borrow of `self.autodiff` ends here (source/base owned),
+        // freeing `self` for the mutable splice below.
+        let text = match crate::autodiff::load_file(source, base.as_deref(), path) {
+            Ok(text) => text,
+            // Keep the stale diff rather than blanking it on a transient error.
+            Err(e) => return self.set_status(format!("refresh {path}: {e:#}")),
+        };
+        let fresh = crate::diff::parse(&text)
+            .into_iter()
+            .find(|f| f.path() == path);
+        match (self.files.iter().position(|f| f.path() == path), fresh) {
+            // Still differs: swap the diff in place. The tree is unchanged (same
+            // path → same index), so only this file's render and hash refresh —
+            // and the scroll position is left alone (the draw clamps it).
+            (Some(i), Some(file)) => {
+                self.file_hashes[i] = crate::review::file_hash(&file.raw);
+                self.files[i] = file;
+                self.cache.invalidate(i);
+                self.last_width = 0; // force a re-render at the next draw
+            }
+            // No longer differs (changes reverted): drop it from the tree.
+            // Removal shifts later indices, so reload the remaining set wholesale.
+            (Some(i), None) => {
+                let mut files = self.files.clone();
+                files.remove(i);
+                self.reload_files(files);
+            }
+            // The path is gone from the set; nothing sensible to splice.
+            (None, _) => {}
+        }
     }
 
     fn diff_pane_width(&self, total: u16) -> u16 {

@@ -274,6 +274,12 @@ impl RenderCache {
         self.entries.clear();
     }
 
+    /// Drop the cached renders for a single file (every width/theme variant),
+    /// e.g. after its diff is refreshed in place. Other files stay cached.
+    pub fn invalidate(&mut self, file: usize) {
+        self.entries.retain(|key, _| key.file != file);
+    }
+
     /// Seed a render directly, bypassing delta. Tests run without delta on PATH,
     /// so this is the only way to exercise the rendering path.
     #[cfg(test)]

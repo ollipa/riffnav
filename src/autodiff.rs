@@ -150,6 +150,40 @@ pub fn load(source: DiffSource, base: Option<&str>) -> Result<String> {
     }
 }
 
+/// Re-run the active source's diff for a single `path`, returning its raw
+/// unified-diff text — or an empty string when the file no longer differs.
+/// Mirrors [`load`]'s untracked handling: a path `git diff` omits because it is
+/// untracked is rendered against `/dev/null` instead, but only when the source
+/// folds untracked files in (so a tracked-but-now-unchanged file correctly
+/// reports no diff rather than showing up as fully added).
+pub fn load_file(source: DiffSource, base: Option<&str>, path: &str) -> Result<String> {
+    if source.includes_untracked() && is_untracked(path) {
+        return Ok(diff_against_devnull(path).unwrap_or_default());
+    }
+    let mut args = match source {
+        DiffSource::Committed => {
+            let base = base.context("no base branch detected to compare the branch against")?;
+            source.args(base)
+        }
+        _ => source.args(""),
+    };
+    args.push("--".to_string());
+    args.push(path.to_string());
+    match run_git(&args) {
+        Ok(text) => Ok(text),
+        // An unborn branch makes `git diff HEAD -- path` fail; for the
+        // working-tree views treat that as "nothing tracked" (mirrors `load`).
+        Err(_) if source.includes_untracked() => Ok(String::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether `path` is an untracked, non-ignored file (so `git diff` omits it).
+fn is_untracked(path: &str) -> bool {
+    git_raw(&["ls-files", "--others", "--exclude-standard", "--", path])
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
 /// Pick the startup source adaptively and load it: prefer uncommitted work, and
 /// only fall back to the branch-vs-base view when the tree is clean. Returns the
 /// chosen source alongside its diff text so the caller can show which view it is.
