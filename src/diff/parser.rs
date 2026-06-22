@@ -145,18 +145,30 @@ fn strip_ansi(input: &str) -> Cow<'_, str> {
     Cow::Owned(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// Parse the path from a `--- `/`+++ ` header side, stripping the `a/`/`b/`
+/// Parse the path from a `--- `/`+++ ` header side, stripping the leading path
 /// prefix and any trailing tab-timestamp. `/dev/null` becomes `None`.
 fn side_path(s: &str) -> Option<String> {
     let s = s.split('\t').next().unwrap_or(s).trim_end();
     if s == "/dev/null" {
         return None;
     }
-    let s = s
-        .strip_prefix("a/")
-        .or_else(|| s.strip_prefix("b/"))
-        .unwrap_or(s);
-    Some(s.to_string())
+    Some(strip_path_prefix(s).to_string())
+}
+
+/// Strip git's leading path prefix. The default is `a/`/`b/`, but a diff piped
+/// in from a `diff.mnemonicPrefix` user instead carries `c/` (commit), `i/`
+/// (index), `o/` (object), or `w/` (working tree). riffnav's own git calls pin
+/// `a/`/`b/` (see `autodiff::PREFIX_ARGS`), so this mainly covers external pipes.
+fn strip_path_prefix(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2
+        && bytes[1] == b'/'
+        && matches!(bytes[0], b'a' | b'b' | b'c' | b'i' | b'o' | b'w')
+    {
+        &s[2..]
+    } else {
+        s
+    }
 }
 
 /// `Binary files a/x and b/y differ` -> (old, new) paths.
@@ -179,10 +191,7 @@ fn diff_git_paths(line: &str) -> Option<(String, String)> {
 }
 
 fn strip_ab(s: &str) -> String {
-    s.strip_prefix("a/")
-        .or_else(|| s.strip_prefix("b/"))
-        .unwrap_or(s)
-        .to_string()
+    strip_path_prefix(s).to_string()
 }
 
 #[cfg(test)]
@@ -258,6 +267,19 @@ mod tests {
         assert_eq!(files[0].deletions, 1);
         // raw is handed to delta, which re-colors, so it must be free of codes.
         assert!(!files[0].raw.contains('\x1b'));
+    }
+
+    #[test]
+    fn strips_mnemonic_prefixes_from_piped_diff() {
+        // What a `diff.mnemonicPrefix = true` user pipes in: `c/` (commit) and
+        // `w/` (working tree) prefixes instead of `a/`/`b/`. The path must come
+        // out clean so the `o` key opens the real file.
+        let diff = "diff --git c/src/file.rs w/src/file.rs\n\
+                    index 1..2 100644\n--- c/src/file.rs\n+++ w/src/file.rs\n\
+                    @@ -1 +1 @@\n-old\n+new\n";
+        let f = &parse(diff)[0];
+        assert_eq!(f.path(), "src/file.rs");
+        assert_eq!(f.old_path.as_deref(), Some("src/file.rs"));
     }
 
     #[test]

@@ -17,6 +17,12 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+/// Pin the `a/`…`b/` diff path prefixes the parser strips, overriding whatever
+/// `diff.mnemonicPrefix` / `diff.noprefix` the user's git config sets. Without
+/// this, a machine with `diff.mnemonicPrefix = true` emits `i/`/`w/`/`c/`
+/// prefixes, leaving a stray prefix on each path so the `o` key opens nothing.
+const PREFIX_ARGS: [&str; 2] = ["--src-prefix=a/", "--dst-prefix=b/"];
+
 /// Which slice of the branch / working tree to render as a diff. The runtime
 /// toggle (`d`) cycles through these in [`DiffSource::CYCLE`] order. The names in
 /// the attributes are the spellings accepted by `--diff` and the `diff_source`
@@ -52,15 +58,21 @@ impl DiffSource {
     }
 
     /// The `git` arguments that produce this source's diff. `base` is only used
-    /// by [`DiffSource::Committed`]; the others ignore it.
+    /// by [`DiffSource::Committed`]; the others ignore it. Every invocation forces
+    /// the conventional `a/`…`b/` path prefixes via [`PREFIX_ARGS`].
     fn args(self, base: &str) -> Vec<String> {
-        let owned = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect();
+        let mut args: Vec<String> = ["diff"]
+            .into_iter()
+            .chain(PREFIX_ARGS)
+            .map(str::to_string)
+            .collect();
         match self {
-            Self::AllUncommitted => owned(&["diff", "HEAD"]),
-            Self::Committed => vec!["diff".to_string(), format!("{base}...HEAD")],
-            Self::Staged => owned(&["diff", "--staged"]),
-            Self::Unstaged => owned(&["diff"]),
+            Self::AllUncommitted => args.push("HEAD".to_string()),
+            Self::Committed => args.push(format!("{base}...HEAD")),
+            Self::Staged => args.push("--staged".to_string()),
+            Self::Unstaged => {}
         }
+        args
     }
 
     /// Whether this view should fold in untracked files. The working-tree views
@@ -257,7 +269,9 @@ fn untracked_diff() -> String {
 /// exit status.
 fn diff_against_devnull(path: &str) -> Option<String> {
     let out = Command::new("git")
-        .args(["diff", "--no-index", "--", "/dev/null", path])
+        .args(["diff", "--no-index"])
+        .args(PREFIX_ARGS)
+        .args(["--", "/dev/null", path])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -280,16 +294,30 @@ mod tests {
 
     #[test]
     fn args_match_the_intended_git_commands() {
-        assert_eq!(DiffSource::AllUncommitted.args("base"), ["diff", "HEAD"]);
-        assert_eq!(DiffSource::Staged.args("base"), ["diff", "--staged"]);
-        assert_eq!(DiffSource::Unstaged.args("base"), ["diff"]);
+        // Every view pins `a/`…`b/` prefixes so the parser resolves paths
+        // regardless of the user's `diff.mnemonicPrefix` config.
+        let pre = ["--src-prefix=a/", "--dst-prefix=b/"];
+        assert_eq!(
+            DiffSource::AllUncommitted.args("base"),
+            ["diff", pre[0], pre[1], "HEAD"]
+        );
+        assert_eq!(
+            DiffSource::Staged.args("base"),
+            ["diff", pre[0], pre[1], "--staged"]
+        );
+        assert_eq!(DiffSource::Unstaged.args("base"), ["diff", pre[0], pre[1]]);
     }
 
     #[test]
     fn committed_args_interpolate_the_base_as_three_dot() {
         assert_eq!(
             DiffSource::Committed.args("origin/main"),
-            ["diff", "origin/main...HEAD"]
+            [
+                "diff",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "origin/main...HEAD"
+            ]
         );
     }
 
