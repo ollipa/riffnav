@@ -44,6 +44,12 @@
 # flows file-to-file. Set false to keep the selection put. Unmarking never moves.
 # review_auto_advance = true
 
+# Push "viewed" marks to the matching GitHub PR (one-way), ticking GitHub's
+# per-file "Viewed" checkbox to match. Only syncs while reviewing the branch-vs-
+# base view (the "committed" diff source) on a branch with an open PR; the
+# uncommitted/staged/unstaged views stay local. Needs the `gh` CLI authenticated.
+# review_sync_github = false
+
 # --- Bare launch (running `riffnav` with no piped diff, inside a repo) ---
 
 # Base branch for the "branch vs base" view. Omit to auto-detect it from

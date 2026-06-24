@@ -14,7 +14,7 @@ use crate::autodiff::{AutoDiff, DiffSource};
 use crate::config::Config;
 use crate::delta::RenderCache;
 use crate::diff::{FileDiff, FileStatus};
-use crate::forge::Forge;
+use crate::forge::{Forge, ReviewSync};
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
 use crate::review::ReviewStore;
@@ -85,6 +85,9 @@ pub struct App {
     /// The detected source-code forge (e.g. GitHub), enabling the `W` web-diff
     /// key; `None` when no supported forge backs this repo.
     forge: Option<Forge>,
+    /// One-way "viewed" sync to the branch's GitHub PR, when armed via config
+    /// (and a GitHub forge is present). `None` leaves marks purely local.
+    review_sync: Option<ReviewSync>,
     /// Whether we've zoomed our own herdr pane, so we can restore it on exit
     /// rather than leaving herdr maximized behind us.
     zoomed: bool,
@@ -145,6 +148,7 @@ impl App {
             autodiff: None,
             herdr: None,
             forge: None,
+            review_sync: None,
             zoomed: false,
             status_deadline: None,
         }
@@ -232,6 +236,26 @@ impl App {
         self.forge.is_some()
     }
 
+    /// Arm one-way "viewed" sync to the branch's GitHub PR (the `review_sync_github`
+    /// config key). Only takes effect when a GitHub forge was detected; otherwise
+    /// it's a no-op and marks stay purely local. Call after [`App::enable_forge`].
+    pub fn enable_review_sync(&mut self, enabled: bool) {
+        if enabled && self.forge.is_some() {
+            self.review_sync = Some(ReviewSync::new());
+        }
+    }
+
+    /// Whether a viewed mark for the selected file should be pushed to GitHub:
+    /// sync is armed AND we're in the branch-vs-base view (the only view that
+    /// mirrors the PR diff). The uncommitted/staged/unstaged views stay local.
+    fn syncs_viewed_marks(&self) -> bool {
+        self.review_sync.is_some()
+            && matches!(
+                self.autodiff.as_ref().map(|a| a.source),
+                Some(DiffSource::Committed)
+            )
+    }
+
     /// Load persistent "viewed" review state for the current repo+branch (and
     /// garbage-collect stale state). A no-op outside a git repo, where the store
     /// stays session-only. Called once at startup, after `files` are in place.
@@ -278,11 +302,16 @@ impl App {
         let now_viewed = self.review.toggle(self.file_hashes[idx], &path);
         self.review.save();
         let progress = format!("{}/{}", self.viewed_count(), self.files.len());
-        self.set_status(if now_viewed {
-            format!("✓ Viewed {path}  ({progress})")
-        } else {
-            format!("Unviewed {path}  ({progress})")
-        });
+        // Push the mark to the GitHub PR when armed and in the PR view; the local
+        // mark above always stands, so a sync error is reported but not fatal.
+        match self.sync_viewed_mark(&path, now_viewed) {
+            Err(e) => self.set_status(format!("GitHub sync failed: {e:#}")),
+            Ok(()) => self.set_status(if now_viewed {
+                format!("✓ Viewed {path}  ({progress})")
+            } else {
+                format!("Unviewed {path}  ({progress})")
+            }),
+        }
         // Flow to the next file to review — but only on marking, not unmarking,
         // and keep the status above so progress stays visible.
         if now_viewed
@@ -291,6 +320,19 @@ impl App {
         {
             self.select(i);
         }
+    }
+
+    /// Push the selected file's viewed mark to the GitHub PR, or do nothing when
+    /// syncing isn't armed for this view (see [`App::syncs_viewed_marks`]). The
+    /// `gh` round trip runs inline, so this briefly blocks while in the PR view.
+    fn sync_viewed_mark(&mut self, path: &str, viewed: bool) -> Result<()> {
+        if !self.syncs_viewed_marks() {
+            return Ok(());
+        }
+        self.review_sync
+            .as_mut()
+            .expect("sync armed when syncs_viewed_marks is true")
+            .mark(path, viewed)
     }
 
     /// The next unviewed file row after `from`, wrapping around, or `None` when
@@ -949,6 +991,26 @@ mod tests {
         app.toggle_viewed();
         assert_eq!(app.viewed_count(), 0);
         assert!(!app.is_viewed(first));
+    }
+
+    #[test]
+    fn syncs_viewed_marks_only_in_committed_view_when_armed() {
+        let mut app = app_with(vec![file("a.rs")]);
+        // Nothing armed and no auto-diff (e.g. a piped diff): purely local.
+        assert!(!app.syncs_viewed_marks());
+
+        // Arm sync, but a working-tree view doesn't mirror the PR: still local.
+        app.review_sync = Some(ReviewSync::new());
+        app.enable_autodiff(DiffSource::AllUncommitted, Some("origin/main".into()));
+        assert!(!app.syncs_viewed_marks());
+
+        // Branch-vs-base view with sync armed: this is the PR view, so it syncs.
+        app.enable_autodiff(DiffSource::Committed, Some("origin/main".into()));
+        assert!(app.syncs_viewed_marks());
+
+        // Armed but not in auto-diff mode at all: nothing to sync against.
+        app.autodiff = None;
+        assert!(!app.syncs_viewed_marks());
     }
 
     #[test]

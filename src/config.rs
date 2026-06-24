@@ -47,6 +47,10 @@ pub struct Config {
     /// After marking a file viewed with `v`, jump to the next unviewed file so
     /// review flows file-to-file. Unmarking never moves.
     pub review_auto_advance: bool,
+    /// Push "viewed" marks to the matching GitHub PR (one-way) while reviewing
+    /// the branch-vs-base view, so they tick GitHub's per-file "Viewed" checkbox
+    /// too. Off by default; needs the `gh` CLI authenticated and a GitHub remote.
+    pub review_sync_github: bool,
     /// Base branch for the branch-vs-base auto-diff view on a bare launch.
     /// `None` auto-detects (origin/HEAD, then a local main/master). CLI `--base`
     /// overrides this.
@@ -71,6 +75,7 @@ impl Default for Config {
             open_depth: 64,
             review_retention_days: 90,
             review_auto_advance: true,
+            review_sync_github: false,
             base_branch: None,
             diff_source: None,
         }
@@ -188,6 +193,16 @@ mod tests {
             Some(DiffSource::AllUncommitted)
         );
         assert!(from_toml("diff_source = \"nonsense\"").is_err());
+    }
+
+    #[test]
+    fn review_sync_github_defaults_off_and_parses() {
+        assert!(!from_toml("").unwrap().review_sync_github);
+        assert!(
+            from_toml("review_sync_github = true")
+                .unwrap()
+                .review_sync_github
+        );
     }
 
     #[test]

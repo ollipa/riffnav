@@ -130,6 +130,7 @@ fn main() -> Result<()> {
     }
     app.enable_herdr();
     app.enable_forge();
+    app.enable_review_sync(config.review_sync_github);
     app.enable_review(config.review_retention_days);
     app.run()
 }

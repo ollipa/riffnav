@@ -13,6 +13,7 @@
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 
 /// A detected source-code hosting provider for the current repository.
 pub enum Forge {
@@ -45,6 +46,103 @@ impl Forge {
         match self {
             Self::GitHub => run_quietly("gh", &["pr", "diff", "--web"]),
         }
+    }
+}
+
+/// One-way sync of riffnav's "viewed" marks to the GitHub pull request for the
+/// current branch, ticking GitHub's per-file "Viewed" checkbox to match. Only
+/// meaningful for the branch-vs-base ("Committed") view — the caller enforces
+/// that — since the other views don't correspond to anything on the PR.
+///
+/// The PR's GraphQL node id is resolved once and cached so each mark is a single
+/// `gh api graphql` round trip. A branch with no PR is cached too, reported once
+/// and then quietly skipped for the rest of the session.
+pub struct ReviewSync {
+    pr: PrState,
+}
+
+/// Cached PR resolution for the current branch.
+enum PrState {
+    /// Not looked up yet — the next mark resolves it.
+    Unresolved,
+    /// The PR's GraphQL node id, ready to mark against.
+    Ready(String),
+    /// No PR for this branch (or `gh` failed) — already reported once, now mute.
+    Unavailable,
+}
+
+/// Shape of the one field we read from `gh pr view --json id`.
+#[derive(Deserialize)]
+struct PrView {
+    id: String,
+}
+
+impl ReviewSync {
+    pub fn new() -> Self {
+        Self {
+            pr: PrState::Unresolved,
+        }
+    }
+
+    /// Mark (`viewed`) or unmark `path` as viewed on the current branch's PR,
+    /// resolving and caching the PR on first use. Returns the `gh` error so the
+    /// caller can surface it; a missing PR is reported only on the first mark and
+    /// is a silent no-op thereafter. The local viewed mark stands regardless.
+    pub fn mark(&mut self, path: &str, viewed: bool) -> Result<()> {
+        let id = match &self.pr {
+            PrState::Ready(id) => id.clone(),
+            // Already determined there's nothing to sync to; stay quiet.
+            PrState::Unavailable => return Ok(()),
+            PrState::Unresolved => match resolve_pr() {
+                Ok(id) => {
+                    self.pr = PrState::Ready(id.clone());
+                    id
+                }
+                Err(e) => {
+                    // Cache the failure so we don't re-probe on every keypress,
+                    // and report it this once.
+                    self.pr = PrState::Unavailable;
+                    return Err(e);
+                }
+            },
+        };
+        set_file_viewed(&id, path, viewed)
+    }
+}
+
+/// The PR node id for the current branch, via `gh pr view --json id`. Errors
+/// carry `gh`'s own message (e.g. "no pull requests found for branch …").
+fn resolve_pr() -> Result<String> {
+    let json = run_capture("gh", &["pr", "view", "--json", "id"])?;
+    let view: PrView =
+        serde_json::from_str(&json).context("parsing `gh pr view --json id` output")?;
+    Ok(view.id)
+}
+
+/// Run the mark/unmark GraphQL mutation for one file against `pr_id`.
+fn set_file_viewed(pr_id: &str, path: &str, viewed: bool) -> Result<()> {
+    run_quietly(
+        "gh",
+        &[
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={}", viewed_mutation(viewed)),
+            "-f",
+            &format!("pr={pr_id}"),
+            "-f",
+            &format!("path={path}"),
+        ],
+    )
+}
+
+/// The GraphQL mutation marking (or unmarking) a file as viewed. Variables `$pr`
+/// and `$path` are supplied as `gh api graphql -f pr=… -f path=…`.
+fn viewed_mutation(viewed: bool) -> &'static str {
+    if viewed {
+        "mutation($pr:ID!,$path:String!){ markFileAsViewed(input:{pullRequestId:$pr,path:$path}){ clientMutationId } }"
+    } else {
+        "mutation($pr:ID!,$path:String!){ unmarkFileAsViewed(input:{pullRequestId:$pr,path:$path}){ clientMutationId } }"
     }
 }
 
@@ -104,6 +202,23 @@ fn run_quietly(program: &str, args: &[&str]) -> Result<()> {
     }
 }
 
+/// Like [`run_quietly`], but returns the command's stdout on success. Used for
+/// `gh` calls whose output we parse (e.g. `gh pr view --json …`).
+fn run_capture(program: &str, args: &[&str]) -> Result<String> {
+    let out = Command::new(program)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run `{program}`"))?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    match stderr.lines().map(str::trim).find(|l| !l.is_empty()) {
+        Some(line) => bail!("{line}"),
+        None => bail!("`{program}` exited with {}", out.status),
+    }
+}
+
 /// Extract the host from a git remote URL, handling both scp-like SSH
 /// (`git@github.com:owner/repo.git`) and URL forms
 /// (`https://github.com/owner/repo.git`, `ssh://git@github.com:22/owner/repo`).
@@ -125,7 +240,18 @@ fn parse_host(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_host;
+    use super::{parse_host, viewed_mutation};
+
+    #[test]
+    fn viewed_mutation_picks_the_right_graphql_field() {
+        assert!(viewed_mutation(true).contains("markFileAsViewed"));
+        assert!(!viewed_mutation(true).contains("unmarkFileAsViewed"));
+        assert!(viewed_mutation(false).contains("unmarkFileAsViewed"));
+        // Both reference the `$pr`/`$path` variables `gh -f pr=…/-f path=…` fill.
+        for q in [viewed_mutation(true), viewed_mutation(false)] {
+            assert!(q.contains("$pr") && q.contains("$path"));
+        }
+    }
 
     #[test]
     fn scp_like_ssh() {
