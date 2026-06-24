@@ -26,6 +26,12 @@ const MIN_DIFF_WIDTH: u16 = 20;
 const HALF_PAGE: i32 = 15;
 /// How long a transient status message stays on screen before clearing itself.
 const STATUS_TTL: Duration = Duration::from_secs(3);
+/// While a GitHub "viewed" sync is in flight, cap the interactive input wait so
+/// its result is drained and surfaced promptly, without waiting on a keypress.
+const SYNC_POLL: Duration = Duration::from_millis(200);
+/// How long quitting waits for queued GitHub syncs to finish before giving up,
+/// so a just-marked file still reaches the PR without a stuck `gh` hanging exit.
+const SYNC_FLUSH_GRACE: Duration = Duration::from_secs(1);
 
 /// Which pane the j/k keys act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -302,16 +308,15 @@ impl App {
         let now_viewed = self.review.toggle(self.file_hashes[idx], &path);
         self.review.save();
         let progress = format!("{}/{}", self.viewed_count(), self.files.len());
-        // Push the mark to the GitHub PR when armed and in the PR view; the local
-        // mark above always stands, so a sync error is reported but not fatal.
-        match self.sync_viewed_mark(&path, now_viewed) {
-            Err(e) => self.set_status(format!("GitHub sync failed: {e:#}")),
-            Ok(()) => self.set_status(if now_viewed {
-                format!("✓ Viewed {path}  ({progress})")
-            } else {
-                format!("Unviewed {path}  ({progress})")
-            }),
-        }
+        // Queue a GitHub sync when armed and in the PR view; it runs in the
+        // background, so show the mark's success now and let the event loop
+        // replace it only if the sync later fails. The local mark always stands.
+        self.queue_sync(&path, now_viewed);
+        self.set_status(if now_viewed {
+            format!("✓ Viewed {path}  ({progress})")
+        } else {
+            format!("Unviewed {path}  ({progress})")
+        });
         // Flow to the next file to review — but only on marking, not unmarking,
         // and keep the status above so progress stays visible.
         if now_viewed
@@ -322,17 +327,42 @@ impl App {
         }
     }
 
-    /// Push the selected file's viewed mark to the GitHub PR, or do nothing when
-    /// syncing isn't armed for this view (see [`App::syncs_viewed_marks`]). The
-    /// `gh` round trip runs inline, so this briefly blocks while in the PR view.
-    fn sync_viewed_mark(&mut self, path: &str, viewed: bool) -> Result<()> {
+    /// Queue a GitHub sync of `path`'s viewed mark when armed and in the PR view
+    /// (see [`App::syncs_viewed_marks`]); a no-op otherwise. The `gh` round trip
+    /// runs on a background thread, so this returns immediately — the mark's
+    /// optimistic status stands until [`App::drain_review_sync`] reports a failure.
+    fn queue_sync(&mut self, path: &str, viewed: bool) {
         if !self.syncs_viewed_marks() {
-            return Ok(());
+            return;
         }
         self.review_sync
             .as_mut()
             .expect("sync armed when syncs_viewed_marks is true")
-            .mark(path, viewed)
+            .enqueue(path, viewed);
+    }
+
+    /// Surface any GitHub sync that finished failing since the last tick. With
+    /// the optimistic mark already shown, only a real `gh` failure replaces it —
+    /// and the local viewed mark stands regardless. A no-op when sync isn't armed.
+    fn drain_review_sync(&mut self) {
+        let errors = match self.review_sync.as_mut() {
+            Some(sync) => sync.drain(),
+            None => return,
+        };
+        // The status line shows one message; the most recent failure is the
+        // useful one (e.g. the same auth/PR error repeated across a burst).
+        if let Some(msg) = errors.into_iter().next_back() {
+            self.set_status(format!("GitHub sync failed: {msg}"));
+        }
+    }
+
+    /// On shutdown, give queued GitHub syncs a brief, bounded chance to finish so
+    /// a file marked moments before quitting still reaches the PR — without a slow
+    /// `gh` hanging exit. A no-op when sync isn't armed or nothing is in flight.
+    fn flush_review_sync(&mut self) {
+        if let Some(sync) = self.review_sync.as_mut() {
+            sync.flush(SYNC_FLUSH_GRACE);
+        }
     }
 
     /// The next unviewed file row after `from`, wrapping around, or `None` when
@@ -423,6 +453,7 @@ impl App {
         let result = self.event_loop(&mut terminal);
         ratatui::restore();
         self.restore_herdr_zoom();
+        self.flush_review_sync(); // let in-flight GitHub marks finish (bounded)
         self.review.save(); // safety net; toggles already persist eagerly
         result
     }
@@ -464,21 +495,40 @@ impl App {
     }
 
     /// Interactive (non-watch) input wait. Normally blocks for the next event,
-    /// but when a timed status is showing it waits only until that deadline so the
-    /// message clears itself without needing a keypress.
+    /// but bounds the wait when something needs servicing without a keypress: a
+    /// timed status that must expire, or an in-flight GitHub sync whose result
+    /// should be surfaced. Both are handled after the wait returns.
     fn wait_for_event(&mut self) -> Result<()> {
-        match self.status_deadline {
-            Some(deadline) => {
-                let timeout = deadline.saturating_duration_since(Instant::now());
+        match self.idle_timeout() {
+            Some(timeout) => {
                 if event::poll(timeout)? {
                     self.handle_event()?;
-                } else {
-                    self.clear_status();
                 }
             }
             None => self.handle_event()?,
         }
+        self.expire_status();
+        self.drain_review_sync();
         Ok(())
+    }
+
+    /// How long the interactive wait may block, or `None` to block until a key.
+    /// Bounded by a showing status's remaining lifetime and, while a sync is in
+    /// flight, by [`SYNC_POLL`] — whichever is sooner — so both self-service.
+    fn idle_timeout(&self) -> Option<Duration> {
+        let status = self
+            .status_deadline
+            .map(|d| d.saturating_duration_since(Instant::now()));
+        let syncing = self
+            .review_sync
+            .as_ref()
+            .is_some_and(ReviewSync::has_pending);
+        match (status, syncing) {
+            (Some(s), true) => Some(s.min(SYNC_POLL)),
+            (Some(s), false) => Some(s),
+            (None, true) => Some(SYNC_POLL),
+            (None, false) => None,
+        }
     }
 
     /// One watch-mode iteration: wait briefly for input, then service any due

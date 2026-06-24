@@ -11,6 +11,9 @@
 //! detection and open command; the `W` key and the UI wiring stay the same.
 
 use std::process::Command;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -54,16 +57,30 @@ impl Forge {
 /// meaningful for the branch-vs-base ("Committed") view — the caller enforces
 /// that — since the other views don't correspond to anything on the PR.
 ///
-/// The PR's GraphQL node id is resolved once and cached so each mark is a single
-/// `gh api graphql` round trip. A branch with no PR is cached too, reported once
-/// and then quietly skipped for the rest of the session.
+/// Marks are handed to a background thread so the UI never blocks on `gh`: each
+/// `v` keypress enqueues a job and returns immediately, and the event loop drains
+/// outcomes — surfacing only failures — via [`ReviewSync::drain`]. The PR's
+/// GraphQL node id is resolved once on the worker and cached; a branch with no PR
+/// is cached too, reported once and then quietly skipped for the session.
 pub struct ReviewSync {
-    pr: PrState,
+    /// Hands jobs to the worker. Dropping it (on app shutdown) ends the thread.
+    jobs: Sender<Job>,
+    /// One outcome per enqueued job: `Some(msg)` is an error to surface, `None`
+    /// is a success or a deliberate skip (no PR for this branch).
+    results: Receiver<Option<String>>,
+    /// Jobs enqueued but not yet drained — i.e. syncs still in flight.
+    pending: usize,
 }
 
-/// Cached PR resolution for the current branch.
+/// A queued mark/unmark request for the worker thread.
+struct Job {
+    path: String,
+    viewed: bool,
+}
+
+/// Cached PR resolution for the current branch, owned by the worker thread.
 enum PrState {
-    /// Not looked up yet — the next mark resolves it.
+    /// Not looked up yet — the next job resolves it.
     Unresolved,
     /// The PR's GraphQL node id, ready to mark against.
     Ready(String),
@@ -78,35 +95,110 @@ struct PrView {
 }
 
 impl ReviewSync {
+    /// Arm sync and spawn the worker thread. The thread idles on its channel
+    /// until the first [`ReviewSync::enqueue`], so arming is cheap.
     pub fn new() -> Self {
+        let (jobs_tx, jobs_rx) = channel::<Job>();
+        let (results_tx, results_rx) = channel::<Option<String>>();
+        thread::spawn(move || worker(jobs_rx, results_tx));
         Self {
-            pr: PrState::Unresolved,
+            jobs: jobs_tx,
+            results: results_rx,
+            pending: 0,
         }
     }
 
-    /// Mark (`viewed`) or unmark `path` as viewed on the current branch's PR,
-    /// resolving and caching the PR on first use. Returns the `gh` error so the
-    /// caller can surface it; a missing PR is reported only on the first mark and
-    /// is a silent no-op thereafter. The local viewed mark stands regardless.
-    pub fn mark(&mut self, path: &str, viewed: bool) -> Result<()> {
-        let id = match &self.pr {
-            PrState::Ready(id) => id.clone(),
-            // Already determined there's nothing to sync to; stay quiet.
-            PrState::Unavailable => return Ok(()),
-            PrState::Unresolved => match resolve_pr() {
-                Ok(id) => {
-                    self.pr = PrState::Ready(id.clone());
-                    id
-                }
-                Err(e) => {
-                    // Cache the failure so we don't re-probe on every keypress,
-                    // and report it this once.
-                    self.pr = PrState::Unavailable;
-                    return Err(e);
-                }
-            },
+    /// Queue a mark (`viewed`) / unmark of `path` on the branch's PR and return
+    /// at once; the `gh` round trip runs on the worker. Drain the outcome later
+    /// with [`ReviewSync::drain`]. The local viewed mark stands regardless.
+    pub fn enqueue(&mut self, path: &str, viewed: bool) {
+        let job = Job {
+            path: path.to_string(),
+            viewed,
         };
-        set_file_viewed(&id, path, viewed)
+        // Send only fails once the worker has gone; then there's nothing in
+        // flight, so don't count a job whose result will never arrive.
+        if self.jobs.send(job).is_ok() {
+            self.pending += 1;
+        }
+    }
+
+    /// Whether any queued sync hasn't reported back yet — the event loop uses
+    /// this to keep polling so results surface without needing a keypress.
+    pub fn has_pending(&self) -> bool {
+        self.pending > 0
+    }
+
+    /// Collect finished syncs without blocking, returning one message per failed
+    /// job (successes and deliberate skips report nothing).
+    pub fn drain(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
+        while let Ok(outcome) = self.results.try_recv() {
+            self.pending = self.pending.saturating_sub(1);
+            if let Some(msg) = outcome {
+                errors.push(msg);
+            }
+        }
+        errors
+    }
+
+    /// Best-effort wait for in-flight syncs to finish on shutdown, so a file
+    /// marked moments before quitting still reaches the PR. Bounded by `grace`,
+    /// so a slow or stuck `gh` can never hang quit.
+    pub fn flush(&mut self, grace: Duration) {
+        let deadline = Instant::now() + grace;
+        while self.pending > 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match self.results.recv_timeout(remaining) {
+                Ok(_) => self.pending = self.pending.saturating_sub(1),
+                // Timed out, or the worker is gone: stop waiting either way.
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+/// Worker loop: own the PR resolution and run each queued mark/unmark to
+/// completion, reporting a message back for any that fails (and `None` otherwise,
+/// so the handle can track the in-flight count). Ends when the job sender drops.
+fn worker(jobs: Receiver<Job>, results: Sender<Option<String>>) {
+    let mut pr = PrState::Unresolved;
+    while let Ok(job) = jobs.recv() {
+        let outcome = run_job(&mut pr, &job);
+        // A send error means the app (and its receiver) is gone; stop.
+        if results.send(outcome).is_err() {
+            break;
+        }
+    }
+}
+
+/// Run one job against the cached PR state: resolve the PR lazily, cache a
+/// missing PR so we don't re-probe, and report a failure only the first time
+/// (then stay quiet). Returns an error message to surface, or `None`.
+fn run_job(pr: &mut PrState, job: &Job) -> Option<String> {
+    let id = match pr {
+        PrState::Ready(id) => id.clone(),
+        // Already determined there's nothing to sync to; stay quiet.
+        PrState::Unavailable => return None,
+        PrState::Unresolved => match resolve_pr() {
+            Ok(id) => {
+                *pr = PrState::Ready(id.clone());
+                id
+            }
+            Err(e) => {
+                // Cache the failure so we don't re-probe on every job, and
+                // report it just this once.
+                *pr = PrState::Unavailable;
+                return Some(format!("{e:#}"));
+            }
+        },
+    };
+    match set_file_viewed(&id, &job.path, job.viewed) {
+        Ok(()) => None,
+        Err(e) => Some(format!("{e:#}")),
     }
 }
 
@@ -240,7 +332,7 @@ fn parse_host(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_host, viewed_mutation};
+    use super::{Job, PrState, parse_host, run_job, viewed_mutation};
 
     #[test]
     fn viewed_mutation_picks_the_right_graphql_field() {
@@ -251,6 +343,18 @@ mod tests {
         for q in [viewed_mutation(true), viewed_mutation(false)] {
             assert!(q.contains("$pr") && q.contains("$path"));
         }
+    }
+
+    #[test]
+    fn unavailable_pr_skips_without_touching_the_network() {
+        // Once the branch is known to have no PR, a job neither shells out to
+        // `gh` nor reports anything — a silent no-op (mirrors "report once").
+        let mut pr = PrState::Unavailable;
+        let job = Job {
+            path: "src/main.rs".to_string(),
+            viewed: true,
+        };
+        assert!(run_job(&mut pr, &job).is_none());
     }
 
     #[test]
