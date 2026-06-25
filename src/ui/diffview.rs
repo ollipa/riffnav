@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Text;
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 
 use crate::app::App;
 
@@ -20,40 +20,29 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
     };
 
     // Added files always render unified (an empty left pane wastes space), so
-    // resolve the effective mode once and use it for both the cache lookup and
-    // the wrap decision below.
+    // resolve the effective mode once to key the cache lookup.
     let side_by_side = app.side_by_side_for(idx);
 
-    // Pull what we need out of the cache as owned values so the borrow ends
-    // before we write back the clamped scroll offset.
-    let rendered = app
+    // Build a widget covering just the visible window, clamping the scroll to the
+    // render's height. `visible` only ever lays out a viewport's worth of rows —
+    // not the whole prefix up to the scroll offset — so deep scrolling stays
+    // cheap. The returned paragraph owns its lines, so the cache borrow ends here
+    // and we can write the clamped scroll back below.
+    let built = app
         .cache
         .get(idx, diff_width, side_by_side, app.diff_theme)
-        .map(|r| (r.text.clone(), r.lines));
+        .map(|r| {
+            let scroll = app.diff_scroll.min(r.height.saturating_sub(area.height));
+            (r.visible(scroll, area.height), scroll)
+        });
 
-    let Some((text, lines)) = rendered else {
+    let Some((paragraph, scroll)) = built else {
         placeholder(frame, area, "  rendering…");
         return;
     };
-
-    // delta wraps side-by-side output to the pane width itself, so its line
-    // count is exact and we render as-is. Unified output is left unwrapped (delta
-    // assumes a downstream pager), so we wrap it here — otherwise long lines are
-    // truncated at the pane edge — and measure the wrapped height so scrolling
-    // can still reach the bottom.
-    let mut paragraph = Paragraph::new(text);
-    let height = if side_by_side {
-        lines
-    } else {
-        paragraph = paragraph.wrap(Wrap { trim: false });
-        paragraph.line_count(area.width).min(u16::MAX as usize) as u16
-    };
-
-    let max_scroll = height.saturating_sub(area.height);
-    let scroll = app.diff_scroll.min(max_scroll);
     app.diff_scroll = scroll;
 
-    frame.render_widget(paragraph.scroll((scroll, 0)), area);
+    frame.render_widget(paragraph, area);
 }
 
 fn placeholder(frame: &mut Frame, area: Rect, msg: &str) {

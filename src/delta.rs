@@ -6,9 +6,15 @@ use std::process::{Command, Stdio};
 use ansi_to_tui::IntoText;
 use anyhow::{Context, Result, bail};
 use ratatui::text::Text;
+use ratatui::widgets::{Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
 use crate::theme::DiffTheme;
+
+/// Word-wrap setting shared by the height measurement and the per-frame render,
+/// so both lay text out identically. `trim: false` keeps leading whitespace
+/// (diff indentation) on wrapped rows.
+const WRAP: Wrap = Wrap { trim: false };
 
 /// Verify `delta` is callable, with an actionable error if it isn't.
 pub fn ensure_available() -> Result<()> {
@@ -193,7 +199,81 @@ fn utf8_len(lead: u8) -> usize {
 /// A delta-rendered file, ready to drop into the diff viewport.
 pub struct Rendered {
     pub text: Text<'static>,
-    pub lines: u16,
+    /// Scrollable height in rows at the keyed `width`: the exact line count for
+    /// side-by-side (delta already wrapped it), or the wrapped row count for
+    /// unified (delta leaves long lines unwrapped, so the viewer wraps them).
+    pub height: u16,
+    /// Unified only: cumulative wrapped-row offset before each source line, with
+    /// a trailing total — `row_offsets[i]` is the first screen row of line `i`.
+    /// `None` for side-by-side, where lines map one-to-one to rows.
+    ///
+    /// This is what keeps scrolling cheap. ratatui's `Paragraph` re-wraps every
+    /// row from the top up to the scroll offset on each frame (`O(scroll)`), so
+    /// deep scrolling in a long diff slows to a crawl. With these offsets the
+    /// viewer seeks straight to the line under the scroll position and wraps only
+    /// the visible window — see [`Rendered::visible`].
+    row_offsets: Option<Vec<u32>>,
+}
+
+impl Rendered {
+    /// A `Paragraph` showing just the rows visible at `scroll` for a viewport
+    /// `height` rows tall, so per-frame work is `O(height)` rather than
+    /// `O(scroll)`. The returned widget owns its (cloned) slice of lines, so it
+    /// outlives the borrow of `self`.
+    ///
+    /// `scroll` must already be clamped to `self.height`.
+    pub fn visible(&self, scroll: u16, height: u16) -> Paragraph<'static> {
+        let lines = &self.text.lines;
+        match &self.row_offsets {
+            // Side-by-side: one source line per row, slice it directly.
+            None => {
+                let start = (scroll as usize).min(lines.len());
+                let end = start.saturating_add(height as usize).min(lines.len());
+                Paragraph::new(Text::from(lines[start..end].to_vec()))
+            }
+            // Unified: find the source line holding wrapped row `scroll`, take it
+            // plus enough following lines to fill the viewport (each contributes
+            // at least one row), and let ratatui wrap just that window. The
+            // sub-offset skips the part of the first line already scrolled past.
+            Some(offsets) => {
+                let start = match offsets.binary_search(&u32::from(scroll)) {
+                    Ok(i) => i,
+                    Err(i) => i.saturating_sub(1),
+                };
+                // `offsets[start] <= scroll` by construction, so this can't wrap.
+                let sub = (u32::from(scroll) - offsets[start]) as u16;
+                let end = start.saturating_add(height as usize + 1).min(lines.len());
+                Paragraph::new(Text::from(lines[start..end].to_vec()))
+                    .wrap(WRAP)
+                    .scroll((sub, 0))
+            }
+        }
+    }
+}
+
+/// Measure a render at `width`: its scrollable height and, for unified output,
+/// the per-line wrapped-row offsets (see [`Rendered::row_offsets`]). Side-by-side
+/// is already wrapped by delta, so each line is exactly one row.
+fn measure(text: &Text<'static>, width: u16, side_by_side: bool) -> (u16, Option<Vec<u32>>) {
+    if side_by_side {
+        let height = text.lines.len().min(u16::MAX as usize) as u16;
+        return (height, None);
+    }
+    // Wrap each line on its own — `Wrap` resets at every newline, so a line's
+    // wrapped height is independent of its neighbours and the offsets sum exactly
+    // to what the full paragraph would lay out.
+    let mut offsets = Vec::with_capacity(text.lines.len() + 1);
+    let mut acc: u32 = 0;
+    for line in &text.lines {
+        offsets.push(acc);
+        let rows = Paragraph::new(Text::from(line.clone()))
+            .wrap(WRAP)
+            .line_count(width)
+            .max(1) as u32;
+        acc = acc.saturating_add(rows);
+    }
+    offsets.push(acc);
+    (acc.min(u16::MAX as u32) as u16, Some(offsets))
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -248,8 +328,12 @@ impl RenderCache {
             let text = bytes
                 .into_text()
                 .context("converting delta output to ratatui text")?;
-            let lines = text.lines.len().min(u16::MAX as usize) as u16;
-            slot.insert(Rendered { text, lines });
+            let (height, row_offsets) = measure(&text, width, side_by_side);
+            slot.insert(Rendered {
+                text,
+                height,
+                row_offsets,
+            });
         }
         Ok(())
     }
@@ -291,7 +375,7 @@ impl RenderCache {
         theme: DiffTheme,
         text: Text<'static>,
     ) {
-        let lines = text.lines.len().min(u16::MAX as usize) as u16;
+        let (height, row_offsets) = measure(&text, width, side_by_side);
         self.entries.insert(
             Key {
                 file,
@@ -299,7 +383,11 @@ impl RenderCache {
                 side_by_side,
                 theme,
             },
-            Rendered { text, lines },
+            Rendered {
+                text,
+                height,
+                row_offsets,
+            },
         );
     }
 }
@@ -307,6 +395,47 @@ impl RenderCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::text::Line;
+
+    /// The windowed render (`Rendered::visible`) must be pixel-for-pixel identical
+    /// to the naive "wrap the whole text, then scroll" it replaces — at every
+    /// scroll offset. Equivalence here is what lets us swap the `O(scroll)` render
+    /// for an `O(viewport)` one without changing what the user sees.
+    #[test]
+    fn visible_window_matches_full_wrap_at_every_scroll() {
+        let (width, view_h) = (24u16, 6u16);
+        // A mix of blank, short, and several-widths-long lines so wrapping varies
+        // line to line and the per-line offsets get a real workout.
+        let lines: Vec<Line> = (0..40)
+            .map(|i: usize| Line::from(format!("{i:02}:{}", "w".repeat(i * 7 % 61))))
+            .collect();
+        let text = Text::from(lines);
+
+        let (height, row_offsets) = measure(&text, width, false);
+        // The per-line offsets must sum to the same height a single full wrap gives.
+        let full = Paragraph::new(text.clone()).wrap(WRAP).line_count(width) as u16;
+        assert_eq!(height, full, "summed offsets disagree with a full wrap");
+
+        let rendered = Rendered {
+            text: text.clone(),
+            height,
+            row_offsets,
+        };
+        let draw = |paragraph: Paragraph| -> Buffer {
+            let mut term = Terminal::new(TestBackend::new(width, view_h)).unwrap();
+            term.draw(|f| f.render_widget(paragraph, f.area())).unwrap();
+            term.backend().buffer().clone()
+        };
+
+        for scroll in 0..=height {
+            let got = draw(rendered.visible(scroll, view_h));
+            let want = draw(Paragraph::new(text.clone()).wrap(WRAP).scroll((scroll, 0)));
+            assert_eq!(got, want, "visible window differs from full wrap at scroll {scroll}");
+        }
+    }
 
     #[test]
     fn bce_pads_to_width_with_active_background() {

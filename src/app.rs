@@ -3,10 +3,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::ExecutableCommand;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -37,17 +35,38 @@ const SYNC_POLL: Duration = Duration::from_millis(200);
 /// How long quitting waits for queued GitHub syncs to finish before giving up,
 /// so a just-marked file still reaches the PR without a stuck `gh` hanging exit.
 const SYNC_FLUSH_GRACE: Duration = Duration::from_secs(1);
+/// Minimum spacing between redraws (~60 fps). A fast wheel can emit input far
+/// quicker than a terminal can repaint a full-screen diff; redrawing once per
+/// event piles full-screen repaints onto the terminal until it falls behind and
+/// the view (and quitting) lag. We still apply every event to the scroll state —
+/// so scroll speed is unchanged — but coalesce a burst into a single repaint.
+const FRAME_MIN: Duration = Duration::from_micros(16_667);
+
+/// The only mouse reporting riffnav uses: button presses — which include wheel
+/// ticks — with SGR-encoded coordinates (`?1000` + `?1006`). Deliberately *not*
+/// crossterm's `EnableMouseCapture`, which also enables motion tracking
+/// (`?1002`/`?1003`): riffnav ignores pointer motion, so reporting it just wakes
+/// the loop to repaint the whole screen for every mouse twitch.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
 
 /// Best-effort terminal mouse reporting, toggled around screen ownership: on
 /// while the TUI runs so clicks and the wheel reach us, off whenever we hand the
 /// terminal back (teardown, or suspending for `$EDITOR`). Failures are ignored —
 /// a terminal without mouse support just keeps working off the keyboard.
 fn enable_mouse() {
-    let _ = std::io::stdout().execute(EnableMouseCapture);
+    write_stdout(MOUSE_ON);
 }
 
 fn disable_mouse() {
-    let _ = std::io::stdout().execute(DisableMouseCapture);
+    write_stdout(MOUSE_OFF);
+}
+
+fn write_stdout(bytes: &[u8]) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(bytes);
+    let _ = out.flush();
 }
 
 /// Which pane the j/k keys act on.
@@ -503,11 +522,24 @@ impl App {
             }
 
             terminal.draw(|frame| crate::ui::draw(frame, self, diff_width))?;
+            let last_draw = Instant::now();
 
             if self.watch.is_some() {
                 self.watch_tick()?;
             } else {
                 self.wait_for_event()?;
+                // Cap the redraw rate: keep applying buffered input (so scroll
+                // distance is preserved) until this frame's budget elapses or the
+                // input goes quiet, then loop back to a single redraw. Without
+                // this a fast wheel triggers a full-screen repaint per event and
+                // the terminal can't keep up. Quitting/editor break out at once.
+                while !self.quit && self.pending_editor.is_none() {
+                    let remaining = FRAME_MIN.saturating_sub(last_draw.elapsed());
+                    if remaining.is_zero() || !event::poll(remaining)? {
+                        break;
+                    }
+                    self.handle_event()?;
+                }
             }
 
             // Suspending the TUI to run an editor needs the owned terminal.
