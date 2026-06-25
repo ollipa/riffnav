@@ -3,10 +3,15 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::ExecutableCommand;
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::DefaultTerminal;
+use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 use serde::Deserialize;
 
@@ -32,6 +37,18 @@ const SYNC_POLL: Duration = Duration::from_millis(200);
 /// How long quitting waits for queued GitHub syncs to finish before giving up,
 /// so a just-marked file still reaches the PR without a stuck `gh` hanging exit.
 const SYNC_FLUSH_GRACE: Duration = Duration::from_secs(1);
+
+/// Best-effort terminal mouse reporting, toggled around screen ownership: on
+/// while the TUI runs so clicks and the wheel reach us, off whenever we hand the
+/// terminal back (teardown, or suspending for `$EDITOR`). Failures are ignored —
+/// a terminal without mouse support just keeps working off the keyboard.
+fn enable_mouse() {
+    let _ = std::io::stdout().execute(EnableMouseCapture);
+}
+
+fn disable_mouse() {
+    let _ = std::io::stdout().execute(DisableMouseCapture);
+}
 
 /// Which pane the j/k keys act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -62,6 +79,11 @@ pub struct App {
     pub show_header: bool,
     pub show_footer: bool,
     pub tree_width: u16,
+    /// Screen rects of the tree and diff panes from the last render, so mouse
+    /// clicks and wheel scrolls map back to a row or a pane. `None` before the
+    /// first draw; `tree_area` is also `None` whenever the tree is hidden.
+    pub tree_area: Option<Rect>,
+    pub diff_area: Option<Rect>,
     pub focus: Focus,
     pub show_help: bool,
     pub status: Option<String>,
@@ -128,6 +150,8 @@ impl App {
             show_header: cfg.show_header,
             show_footer: cfg.show_footer,
             tree_width: cfg.tree_width.max(MIN_DIFF_WIDTH),
+            tree_area: None,
+            diff_area: None,
             // Start in the diff by default, so the first file is ready to read
             // and scroll; the tree can't hold focus when it's hidden.
             focus: if cfg.show_tree {
@@ -450,7 +474,9 @@ impl App {
 
     pub fn run(&mut self) -> Result<()> {
         let mut terminal = ratatui::init();
+        enable_mouse();
         let result = self.event_loop(&mut terminal);
+        disable_mouse();
         ratatui::restore();
         self.restore_herdr_zoom();
         self.flush_review_sync(); // let in-flight GitHub marks finish (bounded)
@@ -807,6 +833,7 @@ impl App {
 
     /// Suspend the TUI, run `$VISUAL`/`$EDITOR` on `path`, then resume.
     fn open_editor(&mut self, terminal: &mut DefaultTerminal, path: &str) -> Result<()> {
+        disable_mouse();
         ratatui::restore();
         let editor = std::env::var("VISUAL")
             .or_else(|_| std::env::var("EDITOR"))
@@ -814,6 +841,7 @@ impl App {
         let status = Command::new(&editor).arg(path).status();
 
         *terminal = ratatui::init();
+        enable_mouse();
         let _ = terminal.clear();
         self.last_width = 0; // force a re-render into the fresh screen
 
@@ -825,11 +853,64 @@ impl App {
         Ok(())
     }
 
+    /// Route a mouse event to the pane under the cursor. Overlays own the whole
+    /// screen, so clicks and scrolls beneath them are ignored.
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.finder.is_some() || self.show_help {
+            return;
+        }
+        let pos = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.click(pos),
+            MouseEventKind::ScrollDown => self.scroll_at(pos, 1),
+            MouseEventKind::ScrollUp => self.scroll_at(pos, -1),
+            _ => {}
+        }
+    }
+
+    /// Left-click: select the tree row under the cursor (folding/unfolding a
+    /// directory, like a file explorer), or just move focus to the diff pane.
+    fn click(&mut self, pos: Position) {
+        if let Some(area) = self.tree_area
+            && area.contains(pos)
+        {
+            // The list has no top border, so its first visible row sits at the
+            // pane's top edge; add the scroll offset to map a screen row to a
+            // row index.
+            let line = (pos.y - area.y) as usize + self.tree_state.offset();
+            if line < self.rows.len() {
+                self.focus = Focus::Tree;
+                self.select(line);
+                if matches!(self.rows[line].kind, RowKind::Dir { .. }) {
+                    self.toggle_fold();
+                }
+            }
+        } else if let Some(area) = self.diff_area
+            && area.contains(pos)
+        {
+            self.focus = Focus::Diff;
+        }
+    }
+
+    /// Wheel scrolling acts on whichever pane the cursor is over, independent of
+    /// keyboard focus: the tree moves its selection, the diff scrolls.
+    fn scroll_at(&mut self, pos: Position, dir: i32) {
+        if self.tree_area.is_some_and(|a| a.contains(pos)) {
+            self.move_selection(dir as isize);
+        } else {
+            self.scroll_diff(dir * 3);
+        }
+    }
+
     fn handle_event(&mut self) -> Result<()> {
         let mut ev = event::read()?;
         // Coalesce a burst of resize events (e.g. a drag) into the last one.
         while matches!(ev, Event::Resize(..)) && event::poll(Duration::ZERO)? {
             ev = event::read()?;
+        }
+        if let Event::Mouse(mouse) = ev {
+            self.handle_mouse(mouse);
+            return Ok(());
         }
         let Event::Key(key) = ev else {
             return Ok(());
@@ -1041,6 +1122,78 @@ mod tests {
         app.toggle_viewed();
         assert_eq!(app.viewed_count(), 0);
         assert!(!app.is_viewed(first));
+    }
+
+    #[test]
+    fn click_selects_the_file_row_under_the_cursor() {
+        let mut app = app_with(vec![file("a.rs"), file("b.rs"), file("c.rs")]);
+        app.tree_area = Some(Rect::new(0, 0, 30, 10));
+
+        // The three files flatten to rows 0..3; a click on the second screen
+        // row selects that row and pulls focus to the tree.
+        app.click(Position::new(4, 1));
+        assert_eq!(app.selected_index(), 1);
+        assert_eq!(app.focus, Focus::Tree);
+        assert!(app.selected_file().is_some());
+    }
+
+    #[test]
+    fn click_honors_the_list_scroll_offset() {
+        let mut app = app_with(vec![
+            file("a.rs"),
+            file("b.rs"),
+            file("c.rs"),
+            file("d.rs"),
+            file("e.rs"),
+        ]);
+        app.tree_area = Some(Rect::new(0, 0, 30, 3));
+        // The list is scrolled so row 2 is at the top of the pane.
+        *app.tree_state.offset_mut() = 2;
+
+        // Second visible screen row -> rows[2 + 1].
+        app.click(Position::new(4, 1));
+        assert_eq!(app.selected_index(), 3);
+    }
+
+    #[test]
+    fn click_on_a_directory_toggles_its_fold() {
+        // open_depth defaults to 64, so `dir/` starts expanded: rows are
+        // [dir, a.rs, b.rs].
+        let mut app = app_with(vec![file("dir/a.rs"), file("dir/b.rs")]);
+        app.tree_area = Some(Rect::new(0, 0, 30, 10));
+        assert_eq!(app.rows.len(), 3);
+
+        // Clicking the directory row collapses it, hiding its children.
+        app.click(Position::new(2, 0));
+        assert_eq!(app.selected_index(), 0);
+        assert_eq!(app.rows.len(), 1);
+
+        // Clicking it again expands it back.
+        app.click(Position::new(2, 0));
+        assert_eq!(app.rows.len(), 3);
+    }
+
+    #[test]
+    fn click_below_the_last_row_is_ignored() {
+        let mut app = app_with(vec![file("a.rs")]);
+        app.tree_area = Some(Rect::new(0, 0, 30, 10));
+        app.focus = Focus::Diff;
+
+        // Empty space well past the single row: nothing selected, focus stays.
+        app.click(Position::new(4, 7));
+        assert_eq!(app.selected_index(), 0);
+        assert_eq!(app.focus, Focus::Diff);
+    }
+
+    #[test]
+    fn click_in_the_diff_pane_focuses_it() {
+        let mut app = app_with(vec![file("a.rs")]);
+        app.tree_area = Some(Rect::new(0, 0, 30, 10));
+        app.diff_area = Some(Rect::new(30, 1, 50, 9));
+        app.focus = Focus::Tree;
+
+        app.click(Position::new(40, 4));
+        assert_eq!(app.focus, Focus::Diff);
     }
 
     #[test]

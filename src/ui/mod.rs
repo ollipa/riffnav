@@ -28,14 +28,19 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
         let [tree_area, diff_area] =
             Layout::horizontal([Constraint::Length(app.tree_width), Constraint::Min(0)])
                 .areas(body);
+        // Remember the tree rect so mouse events can hit-test rows.
+        app.tree_area = Some(tree_area);
         filetree::render(frame, tree_area, app, tree_focused);
         diff_area
     } else {
+        app.tree_area = None;
         body
     };
 
     let [diff_title, diff_body] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(diff_area);
+    // Remember the diff body rect for click-to-focus and wheel scrolling.
+    app.diff_area = Some(diff_body);
 
     if app.show_header {
         render_header(frame, header, app);
