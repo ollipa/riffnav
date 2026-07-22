@@ -43,12 +43,14 @@ const SYNC_FLUSH_GRACE: Duration = Duration::from_secs(1);
 const FRAME_MIN: Duration = Duration::from_micros(16_667);
 
 /// The only mouse reporting riffnav uses: button presses — which include wheel
-/// ticks — with SGR-encoded coordinates (`?1000` + `?1006`). Deliberately *not*
-/// crossterm's `EnableMouseCapture`, which also enables motion tracking
-/// (`?1002`/`?1003`): riffnav ignores pointer motion, so reporting it just wakes
-/// the loop to repaint the whole screen for every mouse twitch.
-const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
-const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
+/// ticks — plus motion *while a button is held*, with SGR-encoded coordinates
+/// (`?1002` + `?1006`). Button-drag motion is what makes the pane divider
+/// draggable. Deliberately *not* crossterm's `EnableMouseCapture`, which also
+/// enables any-motion tracking (`?1003`): riffnav ignores unpressed pointer
+/// motion, so reporting it just wakes the loop to repaint the whole screen for
+/// every mouse twitch.
+const MOUSE_ON: &[u8] = b"\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l";
 
 /// Best-effort terminal mouse reporting, toggled around screen ownership: on
 /// while the TUI runs so clicks and the wheel reach us, off whenever we hand the
@@ -98,6 +100,11 @@ pub struct App {
     pub show_header: bool,
     pub show_footer: bool,
     pub tree_width: u16,
+    /// The tree width the session started with, which dragging the divider
+    /// never shrinks below.
+    tree_width_min: u16,
+    /// Whether a mouse drag of the tree/diff divider is in progress.
+    dragging_divider: bool,
     /// Screen rects of the tree and diff panes from the last render, so mouse
     /// clicks and wheel scrolls map back to a row or a pane. `None` before the
     /// first draw; `tree_area` is also `None` whenever the tree is hidden.
@@ -169,6 +176,8 @@ impl App {
             show_header: cfg.show_header,
             show_footer: cfg.show_footer,
             tree_width: cfg.tree_width.max(MIN_DIFF_WIDTH),
+            tree_width_min: cfg.tree_width.max(MIN_DIFF_WIDTH),
+            dragging_divider: false,
             tree_area: None,
             diff_area: None,
             // Start in the diff by default, so the first file is ready to read
@@ -893,11 +902,40 @@ impl App {
         }
         let pos = Position::new(mouse.column, mouse.row);
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => self.click(pos),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.on_divider(pos) {
+                    self.dragging_divider = true;
+                } else {
+                    self.click(pos);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging_divider => {
+                self.drag_divider(pos.x);
+            }
+            MouseEventKind::Up(_) => self.dragging_divider = false,
             MouseEventKind::ScrollDown => self.scroll_at(pos, 1),
             MouseEventKind::ScrollUp => self.scroll_at(pos, -1),
             _ => {}
         }
+    }
+
+    /// Whether `pos` sits on the tree pane's right border, which doubles as the
+    /// drag handle for resizing the panes.
+    fn on_divider(&self, pos: Position) -> bool {
+        self.tree_area
+            .is_some_and(|a| a.contains(pos) && pos.x == a.right().saturating_sub(1))
+    }
+
+    /// Move the divider to screen column `x`: the tree grows or shrinks so its
+    /// border lands under the cursor, clamped between the configured width (the
+    /// floor) and whatever leaves the diff its minimum width.
+    fn drag_divider(&mut self, x: u16) {
+        let (Some(tree), Some(diff)) = (self.tree_area, self.diff_area) else {
+            return;
+        };
+        let total = tree.width + diff.width;
+        let max = total.saturating_sub(MIN_DIFF_WIDTH).max(self.tree_width_min);
+        self.tree_width = (x.saturating_sub(tree.x) + 1).clamp(self.tree_width_min, max);
     }
 
     /// Left-click: select the tree row under the cursor (folding/unfolding a
@@ -1154,6 +1192,28 @@ mod tests {
         app.toggle_viewed();
         assert_eq!(app.viewed_count(), 0);
         assert!(!app.is_viewed(first));
+    }
+
+    #[test]
+    fn divider_drag_resizes_within_bounds() {
+        let mut app = app_with(vec![file("a.rs")]);
+        // Default config: tree is 32 wide, so its border sits on column 31.
+        app.tree_area = Some(Rect::new(0, 0, 32, 10));
+        app.diff_area = Some(Rect::new(32, 1, 68, 9));
+
+        assert!(app.on_divider(Position::new(31, 4)));
+        assert!(!app.on_divider(Position::new(30, 4)));
+        assert!(!app.on_divider(Position::new(32, 4)));
+
+        // Dragging right widens the tree so the border follows the cursor.
+        app.drag_divider(50);
+        assert_eq!(app.tree_width, 51);
+        // The starting width is the floor…
+        app.drag_divider(5);
+        assert_eq!(app.tree_width, 32);
+        // …and the diff keeps its minimum width at the other extreme.
+        app.drag_divider(99);
+        assert_eq!(app.tree_width, 100 - MIN_DIFF_WIDTH);
     }
 
     #[test]
