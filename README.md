@@ -99,6 +99,7 @@ show_footer  = true
 open_depth   = 64        # expand folders shallower than this on launch
 review_retention_days = 90 # days to keep "viewed" marks before GC
 review_auto_advance = true # jump to next unviewed file after marking viewed
+review_sync_github = false # push "viewed" marks to the matching GitHub PR (needs `gh`)
 # base_branch = "main"     # base for "branch vs base"; omit to auto-detect
 # diff_source = "all"      # bare-launch view: all|committed|staged|unstaged (omit = adaptive)
 ```
