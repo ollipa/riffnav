@@ -1,5 +1,6 @@
 use std::collections::HashSet;
-use std::process::Command;
+use std::io::IsTerminal;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -879,7 +880,17 @@ impl App {
         let editor = std::env::var("VISUAL")
             .or_else(|_| std::env::var("EDITOR"))
             .unwrap_or_else(|_| "vi".to_string());
-        let status = Command::new(&editor).arg(path).status();
+        let mut cmd = Command::new(&editor);
+        cmd.arg(path);
+        // A piped diff (`git diff | riffnav`) leaves our stdin a spent pipe; the
+        // editor would inherit it and complain that input isn't a terminal. The
+        // TUI already talks to /dev/tty, so hand the editor the same.
+        if !std::io::stdin().is_terminal()
+            && let Ok(tty) = std::fs::File::open("/dev/tty")
+        {
+            cmd.stdin(Stdio::from(tty));
+        }
+        let status = cmd.status();
 
         *terminal = ratatui::init();
         enable_mouse();
