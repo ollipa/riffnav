@@ -52,8 +52,9 @@
 
 # --- Bare launch (running `riffnav` with no piped diff, inside a repo) ---
 
-# Base branch for the "branch vs base" view. Omit to auto-detect it from
-# origin/HEAD, falling back to a local main/master. Override per run with --base.
+# Base branch for the "branch vs base" view. Omit to auto-detect it: origin/HEAD
+# or a local main/master, whichever forks off the current branch later. Override
+# per run with --base.
 # base_branch = "main"
 
 # Which diff a bare launch shows first (cycle at runtime with `d`):

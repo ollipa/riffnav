@@ -142,8 +142,10 @@ Press `d` to cycle what's shown:
 - **unstaged** — `git diff`
 - **branch vs base** — `git diff <base>...HEAD`
 
-The base branch is detected from `origin/HEAD` (falling back to a local
-`main`/`master`); set it with `--base <ref>` or the `base_branch` config key.
+The base branch is auto-detected from `origin/HEAD` and a local `main`/`master`,
+picking whichever branched off your current branch more recently — so commits
+you already merged into a local `main` aren't counted as your branch's work. Set
+it explicitly with `--base <ref>` or the `base_branch` config key.
 Choose the starting view with `--diff <all|committed|staged|unstaged>` or the
 `diff_source` config key. Piping a diff in (or `--watch`) behaves exactly as
 before — the bare launch is just an extra entry point.

@@ -44,7 +44,7 @@ pub struct Cli {
     pub diff: Option<DiffSource>,
 
     /// Base branch for the branch-vs-base view on a bare launch. Omit to detect
-    /// it (origin/HEAD, else a local main/master).
+    /// it (origin/HEAD or a local main/master, whichever forks off later).
     #[arg(long, value_name = "REF")]
     pub base: Option<String>,
 

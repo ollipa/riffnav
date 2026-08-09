@@ -6,7 +6,8 @@
 //! [`DiffSource`]. At startup the source is chosen adaptively by
 //! [`load_initial`]: show uncommitted work if there is any, otherwise fall back
 //! to what the branch adds over its base (the "PR view"). The base branch is
-//! detected from `origin/HEAD`, falling back to a local `main`/`master`.
+//! detected by [`detect_base`]: whichever of `origin/HEAD` and a local
+//! `main`/`master` forks off the current branch later.
 //!
 //! `git diff` never reports untracked files, so the working-tree views fold them
 //! in explicitly (see [`untracked_diff`]) — otherwise a brand-new file would be
@@ -119,14 +120,32 @@ pub fn in_repo() -> bool {
     git(&["rev-parse", "--is-inside-work-tree"]).as_deref() == Some("true")
 }
 
-/// Detect the base branch the current branch should be compared against:
-/// `origin/HEAD` (the remote's default branch) first, then a local `main` or
-/// `master`. Returns `None` when none of these resolve, in which case the
-/// branch-vs-base view is unavailable.
+/// Detect the base branch the current branch should be compared against. Two
+/// candidates are considered — `origin/HEAD` (the remote's default branch) and a
+/// local `main`/`master` — and the one whose merge-base with `HEAD` is *newer*
+/// wins, so commits the branch merely inherited from an already-updated local
+/// `main` don't show up as its own work. Ties keep the remote candidate, which
+/// is what a pull request would compare against. Returns `None` when neither
+/// resolves, in which case the branch-vs-base view is unavailable.
 pub fn detect_base() -> Option<String> {
-    if let Some(head) = git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
-        return Some(head); // e.g. "origin/main"
+    let remote = git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]); // e.g. "origin/main"
+    let local = local_base();
+    match (remote, local) {
+        (Some(remote), Some(local)) => Some(if merge_base_is_newer(&local, &remote) {
+            local
+        } else {
+            remote
+        }),
+        (remote, local) => remote.or(local),
     }
+}
+
+/// The local `main`/`master` candidate, if one exists. A branch sitting on the
+/// same commit as `HEAD` is skipped: its merge-base with `HEAD` is `HEAD` itself,
+/// so it would render an empty diff — the common case being a local commit on
+/// `main` that hasn't been pushed, where `origin/main` is the useful base.
+fn local_base() -> Option<String> {
+    let head = git(&["rev-parse", "HEAD"]);
     ["main", "master"]
         .into_iter()
         .find(|name| {
@@ -136,9 +155,22 @@ pub fn detect_base() -> Option<String> {
                 "--quiet",
                 &format!("refs/heads/{name}"),
             ])
-            .is_some()
+            .is_some_and(|tip| Some(&tip) != head.as_ref())
         })
         .map(str::to_string)
+}
+
+/// Whether `cand`'s merge-base with `HEAD` is strictly newer than `other`'s, i.e.
+/// `other`'s merge-base is a proper ancestor of it. False when either merge-base
+/// can't be computed (unrelated histories), leaving the caller on its default.
+fn merge_base_is_newer(cand: &str, other: &str) -> bool {
+    let Some(cand_mb) = git(&["merge-base", cand, "HEAD"]) else {
+        return false;
+    };
+    let Some(other_mb) = git(&["merge-base", other, "HEAD"]) else {
+        return false;
+    };
+    cand_mb != other_mb && git_ok(&["merge-base", "--is-ancestor", &other_mb, &cand_mb])
 }
 
 /// Run the diff for `source`, returning the raw unified-diff text. Errors carry
@@ -226,6 +258,16 @@ fn git(args: &[&str]) -> Option<String> {
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!s.is_empty()).then_some(s)
+}
+
+/// Run `git` with `args` for its exit status alone. Unlike [`git`], a successful
+/// command that prints nothing still counts as success — needed for predicates
+/// like `merge-base --is-ancestor`, which answer purely through their status.
+fn git_ok(args: &[&str]) -> bool {
+    Command::new("git")
+        .args(args)
+        .output()
+        .is_ok_and(|out| out.status.success())
 }
 
 /// Run `git` with `args`, returning full stdout, and surfacing git's stderr in

@@ -52,8 +52,8 @@ pub struct Config {
     /// too. Off by default; needs the `gh` CLI authenticated and a GitHub remote.
     pub review_sync_github: bool,
     /// Base branch for the branch-vs-base auto-diff view on a bare launch.
-    /// `None` auto-detects (origin/HEAD, then a local main/master). CLI `--base`
-    /// overrides this.
+    /// `None` auto-detects: origin/HEAD or a local main/master, whichever forks
+    /// off the current branch later. CLI `--base` overrides this.
     pub base_branch: Option<String>,
     /// Which diff a bare launch shows. `None` is the adaptive default
     /// (uncommitted changes, or branch-vs-base when the tree is clean). CLI
