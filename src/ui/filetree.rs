@@ -9,6 +9,9 @@ use crate::diff::FileStatus;
 use crate::icons;
 use crate::tree::RowKind;
 
+/// Rows kept visible above and below the selected row while scrolling.
+const SCROLL_PADDING: usize = 5;
+
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     let style = app.icon_style;
     let inner = (area.width as usize).saturating_sub(1); // content width, minus border
@@ -95,6 +98,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                 .borders(Borders::RIGHT)
                 .border_style(border_style),
         )
+        // Keep a few rows visible past the selection (like vim's `scrolloff`) so
+        // the list scrolls before the cursor hits the edge and you can always see
+        // what's coming next. Ratatui shrinks the padding on a short pane.
+        .scroll_padding(SCROLL_PADDING)
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
     frame.render_stateful_widget(list, area, &mut app.tree_state);

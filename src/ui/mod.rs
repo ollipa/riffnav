@@ -334,6 +334,28 @@ mod tests {
         insta::assert_snapshot!(render(&mut app, 64, 8));
     }
 
+    /// Moving down a long list must scroll before the selection reaches the last
+    /// visible row, so the files still ahead stay in sight.
+    #[test]
+    fn tree_keeps_rows_visible_below_the_selection() {
+        let cfg = Config {
+            icon_style: IconStyle::Ascii,
+            ..Config::default()
+        };
+        let files: Vec<_> = (0..30)
+            .map(|i| file(&format!("file{i:02}.rs"), FileStatus::Modified, 1, 1))
+            .collect();
+        let mut app = App::new(files, false, false, &cfg);
+        app.tree_state.select(Some(20));
+
+        let out = render(&mut app, 64, 12);
+        assert!(out.contains("file20.rs"), "selection must be visible\n{out}");
+        assert!(
+            out.contains("file23.rs"),
+            "rows past the selection must stay visible\n{out}"
+        );
+    }
+
     /// delta leaves unified diffs unwrapped, so a line wider than the pane must
     /// be wrapped by the viewer rather than truncated at the edge. Regression
     /// test for long markdown lines losing their tail.
