@@ -40,6 +40,21 @@ impl DiffTheme {
         }
     }
 
+    /// Background for the diff pane's line cursor. Only the background changes,
+    /// so it has to stay readable behind syntax-highlighted code and behind the
+    /// +/- tints it replaces on a changed line.
+    pub fn cursor_line_bg(self) -> ratatui::style::Color {
+        use ratatui::style::Color;
+        match self {
+            // GitHub's selected-row blue-grey, flattened over each canvas.
+            DiffTheme::GitHubDark => Color::Rgb(0x1c, 0x2c, 0x43),
+            DiffTheme::GitHubLight => Color::Rgb(0xdd, 0xe7, 0xf5),
+            // The baseline theme borrows the user's own scheme, so use a palette
+            // color their terminal already defines rather than a fixed RGB.
+            DiffTheme::Delta => Color::DarkGray,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             DiffTheme::Delta => "delta",
@@ -55,13 +70,15 @@ impl DiffTheme {
     /// `syntax` in a style keeps delta's syntax-highlighted foreground and only
     /// sets the background — so code stays colorized on top of the diff tint,
     /// exactly like GitHub.
+    ///
+    /// Line numbers themselves aren't listed here: `delta::run` turns them on for
+    /// every theme, since riffnav reads comment anchors back out of that gutter.
     pub fn delta_args(self) -> &'static [&'static str] {
         match self {
             DiffTheme::Delta => &[],
             // GitHub dark. Line tints are GitHub's green/red overlays flattened
             // over #0d1117; the emph shades are the same hues at higher opacity.
             DiffTheme::GitHubDark => &[
-                "--line-numbers",
                 "--syntax-theme",
                 "Visual Studio Dark+",
                 "--plus-style",
@@ -96,7 +113,6 @@ impl DiffTheme {
             // itself is dark.
             DiffTheme::GitHubLight => &[
                 "--light",
-                "--line-numbers",
                 "--syntax-theme",
                 "GitHub",
                 "--plus-style",

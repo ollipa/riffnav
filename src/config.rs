@@ -59,6 +59,15 @@ pub struct Config {
     /// (uncommitted changes, or branch-vs-base when the tree is clean). CLI
     /// `--diff` overrides this.
     pub diff_source: Option<DiffSource>,
+    /// Show inline review comments beside the code, and bind the keys that write
+    /// them (`c` comment or reply, `x` delete, `]`/`[` jump). Turning this off
+    /// also turns off the diff pane's line cursor, so `j`/`k` just scroll.
+    pub show_comments: bool,
+    /// Days to keep inline comments before they're garbage-collected, matching
+    /// how `review_retention_days` ages out viewed marks.
+    pub comment_retention_days: u64,
+    /// Name recorded as the author of comments written here. `None` uses `$USER`.
+    pub comment_author: Option<String>,
 }
 
 impl Default for Config {
@@ -78,6 +87,9 @@ impl Default for Config {
             review_sync_github: false,
             base_branch: None,
             diff_source: None,
+            show_comments: true,
+            comment_retention_days: 90,
+            comment_author: None,
         }
     }
 }
@@ -169,6 +181,22 @@ mod tests {
             from_toml("side_by_side = false").unwrap().side_by_side,
             Some(false)
         );
+    }
+
+    #[test]
+    fn comment_keys_parse_and_default_to_on() {
+        let d = from_toml("").unwrap();
+        assert!(d.show_comments);
+        assert_eq!(d.comment_retention_days, 90);
+        assert_eq!(d.comment_author, None); // falls back to $USER
+
+        let c = from_toml(
+            "show_comments = false\ncomment_retention_days = 7\ncomment_author = \"olli\"\n",
+        )
+        .unwrap();
+        assert!(!c.show_comments);
+        assert_eq!(c.comment_retention_days, 7);
+        assert_eq!(c.comment_author.as_deref(), Some("olli"));
     }
 
     #[test]

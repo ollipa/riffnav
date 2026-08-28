@@ -1,6 +1,8 @@
 mod app;
 mod autodiff;
 mod cli;
+mod cmd;
+mod comment;
 mod config;
 mod delta;
 mod diff;
@@ -8,6 +10,8 @@ mod forge;
 mod herdr;
 mod icons;
 mod review;
+mod session;
+mod state;
 mod theme;
 mod tree;
 mod ui;
@@ -80,6 +84,13 @@ fn acquire(cli: &cli::Cli, config: &config::Config, watch_cmd: &str) -> Result<I
 
 fn main() -> Result<()> {
     let cli = cli::Cli::parse();
+
+    // The `comment`/`skill` subcommands are plain CLI tools: no TUI, no diff on
+    // stdin, no delta. They talk to the same on-disk state a running window does.
+    if let Some(command) = cli.command {
+        return cmd::run(command);
+    }
+
     let config = config::Config::load(cli.config.as_deref())?;
 
     let watch_cmd = cli
@@ -132,5 +143,10 @@ fn main() -> Result<()> {
     app.enable_forge();
     app.enable_review_sync(config.review_sync_github);
     app.enable_review(config.review_retention_days);
+    app.enable_comments(
+        config.show_comments,
+        config.comment_retention_days,
+        config.comment_author.as_deref(),
+    );
     app.run()
 }

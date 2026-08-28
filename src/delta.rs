@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::collections::hash_map::Entry as Slot;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -9,12 +9,27 @@ use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
+use crate::comment::render::CommentBlock;
+use crate::comment::store::{Anchor, Comment};
+use crate::comment::{LineMap, render as comment_render};
 use crate::theme::DiffTheme;
 
 /// Word-wrap setting shared by the height measurement and the per-frame render,
 /// so both lay text out identically. `trim: false` keeps leading whitespace
 /// (diff indentation) on wrapped rows.
 const WRAP: Wrap = Wrap { trim: false };
+
+/// Line-number gutter formats, pinned so riffnav can read the numbers back out
+/// of delta's output and anchor comments to them — see [`crate::comment::anchor`].
+/// Passing them explicitly overrides both the user's gitconfig and delta's own
+/// defaults, so the gutter has the same fixed-width shape in every theme.
+const LINE_NUMBER_ARGS: &[&str] = &[
+    "--line-numbers",
+    "--line-numbers-left-format",
+    "{nm:>5}⋮",
+    "--line-numbers-right-format",
+    "{np:>5}│",
+];
 
 /// Verify `delta` is callable, with an actionable error if it isn't.
 pub fn ensure_available() -> Result<()> {
@@ -65,6 +80,10 @@ pub fn detect_side_by_side() -> bool {
 /// A non-`Delta` `theme` takes full control of the colors: it always passes
 /// `--no-gitconfig` (so the user's gitconfig styles can't fight ours) plus the
 /// theme's explicit style flags.
+///
+/// [`LINE_NUMBER_ARGS`] goes on unconditionally, in every theme: the gutter is
+/// how riffnav recovers line numbers from delta's output, so comments would have
+/// nothing to anchor to without it.
 fn run(
     diff_text: &str,
     width: u16,
@@ -78,7 +97,8 @@ fn run(
         .arg("--wrap-max-lines")
         .arg("unlimited")
         .arg("--width")
-        .arg(width.to_string());
+        .arg(width.to_string())
+        .args(LINE_NUMBER_ARGS);
     if side_by_side {
         cmd.arg("--side-by-side");
     }
@@ -213,9 +233,45 @@ pub struct Rendered {
     /// viewer seeks straight to the line under the scroll position and wraps only
     /// the visible window — see [`Rendered::visible`].
     row_offsets: Option<Vec<u32>>,
+    /// The diff line numbers behind each line of `text`, recovered from delta's
+    /// gutter and kept aligned through comment splicing. Drives the line cursor
+    /// and comment anchoring.
+    pub line_map: LineMap,
+    /// Where each spliced comment thread landed, in row order — what `]` and `[`
+    /// step through, and how the cursor names the comment it's sitting on.
+    pub comment_rows: Vec<CommentBlock>,
 }
 
 impl Rendered {
+    /// The number of lines in the render (not screen rows; see [`Self::row_of`]).
+    pub fn lines(&self) -> usize {
+        self.text.lines.len()
+    }
+
+    /// The first screen row of line `line`, for scrolling a cursor into view.
+    pub fn row_of(&self, line: usize) -> u16 {
+        match &self.row_offsets {
+            None => line.min(u16::MAX as usize) as u16,
+            Some(offsets) => offsets
+                .get(line)
+                .or(offsets.last())
+                .map_or(0, |r| (*r).min(u16::MAX as u32) as u16),
+        }
+    }
+
+    /// The line occupying screen row `row` — the inverse of [`Self::row_of`],
+    /// used to park the cursor after a page jump.
+    pub fn line_at(&self, row: u16) -> usize {
+        match &self.row_offsets {
+            None => (row as usize).min(self.text.lines.len().saturating_sub(1)),
+            Some(offsets) => match offsets.binary_search(&u32::from(row)) {
+                Ok(i) => i,
+                Err(i) => i.saturating_sub(1),
+            }
+            .min(self.text.lines.len().saturating_sub(1)),
+        }
+    }
+
     /// A `Paragraph` showing just the rows visible at `scroll` for a viewport
     /// `height` rows tall, so per-frame work is `O(height)` rather than
     /// `O(scroll)`. The returned widget owns its (cloned) slice of lines, so it
@@ -276,6 +332,36 @@ fn measure(text: &Text<'static>, width: u16, side_by_side: bool) -> (u16, Option
     (acc.min(u16::MAX as u32) as u16, Some(offsets))
 }
 
+/// Splice `comments` into a fresh delta render and measure the result.
+/// Measurement has to come after splicing: comment rows change the wrapped
+/// height and shift every row offset below them.
+fn splice_and_measure(
+    mut text: Text<'static>,
+    mut map: LineMap,
+    comments: &CommentLayer<'_>,
+    width: u16,
+    side_by_side: bool,
+    theme: DiffTheme,
+) -> Rendered {
+    let comment_rows = comment_render::splice(
+        &mut text,
+        &mut map,
+        &comments.threads,
+        comments.file,
+        width,
+        comments.diff_hash,
+        theme,
+    );
+    let (height, row_offsets) = measure(&text, width, side_by_side);
+    Rendered {
+        text,
+        height,
+        row_offsets,
+        line_map: map,
+        comment_rows,
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Key {
     file: usize,
@@ -284,13 +370,56 @@ struct Key {
     theme: DiffTheme,
 }
 
+/// The comments to draw into one file's render.
+///
+/// Bundled rather than passed loose so [`RenderCache::ensure`] keeps a readable
+/// signature, and so the borrow of the comment store stays separate from the
+/// mutable borrow of the cache.
+pub struct CommentLayer<'a> {
+    /// Threads for this file, from `CommentStore::threads`.
+    pub threads: Vec<(Anchor, Vec<&'a Comment>)>,
+    /// The file's tree path, for labelling a thread whose anchor has vanished.
+    pub file: &'a str,
+    /// `review::file_hash` of the file's current diff, for staleness marking.
+    pub diff_hash: u128,
+    /// Bumped whenever the comment store changes. A cached render built at an
+    /// older revision is re-spliced (no delta re-run) before it's handed out.
+    pub rev: u64,
+}
+
+impl CommentLayer<'_> {
+    /// A layer with nothing in it, for callers with comments turned off.
+    pub fn none() -> Self {
+        Self {
+            threads: Vec::new(),
+            file: "",
+            diff_hash: 0,
+            rev: 0,
+        }
+    }
+}
+
+/// One cached file render.
+///
+/// The pre-splice `base` is kept alongside the finished render so a comment
+/// added, edited, or deleted only re-splices — an `O(lines)` pass — instead of
+/// paying another delta subprocess spawn. That matters because the filesystem
+/// watcher can fire repeatedly while an agent writes a batch of notes.
+struct Entry {
+    base: Text<'static>,
+    base_map: LineMap,
+    rendered: Rendered,
+    /// The comment revision `rendered` was spliced at.
+    rev: u64,
+}
+
 /// Caches delta renders keyed by `(file, width, side_by_side, theme)` so
 /// revisiting a file — or redrawing at the same size and theme — never re-runs
 /// delta. Switching themes re-renders (and caches separately), so toggling back
 /// is instant. `config_sbs` is a session constant (the user's gitconfig
 /// default), so it isn't part of the key.
 pub struct RenderCache {
-    entries: HashMap<Key, Rendered>,
+    entries: HashMap<Key, Entry>,
     config_sbs: bool,
 }
 
@@ -302,7 +431,8 @@ impl RenderCache {
         }
     }
 
-    /// Render `raw` for the given key if not already cached.
+    /// Render `raw` for the given key if not already cached, and make sure the
+    /// cached render carries `comments` at their current revision.
     pub fn ensure(
         &mut self,
         file: usize,
@@ -310,14 +440,16 @@ impl RenderCache {
         width: u16,
         side_by_side: bool,
         theme: DiffTheme,
+        comments: &CommentLayer<'_>,
     ) -> Result<()> {
         let config_sbs = self.config_sbs;
-        if let Entry::Vacant(slot) = self.entries.entry(Key {
+        let key = Key {
             file,
             width,
             side_by_side,
             theme,
-        }) {
+        };
+        if let Slot::Vacant(slot) = self.entries.entry(key.clone()) {
             let mut bytes = run(raw, width, side_by_side, config_sbs, theme)?;
             // Unified mode relies on terminal background-color-erase to fill each
             // line's tint to the edge; ansi_to_tui ignores it, so do it ourselves.
@@ -325,15 +457,40 @@ impl RenderCache {
             if !side_by_side {
                 bytes = expand_bce(&bytes, width);
             }
-            let text = bytes
+            let base = bytes
                 .into_text()
                 .context("converting delta output to ratatui text")?;
-            let (height, row_offsets) = measure(&text, width, side_by_side);
-            slot.insert(Rendered {
-                text,
-                height,
-                row_offsets,
+            let base_map = LineMap::build(&base);
+            let rendered = splice_and_measure(
+                base.clone(),
+                base_map.clone(),
+                comments,
+                width,
+                side_by_side,
+                theme,
+            );
+            slot.insert(Entry {
+                base,
+                base_map,
+                rendered,
+                rev: comments.rev,
             });
+            return Ok(());
+        }
+
+        // Present but built before the comments last changed: re-splice from the
+        // retained base rather than paying for another delta run.
+        let entry = self.entries.get_mut(&key).expect("occupied above");
+        if entry.rev != comments.rev {
+            entry.rendered = splice_and_measure(
+                entry.base.clone(),
+                entry.base_map.clone(),
+                comments,
+                width,
+                side_by_side,
+                theme,
+            );
+            entry.rev = comments.rev;
         }
         Ok(())
     }
@@ -345,12 +502,14 @@ impl RenderCache {
         side_by_side: bool,
         theme: DiffTheme,
     ) -> Option<&Rendered> {
-        self.entries.get(&Key {
-            file,
-            width,
-            side_by_side,
-            theme,
-        })
+        self.entries
+            .get(&Key {
+                file,
+                width,
+                side_by_side,
+                theme,
+            })
+            .map(|e| &e.rendered)
     }
 
     /// Drop all cached renders (e.g. after a resize changes the wrap width).
@@ -375,7 +534,37 @@ impl RenderCache {
         theme: DiffTheme,
         text: Text<'static>,
     ) {
-        let (height, row_offsets) = measure(&text, width, side_by_side);
+        self.insert_for_test_with_comments(
+            file,
+            width,
+            side_by_side,
+            theme,
+            text,
+            &CommentLayer::none(),
+        );
+    }
+
+    /// As [`Self::insert_for_test`], but splicing a comment layer in — the seam
+    /// for snapshotting comment rendering without delta on PATH.
+    #[cfg(test)]
+    pub(crate) fn insert_for_test_with_comments(
+        &mut self,
+        file: usize,
+        width: u16,
+        side_by_side: bool,
+        theme: DiffTheme,
+        text: Text<'static>,
+        comments: &CommentLayer<'_>,
+    ) {
+        let base_map = LineMap::build(&text);
+        let rendered = splice_and_measure(
+            text.clone(),
+            base_map.clone(),
+            comments,
+            width,
+            side_by_side,
+            theme,
+        );
         self.entries.insert(
             Key {
                 file,
@@ -383,10 +572,11 @@ impl RenderCache {
                 side_by_side,
                 theme,
             },
-            Rendered {
-                text,
-                height,
-                row_offsets,
+            Entry {
+                base: text,
+                base_map,
+                rendered,
+                rev: comments.rev,
             },
         );
     }
@@ -423,6 +613,8 @@ mod tests {
             text: text.clone(),
             height,
             row_offsets,
+            line_map: LineMap::default(),
+            comment_rows: Vec::new(),
         };
         let draw = |paragraph: Paragraph| -> Buffer {
             let mut term = Terminal::new(TestBackend::new(width, view_h)).unwrap();
@@ -433,7 +625,10 @@ mod tests {
         for scroll in 0..=height {
             let got = draw(rendered.visible(scroll, view_h));
             let want = draw(Paragraph::new(text.clone()).wrap(WRAP).scroll((scroll, 0)));
-            assert_eq!(got, want, "visible window differs from full wrap at scroll {scroll}");
+            assert_eq!(
+                got, want,
+                "visible window differs from full wrap at scroll {scroll}"
+            );
         }
     }
 

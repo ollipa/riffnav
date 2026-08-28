@@ -93,6 +93,18 @@ impl Watch {
         }
     }
 
+    /// Re-run the command right now, whatever the timers say, and hand back what
+    /// it printed — the `r` key. Unlike [`Self::poll_reload`] this returns the
+    /// diff even when it's unchanged, because an explicit refresh should reload
+    /// (and report) rather than look like it did nothing.
+    pub fn reload_now(&mut self) -> Result<String> {
+        let text = run_once(&self.cmd)?;
+        self.last_diff = text.clone();
+        self.last_run = Instant::now();
+        self.dirty = false;
+        Ok(text)
+    }
+
     /// Drain pending filesystem events and, if a reload is due (debounced change
     /// or the periodic interval), re-run the command. Returns:
     /// - `Some(Ok(text))` when the diff changed and should be reloaded,

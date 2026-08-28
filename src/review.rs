@@ -9,21 +9,20 @@
 //! the same change reviewed on another branch is reviewed independently. State
 //! lives under `$XDG_STATE_HOME/riffnav/viewed/<repo>/<branch>.json` and is
 //! garbage-collected by age — abandoned branch files are swept on startup, and
-//! within an active file stale entries are pruned on save.
+//! within an active file stale entries are pruned on save. The location, scoping
+//! and sweeping are shared with inline comments; see [`crate::state`].
 //!
 //! When riffnav isn't run inside a git repo (e.g. an arbitrary diff piped in),
 //! there's no stable scope to anchor to, so the store degrades to session-only:
 //! toggling still works, nothing persists.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use twox_hash::XxHash3_128;
 
-const DAY_SECS: u64 = 86_400;
+use crate::state::{self, DAY_SECS};
 
 /// One reviewed file: enough to prune by age and to make the on-disk file
 /// human-readable when debugging.
@@ -75,20 +74,21 @@ impl ReviewStore {
     /// state directory can't be located.
     pub fn load(retention_days: u64) -> Self {
         let retention = retention_days.saturating_mul(DAY_SECS);
-        let (Some((repo, branch)), Some(dir)) = (detect_scope(), state_dir()) else {
+        let (Some((repo, branch)), Some(dir)) = (state::detect_scope(), state::dir("viewed"))
+        else {
             return Self::disabled();
         };
-        let path = scope_path(&dir, &repo, &branch);
+        let path = state::scope_path(&dir, &repo, &branch);
 
         // Reap branch files we haven't touched in `retention`, but never the one
         // we're about to use — opening a branch counts as keeping it alive.
-        sweep(&dir, retention, &path);
+        state::sweep(&dir, retention, &path);
 
         let mut files = HashMap::new();
         if let Ok(text) = std::fs::read_to_string(&path)
             && let Ok(stored) = serde_json::from_str::<StoreFile>(&text)
         {
-            let now = now_unix();
+            let now = state::now_unix();
             for (hex, entry) in stored.files {
                 // Drop entries older than retention; skip anything unparseable.
                 if let Ok(hash) = u128::from_str_radix(&hex, 16)
@@ -128,7 +128,7 @@ impl ReviewStore {
                 hash,
                 Entry {
                     path: path.to_string(),
-                    seen: now_unix(),
+                    seen: state::now_unix(),
                 },
             );
             true
@@ -151,12 +151,6 @@ impl ReviewStore {
             let _ = std::fs::remove_file(&path);
             return;
         }
-        let Some(parent) = path.parent() else {
-            return;
-        };
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
 
         let stored = StoreFile {
             repo: self.repo.clone(),
@@ -170,10 +164,7 @@ impl ReviewStore {
         let Ok(json) = serde_json::to_vec_pretty(&stored) else {
             return;
         };
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, &json).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
-        }
+        state::write_atomic(&path, &json);
     }
 }
 
@@ -191,103 +182,6 @@ pub fn file_hash(raw: &str) -> u128 {
         buf.push(b'\n');
     }
     XxHash3_128::oneshot(&buf)
-}
-
-/// `$XDG_STATE_HOME/riffnav/viewed`, falling back to
-/// `$HOME/.local/state/riffnav/viewed`.
-fn state_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("state"))
-        })?;
-    Some(base.join("riffnav").join("viewed"))
-}
-
-/// Filesystem-safe path for a scope: `<dir>/<hash(repo)>/<hash(branch)>.json`.
-/// Branch names contain slashes and other hostile characters, so both
-/// components are hashed rather than used verbatim.
-fn scope_path(dir: &Path, repo: &str, branch: &str) -> PathBuf {
-    dir.join(hash_hex(repo))
-        .join(format!("{}.json", hash_hex(branch)))
-}
-
-fn hash_hex(s: &str) -> String {
-    format!("{:032x}", XxHash3_128::oneshot(s.as_bytes()))
-}
-
-/// The current repo's toplevel and branch, or `None` outside a repo. A detached
-/// HEAD has no branch, so it shares one repo-level bucket.
-fn detect_scope() -> Option<(String, String)> {
-    let repo = git(&["rev-parse", "--show-toplevel"])?;
-    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-    let branch = if branch.is_empty() || branch == "HEAD" {
-        "(detached)".to_string()
-    } else {
-        branch
-    };
-    Some((repo, branch))
-}
-
-/// Delete branch files not modified within `retention`, and remove repo
-/// directories left empty, except for `keep` (the scope being opened now).
-/// Entirely best-effort: any IO error just leaves that entry in place.
-fn sweep(dir: &Path, retention: u64, keep: &Path) {
-    let Ok(repos) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for repo in repos.flatten() {
-        let repo_path = repo.path();
-        if !repo_path.is_dir() {
-            continue;
-        }
-        let Ok(files) = std::fs::read_dir(&repo_path) else {
-            continue;
-        };
-        let mut remaining = 0;
-        for file in files.flatten() {
-            let fpath = file.path();
-            if fpath == keep {
-                remaining += 1;
-                continue;
-            }
-            if file_age(&fpath).is_some_and(|age| age > retention) {
-                let _ = std::fs::remove_file(&fpath);
-            } else {
-                remaining += 1;
-            }
-        }
-        if remaining == 0 {
-            // Only succeeds if truly empty, so this can't clobber a live repo.
-            let _ = std::fs::remove_dir(&repo_path);
-        }
-    }
-}
-
-/// Seconds since `path` was last modified, or `None` if that can't be read.
-fn file_age(path: &Path) -> Option<u64> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let secs = modified.duration_since(UNIX_EPOCH).ok()?.as_secs();
-    Some(now_unix().saturating_sub(secs))
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// Run a git command, returning trimmed stdout or `None` on any failure or empty
-/// output. Mirrors the helper in `forge.rs`.
-fn git(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!s.is_empty()).then_some(s)
 }
 
 #[cfg(test)]

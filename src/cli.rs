@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
 use crate::autodiff::DiffSource;
 use crate::diff::FileDiff;
@@ -12,6 +12,12 @@ use crate::diff::FileDiff;
     about = "A git diff pager with a file tree, powered by delta"
 )]
 pub struct Cli {
+    /// Subcommands for reading and writing inline review comments, meant for AI
+    /// agents. Absent for a normal launch, which keeps `riffnav` usable as
+    /// git's pager exactly as before.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Start in side-by-side view (default follows your delta config).
     #[arg(short = 's', long, conflicts_with = "unified")]
     pub side_by_side: bool,
@@ -51,6 +57,88 @@ pub struct Cli {
     /// Print the parsed file list and exit (debug; no TUI).
     #[arg(long, hide = true)]
     pub list: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Read and write inline review comments on the current repo and branch.
+    #[command(subcommand)]
+    Comment(CommentCmd),
+    /// Print the agent skill describing these commands, for a coding agent to
+    /// load. `--path` prints where it was written instead of its contents.
+    Skill {
+        /// Write the skill to a file and print its path.
+        #[arg(long)]
+        path: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CommentCmd {
+    /// Leave one comment on a line of a file's diff.
+    Add(AddArgs),
+    /// Apply a JSON batch of comments read from stdin. The whole batch is
+    /// validated before any of it is written, so a typo can't half-apply.
+    Apply {
+        /// Read the batch from stdin (required, and the only input source).
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// List existing comments.
+    List {
+        /// Only comments on this file.
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
+        /// Only comments by this author.
+        #[arg(long, value_name = "NAME")]
+        author: Option<String>,
+        /// Emit JSON instead of a human-readable listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete one comment and any replies beneath it.
+    Rm {
+        /// The short id shown by `comment list` (and beside each note in the UI).
+        id: String,
+    },
+    /// Delete many comments at once.
+    Clear {
+        /// Limit the deletion to one file.
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
+        /// Required: deleting comments can't be undone.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Print the files and hunks a comment can be anchored to — start here, it's
+    /// far smaller than the diff itself.
+    Context {
+        /// Emit JSON instead of a human-readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct AddArgs {
+    /// File to comment on, as it appears in the diff.
+    #[arg(long, value_name = "PATH")]
+    pub file: String,
+    /// Line number on the post-image (added/context) side.
+    #[arg(long, value_name = "N", conflicts_with = "old_line")]
+    pub new_line: Option<u32>,
+    /// Line number on the pre-image (removed/context) side.
+    #[arg(long, value_name = "N")]
+    pub old_line: Option<u32>,
+    /// The comment text. Pass `-` to read it from stdin.
+    #[arg(long, value_name = "TEXT")]
+    pub body: String,
+    /// Name to record as the author [default: $USER].
+    #[arg(long, value_name = "NAME")]
+    pub author: Option<String>,
+    /// Thread this comment under an existing one, by id.
+    #[arg(long, value_name = "ID")]
+    pub reply_to: Option<String>,
 }
 
 /// `--list` debug output: the parsed files with status and ± counts.

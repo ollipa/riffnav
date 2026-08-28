@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 /// How a file changed, derived from the diff's extended headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStatus {
@@ -44,5 +46,33 @@ impl FileDiff {
             .as_deref()
             .or(self.old_path.as_deref())
             .unwrap_or("(unknown)")
+    }
+}
+
+/// One `@@ -old_start,old_len +new_start,new_len @@` region of a file's diff.
+///
+/// Parsed on demand from [`FileDiff::raw`] (see `diff::hunks`) rather than stored
+/// on `FileDiff`: only the comment CLI needs it, and keeping it out of the struct
+/// leaves every existing `FileDiff` construction site untouched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hunk {
+    pub old_start: u32,
+    pub old_len: u32,
+    pub new_start: u32,
+    pub new_len: u32,
+    /// The `@@ … @@` header line verbatim, including any trailing context.
+    pub header: String,
+}
+
+impl Hunk {
+    /// Whether `line` falls within this hunk's pre-image range. A zero-length
+    /// side (an added file's `-0,0`) contains nothing.
+    pub fn contains_old(&self, line: u32) -> bool {
+        self.old_len > 0 && line >= self.old_start && line < self.old_start + self.old_len
+    }
+
+    /// Whether `line` falls within this hunk's post-image range.
+    pub fn contains_new(&self, line: u32) -> bool {
+        self.new_len > 0 && line >= self.new_start && line < self.new_start + self.new_len
     }
 }

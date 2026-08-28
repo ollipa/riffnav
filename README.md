@@ -60,7 +60,7 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` (or `↑` / `↓`) | Move selection (tree) / scroll (diff), per focus |
+| `j` / `k` (or `↑` / `↓`) | Move selection (tree) / move the line cursor (diff), per focus |
 | `n` / `p` (or `N`) | Next / previous file |
 | `Ctrl-d` / `Ctrl-u` | Scroll diff half a page |
 | `PgDn` / `PgUp` | Page down / up (scroll diff or move tree, per focus) |
@@ -75,7 +75,11 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `y` | Copy the selected file's path |
 | `v` / `V` | Mark the file viewed / jump to the next unviewed file |
 | `d` | Cycle the diff source — uncommitted → staged → unstaged → branch-vs-base (only on a [bare launch](#run-without-a-piped-diff)) |
+| `r` | Re-read the diff, picking up changes made since (bare launch or watch mode) |
 | `o` | Open the selected file in `$EDITOR` |
+| `c` | [Comment](#review-comments) on the cursor's line, or reply when it's inside a thread |
+| `x` | Delete the comment under the cursor, and its replies |
+| `]` / `[` | Jump to the next / previous comment |
 | `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
 | `?` | Toggle the help overlay |
 | `q` / `Esc` / `Ctrl-c` | Quit |
@@ -121,6 +125,61 @@ just as GitHub un-ticks a file the author pushes to. State lives under
 (`review_retention_days`, default 90). Outside a git repo (e.g. an arbitrary diff
 piped in) marking still works for the session but isn't persisted.
 
+## Review comments
+
+Leave notes on a line of the diff, and read notes an AI agent left for you.
+
+Press `c` to comment on the line under the cursor. A field opens right where the
+note will live — type into it, `Ctrl-S` to save, `Esc` to discard. It takes the
+usual editing keys (`Enter` for a new line, `Ctrl-W` / `Ctrl-U` to rub out a word
+or the line, `Ctrl-A` / `Ctrl-E` for its ends), and `Ctrl-O` moves what you've
+typed into `$EDITOR` when a note outgrows the field — a git-commit-style buffer,
+where you type above the scissors line and save empty to abort.
+
+Press `c` inside an existing thread — where `]` / `[` leave the cursor — and it
+replies to the comment you're on instead; there's no separate reply key. `x`
+deletes the comment under the cursor along with the replies beneath it. Saved
+notes are drawn as a box under the line they annotate, with each reply on a
+divider inside it. Files carrying comments show a `💬` count in the tree.
+
+### Letting an agent comment
+
+The `riffnav comment` subcommands are the agent-facing half. They're ordinary
+non-interactive commands that read and write the same store the running window
+watches — so a note written in another terminal appears on screen within a
+moment, and works just as well with no window open.
+
+```sh
+riffnav comment context                # files and the line ranges you can anchor to
+riffnav comment add --file src/app.rs --new-line 103 --body "No backoff here."
+riffnav comment list --json            # read back what the user wrote
+```
+
+Point your agent at the bundled skill, which teaches it the above:
+
+```sh
+riffnav skill            # print it
+riffnav skill --path     # write it out and print the path
+```
+
+Anchors are validated before anything is written: naming a file that isn't in
+the diff, or a line outside every hunk, fails with the ranges that *would* have
+worked. Several notes at once go through one batch, which is validated whole so
+a typo can't half-apply:
+
+```sh
+printf '%s' '{"comments":[
+  {"file":"src/app.rs","newLine":103,"body":"No backoff here."},
+  {"file":"README.md","newLine":12,"body":"Stale: the flag is now --diff."}
+]}' | riffnav comment apply --stdin
+```
+
+There's no daemon and no port — just a JSON file under
+`$XDG_STATE_HOME/riffnav/comments/`, scoped per repository and branch like
+viewed marks, and garbage-collected by age (`comment_retention_days`). A comment
+whose code has changed since it was written is flagged rather than silently
+sliding onto a different line.
+
 ## Run without a piped diff
 
 Launch `riffnav` bare — no diff on stdin, not watch mode — inside a git repo and
@@ -135,7 +194,9 @@ riffnav --diff committed   # force the branch-vs-base (PR) view
 riffnav --base develop     # compare against a specific base branch
 ```
 
-Press `d` to cycle what's shown:
+Press `r` to re-read the diff — commits, stages, and edits made since you opened
+riffnav show up, without losing your place in the file you're reading. Press `d`
+to cycle what's shown:
 
 - **all uncommitted** — staged + unstaged + untracked
 - **staged** — `git diff --staged`
@@ -164,7 +225,8 @@ riffnav --watch --watch-interval 1    # also poll every second
 In watch mode the diff is produced by `--watch-cmd` (default `git diff`), not
 stdin. Changes are detected by a filesystem watcher (debounced) plus the polling
 interval as a safety net; the view only rebuilds when the diff actually changes,
-and your selected file is preserved across refreshes.
+and your selected file is preserved across refreshes. `r` runs the command
+immediately, for a change the watcher can't see.
 
 ## herdr integration
 
@@ -181,6 +243,12 @@ stdin → split per file (`diff --git`) → build the tree → on selection, run
 file's hunk through `delta` (cached per file/width/layout) and convert its ANSI
 output to styled text with [ansi-to-tui][ansi-to-tui], drawn with
 [ratatui][ratatui]. Because stdin is the diff, key input is read from `/dev/tty`.
+
+Comments anchor to a *diff line*, never a screen row, so they stay put across a
+resize, a theme switch, or a unified/side-by-side toggle. riffnav recovers those
+line numbers by pinning delta's line-number gutter to a fixed-width format and
+reading it back out of the rendered output — which is why line numbers are always
+on.
 
 ## License
 

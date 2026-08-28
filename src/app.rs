@@ -15,13 +15,15 @@ use ratatui::widgets::ListState;
 use serde::Deserialize;
 
 use crate::autodiff::{AutoDiff, DiffSource};
+use crate::comment::{Anchor, Comment, CommentStore, CommentWatch, Composer, PendingComment};
 use crate::config::Config;
-use crate::delta::RenderCache;
+use crate::delta::{CommentLayer, RenderCache};
 use crate::diff::{FileDiff, FileStatus};
 use crate::forge::{Forge, ReviewSync};
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
 use crate::review::ReviewStore;
+use crate::session::Session;
 use crate::theme::DiffTheme;
 use crate::tree::{self, Node, Row, RowKind};
 use crate::watch::Watch;
@@ -53,6 +55,14 @@ const FRAME_MIN: Duration = Duration::from_micros(16_667);
 const MOUSE_ON: &[u8] = b"\x1b[?1002h\x1b[?1006h";
 const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l";
 
+/// Rows of context kept between the diff cursor and the viewport edge, so moving
+/// the cursor scrolls before it reaches the very top or bottom. Matches the file
+/// tree's `SCROLL_PADDING`.
+const CURSOR_PADDING: u16 = 4;
+/// While watching for comments written elsewhere, cap the input wait so an
+/// agent's note appears without needing a keypress.
+const COMMENT_POLL: Duration = Duration::from_millis(250);
+
 /// Best-effort terminal mouse reporting, toggled around screen ownership: on
 /// while the TUI runs so clicks and the wheel reach us, off whenever we hand the
 /// terminal back (teardown, or suspending for `$EDITOR`). Failures are ignored —
@@ -70,6 +80,42 @@ fn write_stdout(bytes: &[u8]) {
     let mut out = std::io::stdout();
     let _ = out.write_all(bytes);
     let _ = out.flush();
+}
+
+/// Separator between a comment body and the explanatory footer, borrowed from
+/// git's `--verbose` scissors. Everything from this line down is discarded, which
+/// leaves `#` usable inside the body itself.
+const SCISSORS: &str = "# ------------------------ >8 ------------------------";
+
+/// The buffer `$EDITOR` opens on: whatever was already typed in the composer (or
+/// a blank line to type into), then the scissors and the context being
+/// commented on.
+fn comment_template(pending: &PendingComment) -> String {
+    let mut out = if pending.draft.is_empty() {
+        String::from("\n")
+    } else {
+        format!("{}\n", pending.draft)
+    };
+    out.push_str(SCISSORS);
+    out.push('\n');
+    out.push_str(&format!(
+        "# Comment on {}:{} ({} side). Everything below the line above is\n\
+         # ignored; save an empty comment to abort.\n#\n",
+        pending.file,
+        pending.anchor.line,
+        pending.anchor.side.as_str(),
+    ));
+    for line in &pending.context {
+        out.push_str("#   ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Everything above the scissors line, which is the comment the author typed.
+fn strip_scissors(text: &str) -> String {
+    text.split(SCISSORS).next().unwrap_or("").trim().to_string()
 }
 
 /// Which pane the j/k keys act on.
@@ -126,6 +172,35 @@ pub struct App {
     file_hashes: Vec<u128>,
     /// Whether marking a file viewed advances to the next unviewed file.
     review_auto_advance: bool,
+    /// Inline review comments for this repo+branch. Session-only until
+    /// [`App::enable_comments`] runs, or when not in a repo.
+    comments: CommentStore,
+    /// Bumped on every change to `comments`. The render cache carries the
+    /// revision each file was spliced at, so a change re-splices exactly the
+    /// renders that are stale.
+    comment_rev: u64,
+    /// Watches the comment file so notes written by an agent in another terminal
+    /// show up here. `None` when comments don't persist (no repo scope).
+    comment_watch: Option<CommentWatch>,
+    /// Name recorded as the author of comments written in this window.
+    comment_author: String,
+    /// Whether comments are shown and the `c`/`x`/`]`/`[` keys are live.
+    comments_on: bool,
+    /// Line cursor in the diff pane: an index into the current render's lines,
+    /// not a screen row. Only meaningful while comments are on.
+    pub diff_cursor: usize,
+    /// The diff line the cursor is on, kept so its line index can be recovered
+    /// after a re-render moves it (a comment spliced in above, a theme change, a
+    /// resize). `None` when the cursor is on a row with no line number.
+    cursor_anchor: Option<Anchor>,
+    /// Identity of the render `diff_cursor` indexes into. When it changes, the
+    /// index is stale and gets re-resolved from `cursor_anchor`.
+    cursor_token: Option<(usize, u16, bool, DiffTheme, u64)>,
+    /// The comment being typed, if any. While it's open it owns every keypress.
+    composer: Option<Composer>,
+    /// A comment handed off from the composer to `$EDITOR` (`Ctrl-O`), run once
+    /// the event loop regains the terminal — next to `pending_editor`.
+    pending_comment: Option<PendingComment>,
     matcher: SkimMatcherV2,
     nodes: Vec<Node>,
     collapsed: HashSet<String>,
@@ -197,6 +272,16 @@ impl App {
             review: ReviewStore::disabled(),
             file_hashes,
             review_auto_advance: cfg.review_auto_advance,
+            comments: CommentStore::disabled(),
+            comment_rev: 0,
+            comment_watch: None,
+            comment_author: String::new(),
+            comments_on: false,
+            diff_cursor: 0,
+            cursor_anchor: None,
+            cursor_token: None,
+            composer: None,
+            pending_comment: None,
             matcher: SkimMatcherV2::default(),
             nodes,
             collapsed,
@@ -274,6 +359,56 @@ impl App {
         }
     }
 
+    /// Whether there's a diff source that can be re-read, which is what makes the
+    /// `r` refresh key worth binding: a git-derived bare launch, or watch mode's
+    /// command. A diff piped in on stdin can only be read once.
+    pub fn can_refresh(&self) -> bool {
+        self.autodiff.is_some() || self.watch.is_some()
+    }
+
+    /// The `r` key: re-run the diff and reload it, so work done since launch
+    /// shows up without restarting. In watch mode this forces the command now
+    /// instead of waiting on the debounce or the interval.
+    fn refresh_diff(&mut self) {
+        let loaded = if let Some(auto) = &self.autodiff {
+            let (source, base) = (auto.source, auto.base.clone());
+            // The immutable borrow of `self.autodiff` ends here (source/base are
+            // owned), freeing `self` for the mutable reload below.
+            crate::autodiff::load(source, base.as_deref())
+        } else if let Some(watch) = self.watch.as_mut() {
+            watch.reload_now()
+        } else {
+            return;
+        };
+        match loaded {
+            Ok(text) => self.reload_in_place(crate::diff::parse(&text)),
+            // `{e:#}` includes the command's own message.
+            Err(e) => self.set_status(format!("refresh: {e:#}")),
+        }
+    }
+
+    /// Swap in a freshly loaded file set the way a refresh wants it: as
+    /// [`App::reload_files`], but holding the scroll and the line cursor when the
+    /// same file is still selected afterwards. Reloading rebuilds every render,
+    /// yet the file on screen is usually the one you were just reading — only
+    /// longer or shorter — and being thrown back to its top on every refresh is
+    /// what would make `r` unusable mid-review.
+    fn reload_in_place(&mut self, files: Vec<FileDiff>) {
+        let (scroll, anchor) = (self.diff_scroll, self.cursor_anchor);
+        let before = self
+            .selected_file()
+            .map(|i| self.files[i].path().to_string());
+        self.reload_files(files);
+        let after = self
+            .selected_file()
+            .map(|i| self.files[i].path().to_string());
+        if before.is_some() && before == after {
+            self.diff_scroll = scroll; // the draw clamps it if the file shrank
+            self.cursor_anchor = anchor;
+            self.cursor_token = None; // re-resolve the cursor from that anchor
+        }
+    }
+
     /// Detect whether riffnav is running inside herdr, enabling the `z` zoom key.
     /// A no-op (leaves `herdr` as `None`) when not inside herdr.
     pub fn enable_herdr(&mut self) {
@@ -324,6 +459,122 @@ impl App {
         // review instead of the top of the list. Opening straight onto already-
         // reviewed files would just make the user scroll past them.
         self.select_first_unviewed();
+    }
+
+    /// Load inline comments for the current repo+branch and start watching the
+    /// file for notes written elsewhere. Outside a git repo the store stays
+    /// session-only and there's nothing to watch, but the keys still work.
+    pub fn enable_comments(&mut self, show: bool, retention_days: u64, author: Option<&str>) {
+        self.comments_on = show;
+        if !show {
+            return;
+        }
+        self.comment_author = author
+            .map(str::to_string)
+            .or_else(|| std::env::var("USER").ok())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "me".to_string());
+        self.comments = CommentStore::load(retention_days);
+        self.comment_watch = self.comments.path().and_then(CommentWatch::new);
+        self.publish_session();
+        self.bump_comments();
+    }
+
+    /// Publish what this window is showing, so `riffnav comment add` running in
+    /// another terminal can validate a `--file`/`--line` against the diff on
+    /// screen rather than guessing at one. Best-effort; the CLI falls back to
+    /// re-deriving the diff from git when there's no session to read.
+    fn publish_session(&self) {
+        if !self.comments_on {
+            return;
+        }
+        let source = self.autodiff_label().unwrap_or(if self.watch.is_some() {
+            "watch"
+        } else {
+            "stdin"
+        });
+        let base = self.autodiff.as_ref().and_then(|a| a.base.clone());
+        Session::new(&self.files, source, base).save();
+    }
+
+    pub fn comments_enabled(&self) -> bool {
+        self.comments_on
+    }
+
+    /// The diff pane width the cached renders were built at, for looking one up
+    /// outside the draw path.
+    pub fn last_diff_width(&self) -> u16 {
+        self.last_width
+    }
+
+    /// How many comments are anchored in the file at `diff_index`, for the tree's
+    /// per-file badge.
+    pub fn comment_count(&self, diff_index: usize) -> usize {
+        if !self.comments_on {
+            return 0;
+        }
+        self.files
+            .get(diff_index)
+            .map_or(0, |f| self.comments.count_for_file(f.path()))
+    }
+
+    /// Total comments across every file in the current diff.
+    pub fn comment_total(&self) -> usize {
+        if !self.comments_on {
+            return 0;
+        }
+        (0..self.files.len()).map(|i| self.comment_count(i)).sum()
+    }
+
+    /// Note that the comment set changed, so cached renders re-splice.
+    fn bump_comments(&mut self) {
+        self.comment_rev = self.comment_rev.wrapping_add(1);
+    }
+
+    /// The comment layer for file `idx`, borrowed for one `RenderCache::ensure`.
+    ///
+    /// An associated function rather than a method: the layer borrows `files` and
+    /// `comments` for as long as the call, and taking `&self` would keep `cache`
+    /// borrowed too — which `ensure` needs mutably. Naming the fields lets the
+    /// borrow checker see the three are disjoint.
+    fn comment_layer<'a>(
+        files: &'a [FileDiff],
+        comments: &'a CommentStore,
+        diff_hash: u128,
+        rev: u64,
+        enabled: bool,
+        idx: usize,
+    ) -> CommentLayer<'a> {
+        if !enabled {
+            return CommentLayer::none();
+        }
+        let file = files[idx].path();
+        CommentLayer {
+            threads: comments.threads(file),
+            file,
+            diff_hash,
+            rev,
+        }
+    }
+
+    /// Reload the store when the watcher reports the file changed, so a note an
+    /// agent just wrote appears here. Also fires after our own save, where the
+    /// reload is a harmless no-op beyond one re-splice.
+    fn poll_comments(&mut self) {
+        if !self
+            .comment_watch
+            .as_ref()
+            .is_some_and(CommentWatch::changed)
+        {
+            return;
+        }
+        let before = self.comments.all().len();
+        self.comments.reload();
+        self.bump_comments();
+        let after = self.comments.all().len();
+        if after > before {
+            self.set_status(format!("💬 {} new comment(s)", after - before));
+        }
     }
 
     /// Move the selection to the first unviewed file, scanning from the top. A
@@ -510,6 +761,10 @@ impl App {
         self.restore_herdr_zoom();
         self.flush_review_sync(); // let in-flight GitHub marks finish (bounded)
         self.review.save(); // safety net; toggles already persist eagerly
+        self.comments.save(); // ditto — comment writes persist as they're made
+        if self.comments_on {
+            Session::clear(); // don't leave the CLI validating against a dead window
+        }
         result
     }
 
@@ -525,11 +780,28 @@ impl App {
             }
 
             if let Some(idx) = self.selected_file() {
-                let raw = &self.files[idx].raw;
                 let side_by_side = self.side_by_side_for(idx);
-                self.cache
-                    .ensure(idx, raw, diff_width, side_by_side, self.diff_theme)?;
+                let diff_hash = self.file_hashes.get(idx).copied().unwrap_or(0);
+                let layer = Self::comment_layer(
+                    &self.files,
+                    &self.comments,
+                    diff_hash,
+                    self.comment_rev,
+                    self.comments_on,
+                    idx,
+                );
+                self.cache.ensure(
+                    idx,
+                    &self.files[idx].raw,
+                    diff_width,
+                    side_by_side,
+                    self.diff_theme,
+                    &layer,
+                )?;
             }
+            // The render may have changed shape (new comments, new theme, new
+            // width), so put the cursor back on the line it was on.
+            self.resync_cursor();
 
             terminal.draw(|frame| crate::ui::draw(frame, self, diff_width))?;
             let last_draw = Instant::now();
@@ -558,6 +830,9 @@ impl App {
                 // The file may have changed; re-read its diff from git.
                 self.refresh_file(&path);
             }
+            if let Some(pending) = self.pending_comment.take() {
+                self.compose_comment(terminal, pending)?;
+            }
         }
         Ok(())
     }
@@ -577,6 +852,7 @@ impl App {
         }
         self.expire_status();
         self.drain_review_sync();
+        self.poll_comments();
         Ok(())
     }
 
@@ -591,11 +867,18 @@ impl App {
             .review_sync
             .as_ref()
             .is_some_and(ReviewSync::has_pending);
-        match (status, syncing) {
-            (Some(s), true) => Some(s.min(SYNC_POLL)),
-            (Some(s), false) => Some(s),
-            (None, true) => Some(SYNC_POLL),
-            (None, false) => None,
+        // The filesystem watcher can't interrupt a blocking key read, so while
+        // it's armed the wait is capped and the channel drained on each wake.
+        let watching_comments = self.comment_watch.is_some();
+        let bound = match (syncing, watching_comments) {
+            (true, _) => Some(SYNC_POLL),
+            (false, true) => Some(COMMENT_POLL),
+            (false, false) => None,
+        };
+        match (status, bound) {
+            (Some(s), Some(b)) => Some(s.min(b)),
+            (Some(s), None) => Some(s),
+            (None, b) => b,
         }
     }
 
@@ -653,6 +936,8 @@ impl App {
             });
         self.tree_state.select(Some(target.unwrap_or(0)));
         self.diff_scroll = 0;
+        self.reset_cursor();
+        self.publish_session(); // the file set changed; keep the CLI's view current
         self.status = Some(format!("↻ refreshed · {} files", self.files.len()));
     }
 
@@ -683,6 +968,7 @@ impl App {
                 self.files[i] = file;
                 self.cache.invalidate(i);
                 self.last_width = 0; // force a re-render at the next draw
+                self.publish_session();
             }
             // No longer differs (changes reverted): drop it from the tree.
             // Removal shifts later indices, so reload the remaining set wholesale.
@@ -730,7 +1016,17 @@ impl App {
         if index != self.selected_index() {
             self.tree_state.select(Some(index));
             self.diff_scroll = 0;
+            self.reset_cursor();
         }
+    }
+
+    /// Send the line cursor back to the top. Called whenever the diff pane starts
+    /// showing a different file, where a carried-over line index would be
+    /// meaningless and the remembered anchor belongs to the old file.
+    fn reset_cursor(&mut self) {
+        self.diff_cursor = 0;
+        self.cursor_anchor = None;
+        self.cursor_token = None;
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -757,6 +1053,145 @@ impl App {
 
     fn scroll_diff(&mut self, delta: i32) {
         self.diff_scroll = (self.diff_scroll as i32 + delta).max(0) as u16;
+        // Scrolling drags the cursor along so it never drifts off-screen; the
+        // cursor stays wherever it already is when that's still visible.
+        self.park_cursor_in_view();
+    }
+
+    /// The render backing the current view, if it's already cached.
+    fn current_render(&self) -> Option<&crate::delta::Rendered> {
+        let idx = self.selected_file()?;
+        self.cache.get(
+            idx,
+            self.last_width,
+            self.side_by_side_for(idx),
+            self.diff_theme,
+        )
+    }
+
+    /// Re-resolve the cursor's line index after the render it pointed into was
+    /// rebuilt — a comment spliced in above it, a theme or width change, a switch
+    /// between unified and side-by-side. Anchoring to a diff line rather than a
+    /// row is what makes this recoverable at all.
+    fn resync_cursor(&mut self) {
+        let Some(idx) = self.selected_file() else {
+            return;
+        };
+        let token = (
+            idx,
+            self.last_width,
+            self.side_by_side_for(idx),
+            self.diff_theme,
+            self.comment_rev,
+        );
+        if self.cursor_token == Some(token) {
+            return;
+        }
+        self.cursor_token = Some(token);
+        let Some(render) = self.current_render() else {
+            return;
+        };
+        let lines = render.lines();
+        self.diff_cursor = match self.cursor_anchor.and_then(|a| render.line_map.row_for(a)) {
+            Some(row) => row,
+            // Opening a file for the first time: start on the first real diff
+            // line rather than delta's file-header decoration, so `c` works
+            // straight away instead of reporting there's nothing to comment on.
+            None if self.cursor_anchor.is_none() && self.diff_cursor == 0 => {
+                render.line_map.first_code_row().unwrap_or(0)
+            }
+            // The anchored line left the diff: keep the index, just make sure it
+            // still points inside the render.
+            None => self.diff_cursor.min(lines.saturating_sub(1)),
+        };
+        self.remember_cursor_anchor();
+    }
+
+    /// Record the diff line the cursor now sits on, so a later re-render can put
+    /// it back. A row with no line number (a hunk header, a comment row) leaves
+    /// the previous anchor alone rather than clearing it.
+    fn remember_cursor_anchor(&mut self) {
+        if let Some(anchor) = self
+            .current_render()
+            .and_then(|r| r.line_map.get(self.diff_cursor).anchor())
+        {
+            self.cursor_anchor = Some(anchor);
+        }
+    }
+
+    /// Move the line cursor by `delta` lines and scroll to keep it in view.
+    fn move_cursor(&mut self, delta: i32) {
+        let Some(max) = self.current_render().map(|r| r.lines().saturating_sub(1)) else {
+            return;
+        };
+        self.diff_cursor = (self.diff_cursor as i32 + delta).clamp(0, max as i32) as usize;
+        self.remember_cursor_anchor();
+        self.scroll_cursor_into_view();
+    }
+
+    /// Put the cursor on a specific line and bring it on screen.
+    fn set_cursor(&mut self, line: usize) {
+        let Some(max) = self.current_render().map(|r| r.lines().saturating_sub(1)) else {
+            return;
+        };
+        self.diff_cursor = line.min(max);
+        self.remember_cursor_anchor();
+        self.scroll_cursor_into_view();
+    }
+
+    /// Scroll the minimum needed to keep the cursor line — all of it, when it
+    /// wraps onto several rows — inside the viewport, with [`CURSOR_PADDING`]
+    /// rows of lead so the cursor never sits flush against an edge.
+    fn scroll_cursor_into_view(&mut self) {
+        let (Some(render), height) = (self.current_render(), self.diff_height) else {
+            return;
+        };
+        if height == 0 {
+            return;
+        }
+        let top = render.row_of(self.diff_cursor);
+        let bottom = render.row_of(self.diff_cursor + 1).max(top + 1);
+        // On a short pane, padding that exceeds a third of the height would fight
+        // itself, so cap it.
+        let pad = CURSOR_PADDING.min(height / 3);
+        let scroll = self.diff_scroll;
+        if top < scroll.saturating_add(pad) {
+            self.diff_scroll = top.saturating_sub(pad);
+        } else if bottom + pad > scroll + height {
+            self.diff_scroll = (bottom + pad).saturating_sub(height);
+        }
+    }
+
+    /// After a scroll or page jump, pull the cursor to the nearest visible line
+    /// rather than letting it sit off-screen.
+    fn park_cursor_in_view(&mut self) {
+        let (Some(render), height) = (self.current_render(), self.diff_height) else {
+            return;
+        };
+        if height == 0 {
+            return;
+        }
+        let scroll = self.diff_scroll.min(render.height.saturating_sub(height));
+        let first = render.line_at(scroll);
+        let last = render.line_at(scroll.saturating_add(height.saturating_sub(1)));
+        let parked = self.diff_cursor.clamp(first, last.max(first));
+        if parked != self.diff_cursor {
+            self.diff_cursor = parked;
+            self.remember_cursor_anchor();
+        }
+    }
+
+    /// The rows the line cursor occupies inside the diff pane — `(top, bottom)`,
+    /// bottom exclusive, counted from the pane's top edge — or `None` when it's
+    /// off-screen or nothing is rendered yet. Lets the composer open beside the
+    /// line it will hang on.
+    pub fn cursor_rows(&self) -> Option<(u16, u16)> {
+        let render = self.current_render()?;
+        let top = render.row_of(self.diff_cursor);
+        let bottom = render.row_of(self.diff_cursor + 1).max(top + 1);
+        let top = top.checked_sub(self.diff_scroll)?;
+        let bottom = bottom.saturating_sub(self.diff_scroll);
+        (top < self.diff_height).then_some((top, bottom))
     }
 
     /// One PageUp/PageDown step: the diff viewport height less a line of overlap,
@@ -774,6 +1209,217 @@ impl App {
         } else {
             self.scroll_diff(delta);
         }
+    }
+
+    /// The spliced comment block the cursor is inside, if any.
+    fn block_at_cursor(&self) -> Option<&crate::comment::CommentBlock> {
+        let cursor = self.diff_cursor;
+        self.current_render()?
+            .comment_rows
+            .iter()
+            .find(|b| cursor >= b.start && cursor < b.start + b.len)
+    }
+
+    /// Jump the cursor to the next or previous comment in this file, wrapping
+    /// around. Reports when there's nothing to jump to.
+    pub(crate) fn jump_comment(&mut self, forward: bool) {
+        let Some(render) = self.current_render() else {
+            return;
+        };
+        let starts: Vec<usize> = render.comment_rows.iter().map(|b| b.start).collect();
+        if starts.is_empty() {
+            self.set_status("No comments in this file");
+            return;
+        }
+        let cursor = self.diff_cursor;
+        let target = if forward {
+            starts.iter().find(|&&s| s > cursor).copied()
+        } else {
+            starts.iter().rev().find(|&&s| s < cursor).copied()
+        };
+        // Wrap: past the last comment go back to the first, and vice versa.
+        let target = target.unwrap_or(if forward {
+            starts[0]
+        } else {
+            starts[starts.len() - 1]
+        });
+        self.set_cursor(target);
+    }
+
+    /// Start composing a note on whatever the cursor is over: a comment on the
+    /// diff line, or — when the cursor is inside a thread, which is exactly where
+    /// `]` parks it — a reply to the comment it's sitting on. What the cursor is
+    /// on already says which was meant, so there's no second key for it.
+    ///
+    /// The note is typed into the composer drawn over the diff pane; `$EDITOR` is
+    /// a `Ctrl-O` away from there.
+    fn start_comment(&mut self) {
+        let Some(idx) = self.selected_file() else {
+            self.set_status("No file selected to comment on");
+            return;
+        };
+        // A reply inherits the thread's anchor, so it lands beside the same code.
+        let in_thread = self.block_at_cursor().map(|block| {
+            (
+                block.anchor,
+                block.comment_at(self.diff_cursor).map(str::to_string),
+            )
+        });
+        let (anchor, reply_to) = match in_thread {
+            Some(threaded) => threaded,
+            None => match self
+                .current_render()
+                .and_then(|r| r.line_map.get(self.diff_cursor).anchor())
+            {
+                Some(anchor) => (anchor, None),
+                None => {
+                    self.set_status("Put the cursor on a diff line to comment on it");
+                    return;
+                }
+            },
+        };
+        self.composer = Some(Composer::new(PendingComment {
+            file: self.files[idx].path().to_string(),
+            anchor,
+            reply_to,
+            diff_hash: self.file_hashes.get(idx).copied().unwrap_or(0),
+            context: self.cursor_context(),
+            draft: String::new(),
+        }));
+    }
+
+    /// The composer, for the draw path.
+    pub fn composer(&self) -> Option<&Composer> {
+        self.composer.as_ref()
+    }
+
+    /// Store what's in the composer and close it. An empty body aborts, exactly
+    /// like an empty commit message.
+    fn finish_comment(&mut self) {
+        let Some(composer) = self.composer.take() else {
+            return;
+        };
+        let body = composer.body();
+        self.save_composed(composer.pending, body);
+    }
+
+    /// Abandon the note being typed.
+    fn cancel_comment(&mut self) {
+        if self.composer.take().is_some() {
+            self.set_status("Comment discarded");
+        }
+    }
+
+    /// `Ctrl-O` from the composer: reopen the same note in `$EDITOR`, carrying
+    /// whatever has been typed so far. The editor runs once the event loop
+    /// regains the terminal, next to the `o` key's editor handling.
+    fn comment_to_editor(&mut self) {
+        if let Some(composer) = self.composer.take() {
+            self.pending_comment = Some(composer.into_draft());
+        }
+    }
+
+    /// Route a keypress into the open composer. It owns all input while it's up,
+    /// so every key either edits the body or ends the note.
+    fn composer_key(&mut self, key: crossterm::event::KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            // Enter breaks the line, so saving needs a key of its own. Alt-Enter
+            // is the same key for terminals that report the modifier, and reads
+            // as "done" to anyone who never finds Ctrl-S.
+            KeyCode::Char('s') if ctrl => self.finish_comment(),
+            KeyCode::Enter if alt || ctrl => self.finish_comment(),
+            KeyCode::Esc => self.cancel_comment(),
+            KeyCode::Char('c') if ctrl => self.cancel_comment(),
+            KeyCode::Char('o') if ctrl => self.comment_to_editor(),
+            _ => {
+                let Some(c) = self.composer.as_mut() else {
+                    return;
+                };
+                match key.code {
+                    KeyCode::Enter => c.newline(),
+                    KeyCode::Backspace => c.backspace(),
+                    KeyCode::Delete => c.delete(),
+                    KeyCode::Left => c.left(),
+                    KeyCode::Right => c.right(),
+                    KeyCode::Up => c.up(),
+                    KeyCode::Down => c.down(),
+                    KeyCode::Home => c.home(),
+                    KeyCode::End => c.end(),
+                    KeyCode::Char('a') if ctrl => c.home(),
+                    KeyCode::Char('e') if ctrl => c.end(),
+                    KeyCode::Char('u') if ctrl => c.delete_to_start(),
+                    KeyCode::Char('w') if ctrl => c.delete_word(),
+                    KeyCode::Char(ch) if !ctrl => c.insert(ch),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// A few rendered lines around the cursor, as plain text, to quote back in the
+    /// editor so the author can see what they're commenting on.
+    fn cursor_context(&self) -> Vec<String> {
+        let Some(render) = self.current_render() else {
+            return Vec::new();
+        };
+        let first = self.diff_cursor.saturating_sub(2);
+        let last = (self.diff_cursor + 3).min(render.text.lines.len());
+        render.text.lines[first..last]
+            .iter()
+            .map(|l| {
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                text.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    /// Delete the comment the cursor is on (and any replies beneath it).
+    fn delete_comment(&mut self) {
+        let Some(id) = self
+            .block_at_cursor()
+            .and_then(|b| b.comment_at(self.diff_cursor))
+            .map(str::to_string)
+        else {
+            self.set_status("Put the cursor on a comment to delete it");
+            return;
+        };
+        let removed = self.comments.remove(&id);
+        self.comments.save();
+        self.bump_comments();
+        self.set_status(match removed {
+            0 => "Nothing to delete".to_string(),
+            1 => format!("Deleted comment #{id}"),
+            n => format!("Deleted comment #{id} and {} repl(ies)", n - 1),
+        });
+    }
+
+    /// Turn the text an author typed into a stored comment. Empty means abort,
+    /// exactly like an empty commit message.
+    fn save_composed(&mut self, pending: PendingComment, body: String) {
+        let body = body.trim();
+        if body.is_empty() {
+            self.set_status("Empty comment — nothing saved");
+            return;
+        }
+        let id = self.comments.add(Comment {
+            id: String::new(),
+            file: pending.file.clone(),
+            side: pending.anchor.side,
+            line: pending.anchor.line,
+            body: body.to_string(),
+            author: self.comment_author.clone(),
+            created: crate::state::now_unix(),
+            reply_to: pending.reply_to,
+            diff_hash: Some(format!("{:032x}", pending.diff_hash)),
+        });
+        self.comments.save();
+        self.bump_comments();
+        self.set_status(format!(
+            "💬 Commented on {}:{}  (#{id})",
+            pending.file, pending.anchor.line
+        ));
     }
 
     /// Expand/collapse the selected directory and re-flatten the visible rows.
@@ -848,6 +1494,7 @@ impl App {
         {
             self.tree_state.select(Some(i));
             self.diff_scroll = 0;
+            self.reset_cursor();
         }
     }
 
@@ -874,7 +1521,15 @@ impl App {
     }
 
     /// Suspend the TUI, run `$VISUAL`/`$EDITOR` on `path`, then resume.
-    fn open_editor(&mut self, terminal: &mut DefaultTerminal, path: &str) -> Result<()> {
+    ///
+    /// Returns the editor's name and how it exited, so callers can decide what to
+    /// report — opening a file just says so, while composing a comment only reads
+    /// the buffer back on success.
+    fn run_editor(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        path: &str,
+    ) -> (String, std::io::Result<std::process::ExitStatus>) {
         disable_mouse();
         ratatui::restore();
         let editor = std::env::var("VISUAL")
@@ -896,7 +1551,12 @@ impl App {
         enable_mouse();
         let _ = terminal.clear();
         self.last_width = 0; // force a re-render into the fresh screen
+        (editor, status)
+    }
 
+    /// The `o` key: edit the selected file in place.
+    fn open_editor(&mut self, terminal: &mut DefaultTerminal, path: &str) -> Result<()> {
+        let (editor, status) = self.run_editor(terminal, path);
         self.status = Some(match status {
             Ok(s) if s.success() => format!("Edited {path}"),
             Ok(s) => format!("{editor} exited: {s}"),
@@ -905,10 +1565,41 @@ impl App {
         Ok(())
     }
 
+    /// Compose a comment body in `$EDITOR`, git-commit style.
+    ///
+    /// The buffer opens with an empty first line and everything explanatory below
+    /// a scissors marker, so a body containing `#` — a markdown heading, a shell
+    /// snippet — survives verbatim. That's why this doesn't use git's plain `#`
+    /// comment convention.
+    fn compose_comment(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        pending: PendingComment,
+    ) -> Result<()> {
+        let path = std::env::temp_dir().join(format!("riffnav-comment-{}.md", std::process::id()));
+        let template = comment_template(&pending);
+        if let Err(e) = std::fs::write(&path, template) {
+            self.set_status(format!("Couldn't open a comment buffer: {e}"));
+            return Ok(());
+        }
+
+        let (editor, status) = self.run_editor(terminal, &path.to_string_lossy());
+        match status {
+            Ok(s) if s.success() => {
+                let typed = std::fs::read_to_string(&path).unwrap_or_default();
+                self.save_composed(pending, strip_scissors(&typed));
+            }
+            Ok(s) => self.set_status(format!("{editor} exited: {s} — comment discarded")),
+            Err(e) => self.set_status(format!("Couldn't launch {editor}: {e}")),
+        }
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
     /// Route a mouse event to the pane under the cursor. Overlays own the whole
     /// screen, so clicks and scrolls beneath them are ignored.
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.finder.is_some() || self.show_help {
+        if self.finder.is_some() || self.show_help || self.composer.is_some() {
             return;
         }
         let pos = Position::new(mouse.column, mouse.row);
@@ -945,7 +1636,9 @@ impl App {
             return;
         };
         let total = tree.width + diff.width;
-        let max = total.saturating_sub(MIN_DIFF_WIDTH).max(self.tree_width_min);
+        let max = total
+            .saturating_sub(MIN_DIFF_WIDTH)
+            .max(self.tree_width_min);
         self.tree_width = (x.saturating_sub(tree.x) + 1).clamp(self.tree_width_min, max);
     }
 
@@ -999,8 +1692,19 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
+        self.dispatch_key(key)
+    }
 
+    /// Act on one keypress, routing it to whatever currently owns input: the
+    /// composer, the finder, the help overlay, or the panes themselves.
+    fn dispatch_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // A note being typed captures all input, printable keys included.
+        if self.composer.is_some() {
+            self.composer_key(key);
+            return Ok(());
+        }
 
         // The fuzzy finder captures all input while open.
         if self.finder.is_some() {
@@ -1072,28 +1776,37 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if ctrl => self.quit = true,
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.focus == Focus::Tree {
-                    self.move_selection(1)
-                } else {
-                    self.scroll_diff(1)
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.focus == Focus::Tree {
-                    self.move_selection(-1)
-                } else {
-                    self.scroll_diff(-1)
-                }
-            }
+            // In the diff pane j/k move the line cursor (scrolling the pane once
+            // it nears an edge), matching how the tree moves its selection. With
+            // comments off there's no cursor, so they scroll as they always did.
+            KeyCode::Char('j') | KeyCode::Down => match (self.focus, self.comments_on) {
+                (Focus::Tree, _) => self.move_selection(1),
+                (Focus::Diff, true) => self.move_cursor(1),
+                (Focus::Diff, false) => self.scroll_diff(1),
+            },
+            KeyCode::Char('k') | KeyCode::Up => match (self.focus, self.comments_on) {
+                (Focus::Tree, _) => self.move_selection(-1),
+                (Focus::Diff, true) => self.move_cursor(-1),
+                (Focus::Diff, false) => self.scroll_diff(-1),
+            },
             KeyCode::Char('n') => self.jump_file(true),
             KeyCode::Char('p') | KeyCode::Char('N') => self.jump_file(false),
             KeyCode::Char('d') if ctrl => self.scroll_diff(HALF_PAGE),
             KeyCode::Char('u') if ctrl => self.scroll_diff(-HALF_PAGE),
             KeyCode::PageDown => self.page_move(true),
             KeyCode::PageUp => self.page_move(false),
-            KeyCode::Char('g') => self.diff_scroll = 0,
-            KeyCode::Char('G') => self.diff_scroll = u16::MAX, // clamped on draw
+            KeyCode::Char('g') => {
+                self.diff_scroll = 0;
+                self.set_cursor(0);
+            }
+            KeyCode::Char('G') => {
+                self.diff_scroll = u16::MAX; // clamped on draw
+                let last = self.current_render().map(|r| r.lines().saturating_sub(1));
+                if let Some(last) = last {
+                    self.diff_cursor = last;
+                    self.remember_cursor_anchor();
+                }
+            }
             KeyCode::Enter => self.toggle_fold(),
             // less-style paging of the diff: Space forward, b back. Diff-focused
             // only — in the tree, Enter folds and paging the selection with Space
@@ -1130,6 +1843,8 @@ impl App {
             KeyCode::Char('V') => self.jump_unviewed(),
             // Only bound on a bare launch (auto-diff mode); inert otherwise.
             KeyCode::Char('d') if self.autodiff.is_some() => self.cycle_diff_source(),
+            // Only bound where the diff can be re-read; a piped one can't be.
+            KeyCode::Char('r') if self.can_refresh() => self.refresh_diff(),
             // Only bound inside herdr; an inert no-op elsewhere.
             KeyCode::Char('z') if self.herdr.is_some() => self.toggle_herdr_zoom(),
             // Only bound when a supported forge (e.g. GitHub) is detected.
@@ -1139,10 +1854,58 @@ impl App {
                     self.pending_editor = Some(self.files[idx].path().to_string());
                 }
             }
+            // Comment keys, bound only when comments are on — like `d`/`z`/`W`,
+            // they're inert rather than misleading when the feature is off.
+            KeyCode::Char('c') if self.comments_on => self.start_comment(),
+            KeyCode::Char('x') if self.comments_on => self.delete_comment(),
+            KeyCode::Char(']') if self.comments_on => self.jump_comment(true),
+            KeyCode::Char('[') if self.comments_on => self.jump_comment(false),
             KeyCode::Char('?') => self.show_help = true,
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl App {
+    /// Turn comments on with an in-memory store, bypassing disk and git scope
+    /// detection so rendering and the cursor can be tested in isolation.
+    pub(crate) fn install_comments_for_test(&mut self, comments: CommentStore) {
+        self.comments = comments;
+        self.comments_on = true;
+        self.comment_author = "tester".to_string();
+        self.bump_comments();
+    }
+
+    /// Drive one keypress through the routing the event loop uses, so tests in
+    /// other modules can exercise the keys without an event queue.
+    pub(crate) fn press_for_test(&mut self, code: KeyCode, ctrl: bool) {
+        let mods = if ctrl {
+            KeyModifiers::CONTROL
+        } else {
+            KeyModifiers::NONE
+        };
+        let _ = self.dispatch_key(crossterm::event::KeyEvent::new(code, mods));
+    }
+
+    /// Seed the render cache for the selected file, splicing in whatever the
+    /// installed store holds. Tests run without delta on PATH, so this stands in
+    /// for the `RenderCache::ensure` the event loop would do.
+    pub(crate) fn seed_render_for_test(&mut self, width: u16, text: ratatui::text::Text<'static>) {
+        let idx = self.selected_file().expect("a file is selected");
+        let layer = Self::comment_layer(
+            &self.files,
+            &self.comments,
+            0,
+            self.comment_rev,
+            self.comments_on,
+            idx,
+        );
+        self.cache
+            .insert_for_test_with_comments(idx, width, false, self.diff_theme, text, &layer);
+        self.last_width = width;
+        self.cursor_token = None; // the render is new; let the cursor re-resolve
     }
 }
 
@@ -1456,6 +2219,27 @@ mod tests {
         );
     }
 
+    /// `r` is for re-reading the diff mid-review, so it must not throw the reader
+    /// back to the top of the file they were in the middle of.
+    #[test]
+    fn refreshing_holds_the_scroll_when_the_same_file_is_still_selected() {
+        let mut app = app_with(vec![file_with_raw("a.rs"), file_with_raw("b.rs")]);
+        app.diff_scroll = 12;
+
+        // Same file still selected after the reload: the place is kept.
+        app.reload_in_place(vec![file_with_raw("a.rs"), file_with_raw("b.rs")]);
+        assert_eq!(
+            app.selected_file().map(|i| app.files[i].path()),
+            Some("a.rs")
+        );
+        assert_eq!(app.diff_scroll, 12);
+
+        // The file dropped out of the diff, so the selection moved — a kept
+        // scroll would now point into unrelated code.
+        app.reload_in_place(vec![file_with_raw("z.rs")]);
+        assert_eq!(app.diff_scroll, 0);
+    }
+
     #[test]
     fn reload_falls_back_to_first_file_when_selection_gone() {
         let mut app = app_with(vec![file("a.rs"), file("b.rs")]);
@@ -1537,5 +2321,209 @@ mod tests {
         };
         let hidden = App::new(vec![file("a.rs")], false, false, &hidden_cfg);
         assert_eq!(hidden.focus, Focus::Diff);
+    }
+
+    /// The editor buffer must round-trip a body containing `#`, which is why it
+    /// uses git's scissors convention rather than git's `#`-comment convention:
+    /// review notes routinely contain markdown headings and shell snippets.
+    #[test]
+    fn the_editor_template_round_trips_a_body_containing_hashes() {
+        let pending = PendingComment {
+            file: "src/app.rs".to_string(),
+            anchor: Anchor {
+                side: crate::comment::Side::New,
+                line: 103,
+            },
+            reply_to: None,
+            diff_hash: 0,
+            context: vec!["  103 │ let x = 1;".to_string()],
+            draft: String::new(),
+        };
+        let template = comment_template(&pending);
+        // The footer orients the author without becoming part of the note.
+        assert!(template.contains("src/app.rs:103 (new side)"));
+        assert!(template.contains("let x = 1;"));
+        assert_eq!(strip_scissors(&template), "", "an untouched buffer aborts");
+
+        let typed = format!("# A heading\n\nAnd a `#!/bin/sh` line.\n{template}");
+        assert_eq!(
+            strip_scissors(&typed),
+            "# A heading\n\nAnd a `#!/bin/sh` line."
+        );
+
+        // Handing a half-typed note to the editor pre-fills the buffer with it,
+        // so `Ctrl-O` continues the note rather than starting it over.
+        let carried = comment_template(&PendingComment {
+            draft: "half a thought".to_string(),
+            ..pending
+        });
+        assert_eq!(strip_scissors(&carried), "half a thought");
+    }
+
+    /// A three-line diff carrying the gutter delta emits under riffnav's pinned
+    /// number formats, so the line map has real numbers to anchor against.
+    fn seed_text() -> ratatui::text::Text<'static> {
+        ratatui::text::Text::from(
+            (1..=3)
+                .map(|n| ratatui::text::Line::from(format!("{n:>5}⋮{n:>5}│let x{n} = {n};")))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// An app with comments on, that diff rendered, and the cursor on a
+    /// commentable line — the state `c` is pressed from.
+    fn app_ready_to_comment() -> App {
+        let mut app = app_with(vec![file_with_raw("a.rs")]);
+        app.install_comments_for_test(CommentStore::disabled());
+        app.focus = Focus::Diff;
+        app.diff_height = 20;
+        app.seed_render_for_test(60, seed_text());
+        app.resync_cursor();
+        app
+    }
+
+    fn type_into(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            app.press_for_test(KeyCode::Char(ch), false);
+        }
+    }
+
+    /// The point of the composer: a note is typed and saved without the screen
+    /// ever being handed to `$EDITOR`.
+    #[test]
+    fn a_comment_is_typed_and_saved_in_place() {
+        let mut app = app_ready_to_comment();
+        app.press_for_test(KeyCode::Char('c'), false);
+        assert!(app.composer.is_some(), "`c` opens the composer");
+
+        type_into(&mut app, "no backoff");
+        app.press_for_test(KeyCode::Enter, false); // a second line, not a save
+        type_into(&mut app, "here");
+        assert!(app.composer.is_some(), "Enter must not end the note");
+
+        app.press_for_test(KeyCode::Char('s'), true);
+        assert!(app.composer.is_none());
+        assert!(app.pending_comment.is_none(), "no editor was involved");
+        let saved = app.comments.all();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].body, "no backoff\nhere");
+        assert_eq!(saved[0].line, 1, "anchored to the cursor's line");
+    }
+
+    /// While a note is being typed the composer owns every key, so the ones that
+    /// normally act on the panes type instead.
+    #[test]
+    fn the_composer_swallows_the_pane_keys() {
+        let mut app = app_ready_to_comment();
+        app.press_for_test(KeyCode::Char('c'), false);
+        type_into(&mut app, "quit v?");
+
+        assert!(!app.quit, "`q` types rather than quitting");
+        assert!(!app.show_help, "`?` types rather than opening help");
+        assert_eq!(
+            app.viewed_count(),
+            0,
+            "`v` types rather than marking viewed"
+        );
+        app.press_for_test(KeyCode::Char('s'), true);
+        assert_eq!(app.comments.all()[0].body, "quit v?");
+    }
+
+    #[test]
+    fn escape_discards_the_note_and_saves_nothing() {
+        let mut app = app_ready_to_comment();
+        app.press_for_test(KeyCode::Char('c'), false);
+        type_into(&mut app, "never mind");
+        app.press_for_test(KeyCode::Esc, false);
+        assert!(app.composer.is_none());
+        assert!(app.comments.all().is_empty());
+        assert!(!app.quit, "Esc closed the composer, not riffnav");
+
+        // An empty note is an abort too, exactly like an empty commit message.
+        app.press_for_test(KeyCode::Char('c'), false);
+        app.press_for_test(KeyCode::Char('s'), true);
+        assert!(app.comments.all().is_empty());
+    }
+
+    /// There's one comment key, not two: on a diff line `c` starts a note, and
+    /// inside a thread — where `]` parks the cursor — it replies to the comment
+    /// it's sitting on, which is the only thing it could sensibly mean there.
+    #[test]
+    fn c_inside_a_thread_replies_to_the_comment_under_the_cursor() {
+        let mut app = app_ready_to_comment();
+        app.press_for_test(KeyCode::Char('c'), false);
+        type_into(&mut app, "first");
+        app.press_for_test(KeyCode::Char('s'), true);
+
+        // Re-splice so the stored note occupies rows, then jump onto it.
+        app.seed_render_for_test(60, seed_text());
+        app.resync_cursor();
+        app.jump_comment(true);
+        assert!(
+            app.current_render()
+                .unwrap()
+                .line_map
+                .get(app.diff_cursor)
+                .anchor()
+                .is_none(),
+            "the cursor is on a comment row, not a diff line"
+        );
+
+        app.press_for_test(KeyCode::Char('c'), false);
+        type_into(&mut app, "second");
+        app.press_for_test(KeyCode::Char('s'), true);
+        let saved = app.comments.all();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[1].body, "second");
+        assert_eq!(
+            saved[1].line, saved[0].line,
+            "a reply hangs on the same line as the thread"
+        );
+        assert_eq!(
+            saved[1].reply_to.as_deref(),
+            Some(saved[0].id.as_str()),
+            "it threads under the comment the cursor was on"
+        );
+
+        // Back on a diff line, the same key starts a root note again.
+        app.seed_render_for_test(60, seed_text());
+        app.resync_cursor();
+        app.press_for_test(KeyCode::Char('c'), false);
+        type_into(&mut app, "third");
+        app.press_for_test(KeyCode::Char('s'), true);
+        assert!(app.comments.all()[2].reply_to.is_none());
+    }
+
+    /// `Ctrl-O` is the escape hatch for a note that outgrows the field: it hands
+    /// the same anchor — and the text so far — to the editor path.
+    #[test]
+    fn ctrl_o_hands_the_half_written_note_to_the_editor() {
+        let mut app = app_ready_to_comment();
+        app.press_for_test(KeyCode::Char('c'), false);
+        type_into(&mut app, "half a thought");
+        app.press_for_test(KeyCode::Char('o'), true);
+
+        assert!(app.composer.is_none());
+        let pending = app.pending_comment.as_ref().expect("handed to the editor");
+        assert_eq!(pending.draft, "half a thought");
+        assert_eq!(pending.anchor.line, 1);
+        assert!(
+            app.comments.all().is_empty(),
+            "nothing is stored until it's saved"
+        );
+    }
+
+    /// Comments off means no line cursor, so j/k must scroll the pane exactly as
+    /// they did before the feature existed.
+    #[test]
+    fn without_comments_the_diff_keys_still_scroll() {
+        let mut app = app_with(vec![file("a.rs")]);
+        app.focus = Focus::Diff;
+        assert!(!app.comments_enabled());
+        // No render is cached, so a cursor move would be a no-op; a scroll isn't.
+        app.scroll_diff(5);
+        assert_eq!(app.diff_scroll, 5);
+        app.scroll_diff(-2);
+        assert_eq!(app.diff_scroll, 3);
     }
 }

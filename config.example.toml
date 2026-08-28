@@ -65,3 +65,21 @@
 # Omit for the adaptive default: uncommitted changes, or branch-vs-base when the
 # working tree is clean. Override per run with --diff.
 # diff_source = "all"
+
+# --- Inline review comments ---
+
+# Show review comments beside the code, and bind the keys that write them:
+# `c` comment on the cursor line, `r` reply, `x` delete, `]`/`[` jump between
+# them. Comments are written either here or by an AI agent running
+# `riffnav comment add` in another terminal (see `riffnav skill`).
+# Turning this off also turns off the diff pane's line cursor, so `j`/`k` scroll
+# the pane instead of moving a cursor.
+# show_comments = true
+
+# Days to keep comments before they're garbage-collected, matching how
+# review_retention_days ages out viewed marks. Comments are stored per repo and
+# branch under $XDG_STATE_HOME/riffnav/comments/.
+# comment_retention_days = 90
+
+# Name recorded as the author of comments written here. Omit to use $USER.
+# comment_author = "olli"

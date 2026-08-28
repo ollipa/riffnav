@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use super::model::{FileDiff, FileStatus};
+use super::model::{FileDiff, FileStatus, Hunk};
 
 /// Split a unified diff into per-file sections. Anything before the first
 /// `diff --git` line (e.g. a `git show` commit header) is ignored.
@@ -109,6 +109,40 @@ fn parse_one(raw: &str) -> FileDiff {
         additions,
         deletions,
         raw: raw.to_string(),
+    }
+}
+
+/// Parse the `@@` headers out of one file's verbatim diff text (`FileDiff::raw`).
+///
+/// Computed on demand rather than during [`parse`], since only the comment CLI
+/// needs it — the TUI reads line numbers back out of delta's rendered gutter.
+/// Combined (merge) diffs use `@@@` headers and are skipped: they have no single
+/// pre-image side to anchor a comment to.
+pub fn hunks(raw: &str) -> Vec<Hunk> {
+    raw.lines().filter_map(parse_hunk_header).collect()
+}
+
+/// `@@ -1,5 +1,7 @@ fn foo()` -> its four ranges. A side written without a comma
+/// (`-1`) has an implicit length of 1.
+fn parse_hunk_header(line: &str) -> Option<Hunk> {
+    let rest = line.strip_prefix("@@ ")?;
+    let end = rest.find(" @@")?;
+    let (old, new) = rest[..end].split_once(' ')?;
+    let (old_start, old_len) = parse_range(old.strip_prefix('-')?)?;
+    let (new_start, new_len) = parse_range(new.strip_prefix('+')?)?;
+    Some(Hunk {
+        old_start,
+        old_len,
+        new_start,
+        new_len,
+        header: line.to_string(),
+    })
+}
+
+fn parse_range(s: &str) -> Option<(u32, u32)> {
+    match s.split_once(',') {
+        Some((start, len)) => Some((start.parse().ok()?, len.parse().ok()?)),
+        None => Some((s.parse().ok()?, 1)),
     }
 }
 
@@ -280,6 +314,41 @@ mod tests {
         let f = &parse(diff)[0];
         assert_eq!(f.path(), "src/file.rs");
         assert_eq!(f.old_path.as_deref(), Some("src/file.rs"));
+    }
+
+    #[test]
+    fn parses_hunk_ranges_including_trailing_context() {
+        let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n\
+                   @@ -10,5 +12,7 @@ fn outer() {\n ctx\n-gone\n+added\n\
+                   @@ -40 +44 @@\n-x\n+y\n";
+        let hs = hunks(raw);
+        assert_eq!(hs.len(), 2);
+        assert_eq!((hs[0].old_start, hs[0].old_len), (10, 5));
+        assert_eq!((hs[0].new_start, hs[0].new_len), (12, 7));
+        assert_eq!(hs[0].header, "@@ -10,5 +12,7 @@ fn outer() {");
+        // A side with no comma means a length of exactly one line.
+        assert_eq!((hs[1].old_start, hs[1].old_len), (40, 1));
+        assert_eq!((hs[1].new_start, hs[1].new_len), (44, 1));
+    }
+
+    #[test]
+    fn hunk_contains_respects_ranges_and_empty_sides() {
+        let h = &hunks("@@ -0,0 +1,3 @@\n+a\n+b\n+c\n")[0];
+        // An added file's pre-image side is empty, so it contains no old line.
+        assert!(!h.contains_old(0));
+        assert!(!h.contains_old(1));
+        assert!(h.contains_new(1));
+        assert!(h.contains_new(3));
+        assert!(!h.contains_new(4));
+    }
+
+    #[test]
+    fn hunk_parser_skips_combined_and_malformed_headers() {
+        // Merge diffs use `@@@` and have two pre-image sides — nothing to anchor to.
+        assert!(hunks("@@@ -1,2 -1,2 +1,3 @@@\n").is_empty());
+        assert!(hunks("@@ not a range @@\n").is_empty());
+        // A bare `@@` inside a hunk body (as file content) must not parse.
+        assert!(hunks("@@ -1 +1 @@\n-@@ oops\n").len() == 1);
     }
 
     #[test]

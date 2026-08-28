@@ -39,6 +39,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                     let icon = icons::file_icon(file.path(), style);
                     let adds = format!("+{}", file.additions);
                     let dels = format!("-{}", file.deletions);
+                    // Files carrying review comments get a count ahead of the
+                    // ± badge, so an agent's notes are findable from the tree.
+                    let notes = match app.comment_count(diff_index) {
+                        0 => String::new(),
+                        n => format!("💬{n} "),
+                    };
 
                     // Right-align the "+a -b" badge: pad between the name and badge.
                     let icon_w = if icon.is_empty() {
@@ -47,7 +53,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                         icon.chars().count() + 1
                     };
                     let left = row.depth * 2 + 2 + icon_w + row.name.chars().count();
-                    let badge = adds.len() + 1 + dels.len();
+                    // The speech bubble is double-width, so the badge is one
+                    // column wider than its char count.
+                    let notes_w = if notes.is_empty() {
+                        0
+                    } else {
+                        notes.chars().count() + 1
+                    };
+                    let badge = notes_w + adds.len() + 1 + dels.len();
                     let pad = inner.saturating_sub(left + badge).max(1);
 
                     // A reviewed file shows a green ✓ in place of its A/M/D sigil
@@ -72,6 +85,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                     }
                     spans.push(Span::styled(row.name.clone(), name_style));
                     spans.push(Span::raw(" ".repeat(pad)));
+                    if !notes.is_empty() {
+                        spans.push(Span::styled(notes, Style::new().fg(Color::Yellow)));
+                    }
                     spans.push(Span::styled(
                         adds,
                         Style::new().fg(Color::Green).add_modifier(Modifier::DIM),
