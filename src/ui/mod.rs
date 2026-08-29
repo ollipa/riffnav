@@ -68,7 +68,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
             frame.area(),
             app.in_herdr(),
             app.has_forge(),
-            app.is_autodiff(),
+            app.can_cycle_source(),
             app.can_refresh(),
             app.comments_enabled(),
         );
@@ -103,7 +103,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(Color::Green),
         ));
     }
-    if let Some(label) = app.autodiff_label() {
+    if let Some(label) = app.diff_label() {
         spans.push(Span::styled(
             format!("   ◆ {label}"),
             Style::new().fg(Color::Cyan),
@@ -141,7 +141,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let (text, style) = match &app.status {
         Some(status) => (format!(" {status} "), Style::new().fg(Color::Yellow)),
         None => {
-            let src = if app.is_autodiff() {
+            let src = if app.can_cycle_source() {
                 "d: source · "
             } else {
                 ""

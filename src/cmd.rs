@@ -32,6 +32,8 @@ pub fn run(command: Command) -> Result<()> {
     match command {
         Command::Comment(cmd) => comment(cmd),
         Command::Skill { path } => skill(path),
+        // Routed in `main`: these open the TUI rather than running as CLI tools.
+        Command::Diff(_) | Command::Show { .. } => unreachable!(),
     }
 }
 

@@ -14,7 +14,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 use serde::Deserialize;
 
-use crate::autodiff::{AutoDiff, DiffSource};
+use crate::autodiff::{DiffSource, GitDiff};
 use crate::comment::{Anchor, Comment, CommentStore, CommentWatch, Composer, PendingComment};
 use crate::config::Config;
 use crate::delta::{CommentLayer, RenderCache};
@@ -206,9 +206,10 @@ pub struct App {
     last_width: u16,
     quit: bool,
     pending_editor: Option<String>,
-    /// Auto-diff state when launched bare (no piped diff): the active git-derived
-    /// source and the base it can compare against. `None` for a piped diff.
-    autodiff: Option<AutoDiff>,
+    /// The git command behind the diff, when there is one (`riffnav diff|show`).
+    /// It is what the refresh key re-runs; `None` for a diff piped in on stdin,
+    /// which can only be read once.
+    git: Option<GitDiff>,
     herdr: Option<Herdr>,
     /// The detected source-code forge (e.g. GitHub), enabling the `W` web-diff
     /// key; `None` when no supported forge backs this repo.
@@ -286,7 +287,7 @@ impl App {
             last_width: 0,
             quit: false,
             pending_editor: None,
-            autodiff: None,
+            git: None,
             herdr: None,
             forge: None,
             review_sync: None,
@@ -295,40 +296,43 @@ impl App {
         }
     }
 
-    /// Enter auto-diff mode (bare launch): record which git-derived source is
-    /// shown and the base branch it can compare against, so the header can label
-    /// the view. The diff text itself was already loaded and parsed into `files`.
-    pub fn enable_autodiff(&mut self, source: DiffSource, base: Option<String>) {
-        self.autodiff = Some(AutoDiff { source, base });
+    /// Record the git command behind the diff (`riffnav diff|show`), so the
+    /// header can label the view and the refresh key can run it again. The diff
+    /// text itself was already loaded and parsed into `files`.
+    pub fn enable_git_diff(&mut self, git: GitDiff) {
+        self.git = Some(git);
     }
 
-    /// The active auto-diff source's label (e.g. "all uncommitted"), or `None`
+    /// The view's label (e.g. "all uncommitted", or `git diff HEAD~3`), or `None`
     /// when the diff came from stdin.
-    pub fn autodiff_label(&self) -> Option<&'static str> {
-        self.autodiff.as_ref().map(|a| a.source.label())
+    pub fn diff_label(&self) -> Option<String> {
+        self.git.as_ref().map(GitDiff::label)
     }
 
-    pub fn is_autodiff(&self) -> bool {
-        self.autodiff.is_some()
+    /// Whether the `d` view-cycle applies: only to a plain built-in view, since
+    /// there is nothing to cycle a user's own `git diff` arguments through.
+    pub fn can_cycle_source(&self) -> bool {
+        self.git.as_ref().and_then(GitDiff::plain_source).is_some()
     }
 
-    /// Cycle to the next auto-diff source (the `d` key): re-run the matching git
-    /// command and reload the file set. Only reachable in auto-diff mode. The
-    /// branch-vs-base view is skipped when no base was detected, and a source
-    /// that yields nothing reloads to an empty set with an explanatory status.
+    /// Cycle to the next diff view (the `d` key): re-run the matching git command
+    /// and reload the file set. The branch-vs-base view is skipped when no base
+    /// was detected, and a source that yields nothing reloads to an empty set
+    /// with an explanatory status.
     fn cycle_diff_source(&mut self) {
-        let Some(auto) = &self.autodiff else { return };
-        let next = auto.source.next(auto.base.is_some());
-        let base = auto.base.clone();
-        // The immutable borrow of `self.autodiff` ends here (next/base are owned),
+        let Some(git) = &self.git else { return };
+        let Some(source) = git.plain_source() else {
+            return;
+        };
+        let next = source.next(git.base.is_some());
+        let candidate = GitDiff::diff(next, git.base.clone(), vec![]);
+        // The immutable borrow of `self.git` ends here (candidate is owned),
         // freeing `self` for the mutable reload below.
-        match crate::autodiff::load(next, base.as_deref()) {
+        match candidate.load() {
             Ok(text) => {
                 let files = crate::diff::parse(&text);
                 self.reload_files(files);
-                if let Some(auto) = &mut self.autodiff {
-                    auto.source = next;
-                }
+                self.git = Some(candidate);
                 let summary = if self.files.is_empty() {
                     format!("◆ {} · no changes", next.label())
                 } else {
@@ -341,21 +345,20 @@ impl App {
         }
     }
 
-    /// Whether there's a diff source that can be re-read, which is what makes the
-    /// `r` refresh key worth binding: a git-derived bare launch. A diff piped in
-    /// on stdin can only be read once.
+    /// Whether there's a git command that can be run again, which is what makes
+    /// the `r` refresh key worth binding. A diff piped in on stdin can only be
+    /// read once.
     pub fn can_refresh(&self) -> bool {
-        self.autodiff.is_some()
+        self.git.is_some()
     }
 
     /// The `r` key: re-run the diff and reload it, so work done since launch
     /// shows up without restarting.
     fn refresh_diff(&mut self) {
-        let Some(auto) = &self.autodiff else { return };
-        let (source, base) = (auto.source, auto.base.clone());
-        // The immutable borrow of `self.autodiff` ends here (source/base are
-        // owned), freeing `self` for the mutable reload below.
-        let loaded = crate::autodiff::load(source, base.as_deref());
+        let Some(git) = &self.git else { return };
+        // The immutable borrow of `self.git` ends here (the text is owned),
+        // freeing `self` for the mutable reload below.
+        let loaded = git.load();
         match loaded {
             Ok(text) => self.reload_in_place(crate::diff::parse(&text)),
             // `{e:#}` includes the command's own message.
@@ -421,7 +424,7 @@ impl App {
     fn syncs_viewed_marks(&self) -> bool {
         self.review_sync.is_some()
             && matches!(
-                self.autodiff.as_ref().map(|a| a.source),
+                self.git.as_ref().and_then(GitDiff::plain_source),
                 Some(DiffSource::Committed)
             )
     }
@@ -464,9 +467,9 @@ impl App {
         if !self.comments_on {
             return;
         }
-        let source = self.autodiff_label().unwrap_or("stdin");
-        let base = self.autodiff.as_ref().and_then(|a| a.base.clone());
-        Session::new(&self.files, source, base).save();
+        let source = self.diff_label().unwrap_or_else(|| "stdin".to_string());
+        let base = self.git.as_ref().and_then(|g| g.base.clone());
+        Session::new(&self.files, &source, base).save();
     }
 
     pub fn comments_enabled(&self) -> bool {
@@ -893,15 +896,19 @@ impl App {
 
     /// After a file is opened in `$EDITOR` (the `o` key), re-run git for just
     /// that file and splice the fresh diff back in, so edits made while it was
-    /// open show on return. Only meaningful in auto-diff mode — a piped diff has
-    /// no git source to re-read — so it's a no-op otherwise. A file whose changes
-    /// were fully reverted drops out of the tree.
+    /// open show on return. A piped diff has no git source to re-read, so it's a
+    /// no-op there; a command carrying the user's own arguments can't be scoped
+    /// to one path unambiguously, so that falls back to a full refresh. A file
+    /// whose changes were fully reverted drops out of the tree.
     fn refresh_file(&mut self, path: &str) {
-        let Some(auto) = &self.autodiff else { return };
-        let (source, base) = (auto.source, auto.base.clone());
-        // The immutable borrow of `self.autodiff` ends here (source/base owned),
+        let git = match &self.git {
+            Some(git) if git.plain_source().is_some() => git,
+            Some(_) => return self.refresh_diff(),
+            None => return,
+        };
+        // The immutable borrow of `self.git` ends here (the text is owned),
         // freeing `self` for the mutable splice below.
-        let text = match crate::autodiff::load_file(source, base.as_deref(), path) {
+        let text = match git.load_file(path) {
             Ok(text) => text,
             // Keep the stale diff rather than blanking it on a transient error.
             Err(e) => return self.set_status(format!("refresh {path}: {e:#}")),
@@ -1804,7 +1811,7 @@ impl App {
             KeyCode::Char('v') => self.toggle_viewed(),
             KeyCode::Char('V') => self.jump_unviewed(),
             // Only bound on a bare launch (auto-diff mode); inert otherwise.
-            KeyCode::Char('d') if self.autodiff.is_some() => self.cycle_diff_source(),
+            KeyCode::Char('d') if self.can_cycle_source() => self.cycle_diff_source(),
             // Only bound where the diff can be re-read; a piped one can't be.
             KeyCode::Char('r') if self.can_refresh() => self.refresh_diff(),
             // Only bound inside herdr; an inert no-op elsewhere.
@@ -2028,20 +2035,31 @@ mod tests {
     #[test]
     fn syncs_viewed_marks_only_in_committed_view_when_armed() {
         let mut app = app_with(vec![file("a.rs")]);
-        // Nothing armed and no auto-diff (e.g. a piped diff): purely local.
+        let view = |source| GitDiff::diff(source, Some("origin/main".into()), vec![]);
+
+        // Nothing armed and no git command (e.g. a piped diff): purely local.
         assert!(!app.syncs_viewed_marks());
 
         // Arm sync, but a working-tree view doesn't mirror the PR: still local.
         app.review_sync = Some(ReviewSync::new());
-        app.enable_autodiff(DiffSource::AllUncommitted, Some("origin/main".into()));
+        app.enable_git_diff(view(DiffSource::AllUncommitted));
         assert!(!app.syncs_viewed_marks());
 
         // Branch-vs-base view with sync armed: this is the PR view, so it syncs.
-        app.enable_autodiff(DiffSource::Committed, Some("origin/main".into()));
+        app.enable_git_diff(view(DiffSource::Committed));
         assert!(app.syncs_viewed_marks());
 
-        // Armed but not in auto-diff mode at all: nothing to sync against.
-        app.autodiff = None;
+        // The same view but with pass-through arguments is no longer guaranteed
+        // to be the PR diff (a pathspec would narrow it), so it stays local.
+        app.enable_git_diff(GitDiff::diff(
+            DiffSource::Committed,
+            Some("origin/main".into()),
+            vec!["--".into(), "src/".into()],
+        ));
+        assert!(!app.syncs_viewed_marks());
+
+        // Armed but showing a piped diff: nothing to sync against.
+        app.git = None;
         assert!(!app.syncs_viewed_marks());
     }
 

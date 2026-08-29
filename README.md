@@ -32,16 +32,27 @@ This puts the `riffnav` binary in `~/.cargo/bin` (make sure that's on your `PATH
 
 ## Usage
 
-Pipe any unified diff into it:
+Use `riffnav diff` and `riffnav show` wherever you'd type `git diff` and
+`git show` — same arguments, rendered in the TUI:
+
+```sh
+riffnav diff                  # unstaged changes, like `git diff`
+riffnav diff --staged         # staged changes
+riffnav diff HEAD~3           # any revision(s) git accepts
+riffnav diff -- src/          # scoped to a pathspec
+riffnav show                  # the last commit, like `git show`
+riffnav show <commit>
+```
+
+See [Diff views](#diff-views) for the flags that pick a view, and how the
+argument pass-through works.
+
+Or pipe any unified diff in, which is what makes riffnav usable as git's pager:
 
 ```sh
 git diff | riffnav
-git diff HEAD~3 | riffnav
 git show <commit> | riffnav
 ```
-
-Or run it bare inside a repo to diff the current branch automatically — see
-[Run without a piped diff](#run-without-a-piped-diff).
 
 ### Use it as git's pager
 
@@ -51,7 +62,9 @@ git config --global pager.show riffnav
 ```
 
 Now `git diff` and `git show` open in riffnav. (Setting `core.pager` also works,
-but scoping to `diff`/`show` avoids sending `git log` through it.)
+but scoping to `diff`/`show` avoids sending `git log` through it.) This is
+independent of `riffnav diff` — riffnav disables the pager for its own git calls,
+so the two can't loop.
 
 By default riffnav follows your `delta.side-by-side` git setting; force a layout
 for one run with `-s` (side-by-side) or `-u` (unified).
@@ -74,8 +87,8 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `T` | Cycle diff theme (delta → github-dark → github-light) |
 | `y` | Copy the selected file's path |
 | `v` / `V` | Mark the file viewed / jump to the next unviewed file |
-| `d` | Cycle the diff source — uncommitted → staged → unstaged → branch-vs-base (only on a [bare launch](#run-without-a-piped-diff)) |
-| `r` | Re-read the diff, picking up changes made since (only on a [bare launch](#run-without-a-piped-diff)) |
+| `d` | Cycle the diff view — uncommitted → staged → unstaged → branch-vs-base (only for a plain [`riffnav diff`](#diff-views)) |
+| `r` | Re-read the diff, picking up changes made since (not for a diff piped in) |
 | `o` | Open the selected file in `$EDITOR` |
 | `c` | [Comment](#review-comments) on the cursor's line, or reply when it's inside a thread |
 | `x` | Delete the comment under the cursor, and its replies |
@@ -105,7 +118,7 @@ review_retention_days = 90 # days to keep "viewed" marks before GC
 review_auto_advance = true # jump to next unviewed file after marking viewed
 review_sync_github = false # push "viewed" marks to the matching GitHub PR (needs `gh`)
 # base_branch = "main"     # base for "branch vs base"; omit to auto-detect
-# diff_source = "all"      # bare-launch view: all|committed|staged|unstaged (omit = adaptive)
+# diff_source = "all"      # default view for `riffnav diff`: all|committed|staged|unstaged
 ```
 
 See [`config.example.toml`](config.example.toml) for the annotated version.
@@ -185,36 +198,53 @@ viewed marks, and garbage-collected by age (`comment_retention_days`). A comment
 whose code has changed since it was written is flagged rather than silently
 sliding onto a different line.
 
-## Run without a piped diff
+## Diff views
 
-Launch `riffnav` bare — no diff on stdin — inside a git repo and
-it diffs the repo for you. By default it shows your **uncommitted** changes
-(staged, unstaged, and untracked files); when the working tree is clean it falls
-back to what your **branch adds over its base** (`git diff <base>...HEAD`, like a
-PR diff).
+`riffnav diff` shows unstaged work by default, like `git diff`. Flags pick one
+of the other views:
 
 ```sh
-riffnav            # in a repo: uncommitted changes, or branch-vs-base if clean
-riffnav --diff committed   # force the branch-vs-base (PR) view
-riffnav --base develop     # compare against a specific base branch
+riffnav diff               # unstaged — `git diff`, plus untracked files
+riffnav diff --staged      # staged — `git diff --staged`
+riffnav diff --all         # all uncommitted: staged + unstaged + untracked
+riffnav diff --committed   # branch vs base — `git diff <base>...HEAD`, the PR view
+riffnav diff --base develop --committed   # against a specific base branch
 ```
 
-Press `r` to re-read the diff — commits, stages, and edits made since you opened
-riffnav show up, without losing your place in the file you're reading. Press `d`
-to cycle what's shown:
+The two working-tree views (`riffnav diff` and `--all`) also list untracked,
+non-ignored files, rendered as fully added — `git diff` omits them by design,
+which would leave a brand-new file invisible until you staged it. That's the one
+way they differ from the git command they shadow.
 
-- **all uncommitted** — staged + unstaged + untracked
-- **staged** — `git diff --staged`
-- **unstaged** — `git diff`
-- **branch vs base** — `git diff <base>...HEAD`
+Press `d` to cycle between those four views without restarting, and `r` to
+re-read the diff — commits, stages, and edits made since you opened riffnav show
+up without losing your place in the file you're reading.
 
-The base branch is auto-detected from `origin/HEAD` and a local `main`/`master`,
-picking whichever branched off your current branch more recently — so commits
-you already merged into a local `main` aren't counted as your branch's work. Set
-it explicitly with `--base <ref>` or the `base_branch` config key.
-Choose the starting view with `--diff <all|committed|staged|unstaged>` or the
-`diff_source` config key. Piping a diff in behaves exactly as before — the bare
-launch is just an extra entry point.
+The base branch for `--committed` is auto-detected from `origin/HEAD` and a local
+`main`/`master`, picking whichever branched off your current branch more
+recently — so commits you already merged into a local `main` aren't counted as
+your branch's work. Set it explicitly with `--base <ref>` or the `base_branch`
+config key, and change the default view with the `diff_source` config key.
+
+### Passing arguments through to git
+
+Anything else you write after `riffnav diff` or `riffnav show` goes to git
+verbatim, so the commands stand in for their git counterparts:
+
+```sh
+riffnav diff main...HEAD
+riffnav diff -w -- src/
+riffnav show HEAD~2 -- src/
+```
+
+Three things switch off once you pass your own arguments, because riffnav can no
+longer tell a revision from a pathspec: the `d` view cycle (there is nothing to
+cycle through), folding untracked files in, and a `diff_source` set in the config
+file (your revision is the one that counts). `r` still refreshes.
+
+riffnav needs a real unified diff to build its tree from, so arguments that
+suppress one — `--stat`, `--name-only`, `--summary` and friends — leave it with
+nothing to show.
 
 ## herdr integration
 
@@ -227,10 +257,11 @@ or help.
 
 ## How it works
 
-stdin → split per file (`diff --git`) → build the tree → on selection, run the
-file's hunk through `delta` (cached per file/width/layout) and convert its ANSI
-output to styled text with [ansi-to-tui][ansi-to-tui], drawn with
-[ratatui][ratatui]. Because stdin is the diff, key input is read from `/dev/tty`.
+A unified diff — from `git diff`/`git show` run by riffnav, or piped in on stdin
+— is split per file (`diff --git`) into a tree; on selection the file's hunks go
+through `delta` (cached per file/width/layout) and its ANSI output is converted
+to styled text with [ansi-to-tui][ansi-to-tui], drawn with [ratatui][ratatui].
+Because stdin may itself be the diff, key input is read from `/dev/tty`.
 
 Comments anchor to a *diff line*, never a screen row, so they stay put across a
 resize, a theme switch, or a unified/side-by-side toggle. riffnav recovers those

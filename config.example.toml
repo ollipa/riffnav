@@ -54,16 +54,20 @@
 
 # Base branch for the "branch vs base" view. Omit to auto-detect it: origin/HEAD
 # or a local main/master, whichever forks off the current branch later. Override
-# per run with --base.
+# per run with `riffnav diff --base <ref>`.
 # base_branch = "main"
 
-# Which diff a bare launch shows first (cycle at runtime with `d`):
+# Which diff `riffnav diff` shows when given no view flag (cycle at runtime
+# with `d`):
 #   "all"       – uncommitted: staged + unstaged + untracked
 #   "committed" – branch vs base (git diff <base>...HEAD), like a PR diff
 #   "staged"    – staged changes only
 #   "unstaged"  – unstaged changes only
-# Omit for the adaptive default: uncommitted changes, or branch-vs-base when the
-# working tree is clean. Override per run with --diff.
+# Omit for "unstaged", matching plain `git diff` (plus untracked files, which
+# `git diff` omits). Override per run with the matching flag (`riffnav diff
+# --all`, `--committed`, `--staged`, `--unstaged`). Ignored when you pass your
+# own arguments to `riffnav diff`, so `riffnav diff HEAD~1` stays `git diff
+# HEAD~1`.
 # diff_source = "all"
 
 # --- Inline review comments ---

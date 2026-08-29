@@ -5,9 +5,9 @@ description: Leave and read inline review comments on a git diff through the rif
 
 # riffnav review comments
 
-riffnav is a terminal diff viewer the *user* drives. Never run bare `riffnav` —
-it takes over the terminal. Use the `riffnav comment ...` subcommands, which are
-plain non-interactive processes.
+riffnav is a terminal diff viewer the *user* drives. Never run `riffnav diff` or
+`riffnav show` — they take over the terminal. Use the `riffnav comment ...`
+subcommands, which are plain non-interactive processes.
 
 Comments are stored per repo and branch under `$XDG_STATE_HOME/riffnav/comments/`.
 They persist, so you can leave notes whether or not a window is open. If one is

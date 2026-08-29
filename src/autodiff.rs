@@ -1,17 +1,18 @@
-//! Auto-diff mode: when riffnav is launched bare (no piped diff), produce a diff
-//! straight from the current git repository instead of reading stdin.
+//! Producing a diff straight from git, for `riffnav diff` and `riffnav show`.
 //!
-//! The diff is one of several "views" of the branch / working tree, modeled by
-//! [`DiffSource`]. At startup the source is chosen adaptively by
-//! [`load_initial`]: show uncommitted work if there is any, otherwise fall back
-//! to what the branch adds over its base (the "PR view"). The base branch is
-//! detected by [`detect_base`]: whichever of `origin/HEAD` and a local
-//! `main`/`master` forks off the current branch later.
+//! `riffnav diff` renders one of several "views" of the branch / working tree,
+//! modeled by [`DiffSource`] and selected by its flags — plus any extra
+//! arguments handed straight to git, so `riffnav diff HEAD~3 -- src/` works like
+//! the `git diff` it shadows. [`GitDiff`] bundles the view, the base branch and
+//! those extra arguments into one re-runnable command.
+//!
+//! The base branch the branch-vs-base view compares against is detected by
+//! [`detect_base`]: whichever of `origin/HEAD` and a local `main`/`master` forks
+//! off the current branch later.
 //!
 //! `git diff` never reports untracked files, so the working-tree views fold them
 //! in explicitly (see [`untracked_diff`]) — otherwise a brand-new file would be
-//! invisible until staged. A piped-stdin launch never reaches this module; bare
-//! launch is the only new entry path.
+//! invisible until staged. A diff piped in on stdin never reaches this module.
 
 use std::process::Command;
 
@@ -25,8 +26,8 @@ const PREFIX_ARGS: [&str; 2] = ["--src-prefix=a/", "--dst-prefix=b/"];
 
 /// Which slice of the branch / working tree to render as a diff. The runtime
 /// toggle (`d`) cycles through these in [`DiffSource::CYCLE`] order. The names in
-/// the attributes are the spellings accepted by `--diff` and the `diff_source`
-/// config key.
+/// the attributes are the spellings accepted by the `diff_source` config key;
+/// on the command line each is a flag of its own (`riffnav diff --staged`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum DiffSource {
@@ -57,22 +58,19 @@ impl DiffSource {
         }
     }
 
-    /// The `git` arguments that produce this source's diff. `base` is only used
-    /// by [`DiffSource::Committed`]; the others ignore it. Every invocation forces
-    /// the conventional `a/`…`b/` path prefixes via [`PREFIX_ARGS`].
-    fn args(self, base: &str) -> Vec<String> {
-        let mut args: Vec<String> = ["diff"]
-            .into_iter()
-            .chain(PREFIX_ARGS)
-            .map(str::to_string)
-            .collect();
+    /// The revision selector this view contributes to its `git diff` — the part
+    /// that says *which* diff, before any pass-through arguments. `base` is only
+    /// used by [`DiffSource::Committed`]; the others ignore it. Unstaged needs
+    /// nothing at all, which is what makes a bare `riffnav diff` run the same
+    /// command as `git diff` — the only difference being the untracked files
+    /// folded in afterwards (see [`DiffSource::includes_untracked`]).
+    fn rev_args(self, base: &str) -> Vec<String> {
         match self {
-            Self::AllUncommitted => args.push("HEAD".to_string()),
-            Self::Committed => args.push(format!("{base}...HEAD")),
-            Self::Staged => args.push("--staged".to_string()),
-            Self::Unstaged => {}
+            Self::AllUncommitted => vec!["HEAD".to_string()],
+            Self::Committed => vec![format!("{base}...HEAD")],
+            Self::Staged => vec!["--staged".to_string()],
+            Self::Unstaged => vec![],
         }
-        args
     }
 
     /// Whether this view should fold in untracked files. The working-tree views
@@ -105,13 +103,162 @@ impl DiffSource {
     }
 }
 
-/// Live auto-diff state carried by the app on a bare launch: which view is
-/// shown and the base branch (if any) the branch-vs-base view compares against.
-pub struct AutoDiff {
-    pub source: DiffSource,
-    /// Detected base branch, used to re-run the branch-vs-base view when toggling
-    /// sources. `None` when no base could be found (that view is then skipped).
+/// Which git command produced the diff on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// `riffnav diff`: one of the built-in working-tree / branch views.
+    Diff(DiffSource),
+    /// `riffnav show`: whatever `git show` renders (`HEAD` by default).
+    Show,
+}
+
+/// The git command behind the diff on screen, kept whole so it can be run again
+/// — for the `r` refresh key, and to re-read a single file after `$EDITOR`.
+///
+/// `extra` holds the arguments the user spelled out after `riffnav diff` /
+/// `riffnav show`, passed to git verbatim. They make the command arbitrary, so
+/// the features that only make sense for a plain built-in view — cycling with
+/// `d`, folding in untracked files, re-reading one file — key off
+/// [`GitDiff::plain_source`] rather than the view alone.
+#[derive(Debug, Clone)]
+pub struct GitDiff {
+    pub view: View,
+    /// Detected (or configured) base branch, used by the branch-vs-base view and
+    /// to re-run it when cycling. `None` when no base could be found, in which
+    /// case that view is skipped.
     pub base: Option<String>,
+    /// Extra arguments handed straight to git, after riffnav's own.
+    pub extra: Vec<String>,
+}
+
+impl GitDiff {
+    /// `riffnav diff`, in one of the built-in views.
+    pub fn diff(source: DiffSource, base: Option<String>, extra: Vec<String>) -> Self {
+        Self {
+            view: View::Diff(source),
+            base,
+            extra,
+        }
+    }
+
+    /// `riffnav show`.
+    pub fn show(extra: Vec<String>) -> Self {
+        Self {
+            view: View::Show,
+            base: None,
+            extra,
+        }
+    }
+
+    /// The built-in view this is showing, but only when the user added no
+    /// arguments of their own. Pass-through arguments may name a revision or a
+    /// pathspec, and stacking riffnav's own selectors or another pathspec on top
+    /// of those would produce something the user never asked for — so anything
+    /// that would do so asks here first and backs off when the answer is `None`.
+    pub fn plain_source(&self) -> Option<DiffSource> {
+        match self.view {
+            View::Diff(source) if self.extra.is_empty() => Some(source),
+            _ => None,
+        }
+    }
+
+    /// The git subcommand this view runs.
+    fn sub(&self) -> &'static str {
+        match self.view {
+            View::Diff(_) => "diff",
+            View::Show => "show",
+        }
+    }
+
+    /// Header label: the built-in view's name, or the actual git command line
+    /// when the user passed arguments of their own. Truncated, since the header
+    /// is one line and a long pathspec list would crowd everything else off it.
+    pub fn label(&self) -> String {
+        if let Some(source) = self.plain_source() {
+            return source.label().to_string();
+        }
+        let rev = match self.view {
+            View::Diff(source) => source.rev_args(self.base.as_deref().unwrap_or("")),
+            View::Show => vec![],
+        };
+        let mut label = format!("git {}", self.sub());
+        for arg in rev.iter().chain(&self.extra) {
+            label.push(' ');
+            label.push_str(arg);
+        }
+        if label.chars().count() > 48 {
+            label = label.chars().take(47).collect::<String>() + "…";
+        }
+        label
+    }
+
+    /// The full `git` argument list. `--no-pager` keeps a `pager.diff = riffnav`
+    /// config from ever re-entering riffnav, and `color.ui=never` stops a
+    /// `color.ui = always` config from handing the parser ANSI-laden text.
+    fn argv(&self) -> Result<Vec<String>> {
+        let rev = match self.view {
+            View::Diff(DiffSource::Committed) => {
+                let base = self
+                    .base
+                    .as_deref()
+                    .context("no base branch detected to compare the branch against")?;
+                DiffSource::Committed.rev_args(base)
+            }
+            // The other views never read `base`; pass an empty placeholder.
+            View::Diff(source) => source.rev_args(""),
+            View::Show => vec![],
+        };
+        let mut argv: Vec<String> = ["--no-pager", "-c", "color.ui=never", self.sub()]
+            .into_iter()
+            .chain(PREFIX_ARGS)
+            .map(str::to_string)
+            .collect();
+        argv.extend(rev);
+        argv.extend(self.extra.iter().cloned());
+        Ok(argv)
+    }
+
+    /// Whether this command's output should have untracked files folded in.
+    fn includes_untracked(&self) -> bool {
+        self.plain_source()
+            .is_some_and(DiffSource::includes_untracked)
+    }
+
+    /// Run the command, returning the raw unified-diff text. Errors carry git's
+    /// own stderr.
+    pub fn load(&self) -> Result<String> {
+        let tracked = run_git(&self.argv()?);
+        if self.includes_untracked() {
+            // `git diff [HEAD]` fails on an unborn branch (no commits yet); treat
+            // that as "no tracked changes" so untracked files still surface.
+            Ok(tracked.unwrap_or_default() + &untracked_diff())
+        } else {
+            tracked
+        }
+    }
+
+    /// Re-run the diff for a single `path`, returning its raw unified-diff text —
+    /// or an empty string when the file no longer differs. Only valid for a plain
+    /// view ([`GitDiff::plain_source`]); callers check first. Mirrors [`Self::load`]'s
+    /// untracked handling: a path `git diff` omits because it is untracked is
+    /// rendered against `/dev/null` instead, but only when the view folds
+    /// untracked files in (so a tracked-but-now-unchanged file correctly reports
+    /// no diff rather than showing up as fully added).
+    pub fn load_file(&self, path: &str) -> Result<String> {
+        if self.includes_untracked() && is_untracked(path) {
+            return Ok(diff_against_devnull(path).unwrap_or_default());
+        }
+        let mut argv = self.argv()?;
+        argv.push("--".to_string());
+        argv.push(path.to_string());
+        match run_git(&argv) {
+            Ok(text) => Ok(text),
+            // An unborn branch makes `git diff HEAD -- path` fail; for the
+            // working-tree views treat that as "nothing tracked" (mirrors `load`).
+            Err(_) if self.includes_untracked() => Ok(String::new()),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// Whether the current directory is inside a git work tree.
@@ -172,53 +319,11 @@ fn merge_base_is_newer(cand: &str, other: &str) -> bool {
     cand_mb != other_mb && git_ok(&["merge-base", "--is-ancestor", &other_mb, &cand_mb])
 }
 
-/// Run the diff for `source`, returning the raw unified-diff text. Errors carry
-/// git's own stderr. The branch-vs-base source needs a `base`; without one it is
-/// an error to ask for it.
-pub fn load(source: DiffSource, base: Option<&str>) -> Result<String> {
-    let tracked = match source {
-        DiffSource::Committed => {
-            let base = base.context("no base branch detected to compare the branch against")?;
-            run_git(&source.args(base))
-        }
-        // The other sources never read `base`; pass an empty placeholder.
-        _ => run_git(&source.args("")),
-    };
-    if source.includes_untracked() {
-        // `git diff [HEAD]` fails on an unborn branch (no commits yet); treat that
-        // as "no tracked changes" so untracked files still surface.
-        Ok(tracked.unwrap_or_default() + &untracked_diff())
-    } else {
-        tracked
-    }
-}
-
-/// Re-run the active source's diff for a single `path`, returning its raw
-/// unified-diff text — or an empty string when the file no longer differs.
-/// Mirrors [`load`]'s untracked handling: a path `git diff` omits because it is
-/// untracked is rendered against `/dev/null` instead, but only when the source
-/// folds untracked files in (so a tracked-but-now-unchanged file correctly
-/// reports no diff rather than showing up as fully added).
-pub fn load_file(source: DiffSource, base: Option<&str>, path: &str) -> Result<String> {
-    if source.includes_untracked() && is_untracked(path) {
-        return Ok(diff_against_devnull(path).unwrap_or_default());
-    }
-    let mut args = match source {
-        DiffSource::Committed => {
-            let base = base.context("no base branch detected to compare the branch against")?;
-            source.args(base)
-        }
-        _ => source.args(""),
-    };
-    args.push("--".to_string());
-    args.push(path.to_string());
-    match run_git(&args) {
-        Ok(text) => Ok(text),
-        // An unborn branch makes `git diff HEAD -- path` fail; for the
-        // working-tree views treat that as "nothing tracked" (mirrors `load`).
-        Err(_) if source.includes_untracked() => Ok(String::new()),
-        Err(e) => Err(e),
-    }
+/// Run the plain diff for `source`, returning the raw unified-diff text. Used by
+/// [`load_initial`]; the TUI goes through [`GitDiff`], which can also carry the
+/// user's own arguments.
+fn load(source: DiffSource, base: Option<&str>) -> Result<String> {
+    GitDiff::diff(source, base.map(str::to_string), vec![]).load()
 }
 
 /// Whether `path` is an untracked, non-ignored file (so `git diff` omits it).
@@ -227,9 +332,13 @@ fn is_untracked(path: &str) -> bool {
         .is_some_and(|s| !s.trim().is_empty())
 }
 
-/// Pick the startup source adaptively and load it: prefer uncommitted work, and
-/// only fall back to the branch-vs-base view when the tree is clean. Returns the
-/// chosen source alongside its diff text so the caller can show which view it is.
+/// Pick a source adaptively and load it: prefer uncommitted work, and only fall
+/// back to the branch-vs-base view when the tree is clean. Returns the chosen
+/// source alongside its diff text so the caller can show which view it is.
+///
+/// This is the guess the `riffnav comment` subcommands make when no window has
+/// published a session — there is no user-chosen view to go on, so it picks the
+/// diff the user is most likely working on.
 ///
 /// On an unborn branch (no commits yet) `git diff HEAD` fails; we treat that
 /// probe as "no uncommitted changes" rather than erroring, so such a repo simply
@@ -333,33 +442,64 @@ fn git_raw(args: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The `git` arguments a view runs with, for assertions below.
+    fn argv(source: DiffSource, extra: &[&str]) -> Vec<String> {
+        GitDiff::diff(
+            source,
+            Some("origin/main".to_string()),
+            extra.iter().map(|s| s.to_string()).collect(),
+        )
+        .argv()
+        .unwrap()
+    }
+
     #[test]
     fn args_match_the_intended_git_commands() {
         // Every view pins `a/`…`b/` prefixes so the parser resolves paths
-        // regardless of the user's `diff.mnemonicPrefix` config.
+        // regardless of the user's `diff.mnemonicPrefix` config, and disables the
+        // pager so `pager.diff = riffnav` can't recurse.
+        let head = ["--no-pager", "-c", "color.ui=never", "diff"];
         let pre = ["--src-prefix=a/", "--dst-prefix=b/"];
-        assert_eq!(
-            DiffSource::AllUncommitted.args("base"),
-            ["diff", pre[0], pre[1], "HEAD"]
-        );
-        assert_eq!(
-            DiffSource::Staged.args("base"),
-            ["diff", pre[0], pre[1], "--staged"]
-        );
-        assert_eq!(DiffSource::Unstaged.args("base"), ["diff", pre[0], pre[1]]);
+        let expect = |tail: &[&str]| -> Vec<String> {
+            head.iter()
+                .chain(&pre)
+                .chain(tail)
+                .map(|s| s.to_string())
+                .collect()
+        };
+        assert_eq!(argv(DiffSource::AllUncommitted, &[]), expect(&["HEAD"]));
+        assert_eq!(argv(DiffSource::Staged, &[]), expect(&["--staged"]));
+        assert_eq!(argv(DiffSource::Unstaged, &[]), expect(&[]));
     }
 
     #[test]
     fn committed_args_interpolate_the_base_as_three_dot() {
-        assert_eq!(
-            DiffSource::Committed.args("origin/main"),
-            [
-                "diff",
-                "--src-prefix=a/",
-                "--dst-prefix=b/",
-                "origin/main...HEAD"
-            ]
+        assert!(
+            argv(DiffSource::Committed, &[]).ends_with(&["origin/main...HEAD".to_string()]),
+            "the branch-vs-base view diffs against the merge base"
         );
+    }
+
+    #[test]
+    fn pass_through_args_come_last_so_git_sees_them_as_written() {
+        assert!(
+            argv(DiffSource::Staged, &["-w", "--", "src/"]).ends_with(&[
+                "--staged".into(),
+                "-w".into(),
+                "--".into(),
+                "src/".into()
+            ]),
+            "riffnav's own selectors precede the user's arguments"
+        );
+    }
+
+    #[test]
+    fn a_bare_diff_runs_the_same_command_as_git_diff() {
+        // The whole point of `riffnav diff` shadowing `git diff`: with no flags
+        // and no arguments, riffnav contributes no revision selector of its own.
+        // (The output still gains the untracked files git leaves out — see
+        // `only_working_tree_views_fold_in_untracked_files`.)
+        assert!(DiffSource::Unstaged.rev_args("origin/main").is_empty());
     }
 
     #[test]
@@ -373,6 +513,44 @@ mod tests {
         assert!(DiffSource::Unstaged.includes_untracked());
         assert!(!DiffSource::Staged.includes_untracked());
         assert!(!DiffSource::Committed.includes_untracked());
+    }
+
+    #[test]
+    fn pass_through_args_disable_the_plain_view_features() {
+        // With arguments of the user's own, the view can't be cycled, untracked
+        // files aren't folded in, and one file can't be re-read on its own —
+        // riffnav has no idea whether `HEAD~3` is a revision or a pathspec.
+        let plain = GitDiff::diff(DiffSource::Unstaged, None, vec![]);
+        assert_eq!(plain.plain_source(), Some(DiffSource::Unstaged));
+        assert!(plain.includes_untracked());
+
+        let scoped = GitDiff::diff(DiffSource::Unstaged, None, vec!["HEAD~3".to_string()]);
+        assert_eq!(scoped.plain_source(), None);
+        assert!(!scoped.includes_untracked());
+
+        // `git show` has no built-in views at all.
+        assert_eq!(GitDiff::show(vec![]).plain_source(), None);
+    }
+
+    #[test]
+    fn labels_name_the_view_or_the_command() {
+        assert_eq!(
+            GitDiff::diff(DiffSource::Staged, None, vec![]).label(),
+            "staged"
+        );
+        assert_eq!(
+            GitDiff::diff(DiffSource::Unstaged, None, vec!["HEAD~3".to_string()]).label(),
+            "git diff HEAD~3"
+        );
+        assert_eq!(
+            GitDiff::show(vec!["abc123".to_string()]).label(),
+            "git show abc123"
+        );
+        assert_eq!(GitDiff::show(vec![]).label(), "git show");
+        // A long pathspec list is cut down to keep the header on one line.
+        let long = GitDiff::show(vec!["x".repeat(80)]).label();
+        assert_eq!(long.chars().count(), 48);
+        assert!(long.ends_with('…'));
     }
 
     #[test]

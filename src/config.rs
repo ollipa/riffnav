@@ -51,13 +51,12 @@ pub struct Config {
     /// the branch-vs-base view, so they tick GitHub's per-file "Viewed" checkbox
     /// too. Off by default; needs the `gh` CLI authenticated and a GitHub remote.
     pub review_sync_github: bool,
-    /// Base branch for the branch-vs-base auto-diff view on a bare launch.
-    /// `None` auto-detects: origin/HEAD or a local main/master, whichever forks
-    /// off the current branch later. CLI `--base` overrides this.
+    /// Base branch for the branch-vs-base view. `None` auto-detects: origin/HEAD
+    /// or a local main/master, whichever forks off the current branch later.
+    /// `riffnav diff --base` overrides this.
     pub base_branch: Option<String>,
-    /// Which diff a bare launch shows. `None` is the adaptive default
-    /// (uncommitted changes, or branch-vs-base when the tree is clean). CLI
-    /// `--diff` overrides this.
+    /// Which view `riffnav diff` shows when no view flag is given. `None` means
+    /// unstaged, matching plain `git diff`. The view flags override this.
     pub diff_source: Option<DiffSource>,
     /// Show inline review comments beside the code, and bind the keys that write
     /// them (`c` comment or reply, `x` delete, `]`/`[` jump). Turning this off
