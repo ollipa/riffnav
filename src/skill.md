@@ -23,7 +23,8 @@ riffnav comment apply --stdin      # 3. leave your notes in one batch
 
 Run `context` first. It prints each file with the line ranges that are actually
 in the diff, and it is far smaller than the diff itself. You cannot anchor a
-comment to a line outside those ranges.
+comment to a line outside those ranges. Run it again whenever you have edited a
+file since — the diff, and so the ranges, will have moved.
 
 Read the code with your normal tools (`git diff`, Read); riffnav's CLI is for
 writing and reading *comments*, not for reading the diff.
@@ -42,7 +43,8 @@ color, and a thread is only readable when it says who is speaking.
 riffnav comment context [--json]
 riffnav comment list [--file <path>] [--author <name>] [--json]
 riffnav comment add --file <path> (--new-line <n> | --old-line <n>) --body <text>
-                    --author <name> [--reply-to <id>]
+                    --author <name>
+riffnav comment add --reply-to <id> --body <text> --author <name>
 riffnav comment apply --stdin
 riffnav comment rm <id>
 riffnav comment clear [--file <path>] --yes
@@ -59,6 +61,19 @@ Every comment names one file and exactly one line:
 
 Line numbers are the ones git prints in the hunk header, 1-based, and are the
 same ones the user sees in riffnav's gutter.
+
+A reply is the exception: it takes no anchor at all. See [Replying](#replying).
+
+**Editing files changes the diff.** Comment, fix, reply is the normal loop, and
+each fix moves the hunks — so line numbers from an earlier `context` run go
+stale, and the diff riffnav is showing can flip on its own (a clean tree shows
+the branch against its base; a dirty one shows all uncommitted work). Re-run
+`riffnav comment context` after you touch the code.
+
+**If an anchor is rejected, stop and report it.** Never hunt for a nearby line
+that the CLI will accept. The error means the line you meant is not in the diff
+in force; a comment re-anchored to a different line is filed against code it
+isn't about, and the user has no way to tell.
 
 ### One comment
 
@@ -82,18 +97,24 @@ printf '%s' '{"comments":[
 ]}' | riffnav comment apply --stdin
 ```
 
-Each item needs `file`, `body`, `author`, and exactly one of `newLine` or
-`oldLine`; `replyTo` is optional. Field names are camelCase. `apply` takes no
-flags but `--stdin`, so every item carries its own author.
+Each item needs `body`, `author`, and either an anchor (`file` plus exactly one
+of `newLine` or `oldLine`) or a `replyTo` — never both. Field names are
+camelCase. `apply` takes no flags but `--stdin`, so every item carries its own
+author.
 
 ### Replying
 
 `comment list` shows each note's short id. Thread under one with `--reply-to`:
 
 ```bash
-riffnav comment add --file src/app.rs --new-line 103 --reply-to a3f1c2 \
+riffnav comment add --reply-to a3f1c2 \
   --author claude --body "Agreed — I'll add exponential backoff."
 ```
+
+**A reply takes no anchor.** It inherits the file and line of the comment it
+answers; passing `--file`, `--new-line` or `--old-line` alongside `--reply-to`
+is an error. This is what lets you reply after fixing the code: the parent's
+line may no longer be in the diff, and the reply still lands in its thread.
 
 Replies render inside the same box as the comment they answer, marked `↳`.
 
@@ -122,8 +143,12 @@ when the user says they've left notes, or before revising code they reviewed.
 - **"no file `x` in this diff"** — the path isn't in the changeset. The error
   lists what is; or run `riffnav comment context`.
 - **"line N is not in ...'s diff"** — the line exists in the file but not in the
-  diff. The error lists the commentable ranges; pick one inside them.
+  diff. The error lists the commentable ranges, names the diff in force, and
+  says whether it moved since the earlier comments were written. Re-run
+  `context` and re-read; don't pick a nearby line to make the write succeed.
 - **"pass one of --new-line or --old-line"** — exactly one side, never both.
+- **"a reply carries no anchor of its own"** — drop `--file` and the line flags;
+  `--reply-to` is the whole anchor.
 - **"no riffnav session and not inside a git repository"** — run from inside the
   repo you're reviewing.
 - **"no comment with id X to reply to"** — check `riffnav comment list`.

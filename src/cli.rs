@@ -193,9 +193,9 @@ pub enum CommentCmd {
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
-    /// File to comment on, as it appears in the diff.
+    /// File to comment on, as it appears in the diff. Omitted for a reply.
     #[arg(long, value_name = "PATH")]
-    pub file: String,
+    pub file: Option<String>,
     /// Line number on the post-image (added/context) side.
     #[arg(long, value_name = "N", conflicts_with = "old_line")]
     pub new_line: Option<u32>,
@@ -209,6 +209,9 @@ pub struct AddArgs {
     #[arg(long, value_name = "NAME")]
     pub author: Option<String>,
     /// Thread this comment under an existing one, by id.
+    ///
+    /// A reply takes no anchor of its own: it inherits the file and line of the
+    /// comment it answers, so `--file` and the line flags must be left off.
     #[arg(long, value_name = "ID")]
     pub reply_to: Option<String>,
 }

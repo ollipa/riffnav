@@ -53,7 +53,9 @@ fn comment(cmd: CommentCmd) -> Result<()> {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct BatchItem {
-    file: String,
+    /// Omitted on a `replyTo` item, which inherits its parent's anchor.
+    #[serde(default)]
+    file: Option<String>,
     #[serde(default)]
     new_line: Option<u32>,
     #[serde(default)]
@@ -77,22 +79,29 @@ struct Resolved {
     file: String,
     side: Side,
     line: u32,
-    diff_hash: String,
+    /// `None` only when inherited from a parent that has none (hand-edited).
+    diff_hash: Option<String>,
 }
 
 fn add(args: AddArgs) -> Result<()> {
-    let session = require_session()?;
     let body = read_body(&args.body)?;
-    let resolved = resolve(
-        &session,
-        &args.file,
+    // A reply validates against nothing, so it doesn't need a diff — and by the
+    // time one is written there may not be one left to need.
+    let session = match args.reply_to {
+        Some(_) => None,
+        None => Some(require_session()?),
+    };
+    let mut store = CommentStore::load(CLI_RETENTION_DAYS);
+    let resolved = anchor(
+        session.as_ref(),
+        &store,
+        args.file.as_deref(),
         args.old_line,
         args.new_line,
+        args.reply_to.as_deref(),
         "comment add",
     )?;
 
-    let mut store = CommentStore::load(CLI_RETENTION_DAYS);
-    check_reply_target(&store, args.reply_to.as_deref())?;
     let id = store.add(build(&resolved, body, args.author, args.reply_to));
     store.save();
     println!("#{id}  {}:{}", resolved.file, resolved.line);
@@ -115,7 +124,12 @@ fn apply(stdin: bool) -> Result<()> {
         bail!("the batch contains no comments");
     }
 
-    let session = require_session()?;
+    // Only an item that anchors itself needs the diff; a batch of pure replies
+    // applies whether or not one is still there.
+    let session = match batch.comments.iter().any(|i| i.reply_to.is_none()) {
+        true => Some(require_session()?),
+        false => None,
+    };
     let mut store = CommentStore::load(CLI_RETENTION_DAYS);
 
     // Resolve everything first: a batch that half-applies would leave the review
@@ -123,11 +137,18 @@ fn apply(stdin: bool) -> Result<()> {
     let mut resolved = Vec::with_capacity(batch.comments.len());
     for (i, item) in batch.comments.iter().enumerate() {
         let where_ = format!("comment {} of {}", i + 1, batch.comments.len());
-        let r = resolve(&session, &item.file, item.old_line, item.new_line, &where_)?;
+        let r = anchor(
+            session.as_ref(),
+            &store,
+            item.file.as_deref(),
+            item.old_line,
+            item.new_line,
+            item.reply_to.as_deref(),
+            &where_,
+        )?;
         if item.body.trim().is_empty() {
             bail!("{where_}: body is empty");
         }
-        check_reply_target(&store, item.reply_to.as_deref())?;
         resolved.push(r);
     }
 
@@ -144,7 +165,9 @@ fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> 
     let selected: Vec<&Comment> = store
         .all()
         .iter()
-        .filter(|c| file.as_deref().is_none_or(|f| c.file == f))
+        // Selected by the file the note renders in, which for a reply is its
+        // thread's — the same file the window would list it under.
+        .filter(|c| file.as_deref().is_none_or(|f| store.root_of(c).file == f))
         .filter(|c| author.as_deref().is_none_or(|a| c.author == a))
         .collect();
 
@@ -157,16 +180,26 @@ fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> 
         return Ok(());
     }
     for c in selected {
-        let reply = c
-            .reply_to
-            .as_ref()
-            .map_or(String::new(), |p| format!(" ↳#{p}"));
+        // Print where the note actually hangs, not what it stores: a thread sits
+        // on its root's anchor, so a reply carrying a line of its own renders at
+        // its parent's. Printing the stored one is what once let a detached reply
+        // look correctly threaded here while the window showed it adrift.
+        let root = store.root_of(c);
+        let mut reply = String::new();
+        if let Some(p) = &c.reply_to {
+            reply = format!(" ↳#{p}");
+            if store.get(p).is_none() {
+                reply.push_str(" (gone — renders as its own thread)");
+            } else if (&root.file, root.side, root.line) != (&c.file, c.side, c.line) {
+                reply.push_str(&format!(" (stored at {}:{})", c.file, c.line));
+            }
+        }
         println!(
             "#{}  {}:{} ({}){reply}  — {}",
             c.id,
-            c.file,
-            c.line,
-            c.side.as_str(),
+            root.file,
+            root.line,
+            root.side.as_str(),
             c.author
         );
         for line in c.body.lines() {
@@ -258,9 +291,62 @@ fn require_session() -> Result<Session> {
     Ok(Session::new(&files, source.label(), base))
 }
 
+/// Where one comment will hang: the anchor it names, or — for a reply — the one
+/// it inherits.
+///
+/// A reply is never anchored independently. The diff moves while a review runs
+/// (comment, fix, reply is the normal loop), so a line resolved *now* is often
+/// not the line the parent was written against: honoring it would file the reply
+/// somewhere else and break the thread apart. Inheriting instead makes that
+/// impossible, and works even when the parent's line has left the diff entirely
+/// — or when there's no diff left at all, which is why `session` is optional.
+fn anchor(
+    session: Option<&Session>,
+    store: &CommentStore,
+    file: Option<&str>,
+    old_line: Option<u32>,
+    new_line: Option<u32>,
+    reply_to: Option<&str>,
+    where_: &str,
+) -> Result<Resolved> {
+    let Some(id) = reply_to else {
+        let (Some(session), Some(file)) = (session, file) else {
+            bail!(
+                "{where_}: name the file to comment on, or --reply-to a comment \
+                 to thread under"
+            );
+        };
+        return resolve(session, store, file, old_line, new_line, where_);
+    };
+    // A `--reply-to` that names nothing would silently become a root comment.
+    let Some(parent) = store.get(id) else {
+        bail!("{where_}: no comment with id {id} to reply to (see `riffnav comment list`)");
+    };
+    if file.is_some() || old_line.is_some() || new_line.is_some() {
+        bail!(
+            "{where_}: a reply carries no anchor of its own — it inherits #{id}'s \
+             ({}:{} on the {} side)\n  \
+             drop the file and line: a reply always sits with the note it answers",
+            parent.file,
+            parent.line,
+            parent.side.as_str(),
+        );
+    }
+    Ok(Resolved {
+        file: parent.file.clone(),
+        side: parent.side,
+        line: parent.line,
+        // The parent's hash, not the file's current one: a reply stamped with a
+        // fresher hash would render current under a parent marked stale, which
+        // reads as though half the thread were about different code.
+        diff_hash: parent.diff_hash.clone(),
+    })
+}
+
 /// Validate one anchor against the diff, naming what would have been valid.
 fn resolve(
     session: &Session,
+    store: &CommentStore,
     file: &str,
     old_line: Option<u32>,
     new_line: Option<u32>,
@@ -281,30 +367,45 @@ fn resolve(
     if !entry.covers(side, line) {
         bail!(
             "{where_}: line {line} is not in {}'s diff on the {} side\n  \
-             commentable {} lines: {}",
+             commentable {} lines: {}\n{}",
             entry.path,
             side.as_str(),
             side.as_str(),
             entry.ranges(side),
+            target_hint(session, store, entry),
         );
     }
     Ok(Resolved {
         file: entry.path.clone(),
         side,
         line,
-        diff_hash: entry.diff_hash.clone(),
+        diff_hash: Some(entry.diff_hash.clone()),
     })
 }
 
-/// A `--reply-to` that names nothing would silently become a root comment, so
-/// reject it instead.
-fn check_reply_target(store: &CommentStore, reply_to: Option<&str>) -> Result<()> {
-    if let Some(id) = reply_to
-        && store.get(id).is_none()
-    {
-        bail!("no comment with id {id} to reply to (see `riffnav comment list`)");
+/// Which diff the rejected line was measured against, and whether that ground
+/// has moved since the existing comments on the file were written.
+///
+/// The anchor space is a property of the diff on screen, and that flips on its
+/// own — `branch vs base` becomes `all uncommitted` the moment the tree is
+/// dirty. Without this the error reads as "you picked a bad line" when the truth
+/// is "the lines you were reading are no longer the ones in force".
+fn target_hint(
+    session: &Session,
+    store: &CommentStore,
+    entry: &crate::session::SessionFile,
+) -> String {
+    let moved = store.all().iter().any(|c| {
+        c.file == entry.path && c.diff_hash.as_ref().is_some_and(|h| *h != entry.diff_hash)
+    });
+    let mut hint = format!("  the diff in force is `{}`", session.source);
+    if moved {
+        hint.push_str(
+            "\n  the existing comments on this file were written against a different one, \
+             so the lines you are working from have moved",
+        );
     }
-    Ok(())
+    hint
 }
 
 fn build(r: &Resolved, body: String, author: Option<String>, reply_to: Option<String>) -> Comment {
@@ -317,7 +418,7 @@ fn build(r: &Resolved, body: String, author: Option<String>, reply_to: Option<St
         author: author.unwrap_or_else(default_author),
         created: state::now_unix(),
         reply_to,
-        diff_hash: Some(r.diff_hash.clone()),
+        diff_hash: r.diff_hash.clone(),
     }
 }
 
@@ -377,18 +478,53 @@ mod tests {
         Session::new(&files, "stdin", None)
     }
 
+    /// A store holding one comment, to reply to.
+    fn store_with(file: &str, line: u32, diff_hash: Option<&str>) -> (CommentStore, String) {
+        let mut store = CommentStore::disabled();
+        let id = store.add(Comment {
+            id: String::new(),
+            file: file.to_string(),
+            side: Side::New,
+            line,
+            body: "parent".to_string(),
+            author: "claude".to_string(),
+            created: 100,
+            reply_to: None,
+            diff_hash: diff_hash.map(str::to_string),
+        });
+        (store, id)
+    }
+
+    /// `anchor` with no reply target: the plain `--file`/`--line` path.
+    fn plain(
+        session: &Session,
+        file: &str,
+        old: Option<u32>,
+        new: Option<u32>,
+    ) -> Result<Resolved> {
+        anchor(
+            Some(session),
+            &CommentStore::disabled(),
+            Some(file),
+            old,
+            new,
+            None,
+            "test",
+        )
+    }
+
     #[test]
     fn resolves_a_line_inside_a_hunk() {
-        let r = resolve(&session(), "src/app.rs", None, Some(13), "test").unwrap();
+        let r = plain(&session(), "src/app.rs", None, Some(13)).unwrap();
         assert_eq!(r.file, "src/app.rs");
         assert_eq!(r.side, Side::New);
         assert_eq!(r.line, 13);
-        assert_eq!(r.diff_hash.len(), 32);
+        assert_eq!(r.diff_hash.unwrap().len(), 32);
     }
 
     #[test]
     fn an_unknown_file_lists_what_is_actually_there() {
-        let err = resolve(&session(), "src/nope.rs", None, Some(1), "test")
+        let err = plain(&session(), "src/nope.rs", None, Some(1))
             .unwrap_err()
             .to_string();
         assert!(err.contains("no file `src/nope.rs`"), "{err}");
@@ -397,24 +533,48 @@ mod tests {
 
     #[test]
     fn a_line_outside_every_hunk_names_the_valid_ranges() {
-        let err = resolve(&session(), "src/app.rs", None, Some(999), "test")
+        let err = plain(&session(), "src/app.rs", None, Some(999))
             .unwrap_err()
             .to_string();
         assert!(err.contains("line 999 is not in"), "{err}");
         assert!(err.contains("12-15"), "the error should list ranges: {err}");
     }
 
+    /// The anchor space belongs to whichever diff is on screen, and that changes
+    /// under a review on its own, so a rejected line has to say which one judged
+    /// it — and that the ground moved, when the stored comments prove it did.
+    #[test]
+    fn a_rejected_line_names_the_diff_it_was_measured_against() {
+        let s = session();
+        let clean = CommentStore::disabled();
+        let err = resolve(&s, &clean, "src/app.rs", None, Some(999), "test")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("the diff in force is `stdin`"), "{err}");
+        assert!(
+            !err.contains("have moved"),
+            "nothing says the ground moved yet: {err}"
+        );
+
+        // A comment written against a different revision of this file's diff.
+        let (stale, _) = store_with("src/app.rs", 13, Some("deadbeef"));
+        let err = resolve(&s, &stale, "src/app.rs", None, Some(999), "test")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("have moved"), "{err}");
+    }
+
     #[test]
     fn exactly_one_side_must_be_given() {
         let s = session();
         assert!(
-            resolve(&s, "src/app.rs", None, None, "test")
+            plain(&s, "src/app.rs", None, None)
                 .unwrap_err()
                 .to_string()
                 .contains("one of")
         );
         assert!(
-            resolve(&s, "src/app.rs", Some(10), Some(13), "test")
+            plain(&s, "src/app.rs", Some(10), Some(13))
                 .unwrap_err()
                 .to_string()
                 .contains("only one")
@@ -422,17 +582,81 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_that_is_not_a_reply_must_name_a_file() {
+        let err = anchor(
+            Some(&session()),
+            &CommentStore::disabled(),
+            None,
+            None,
+            Some(13),
+            None,
+            "test",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("name the file"), "{err}");
+    }
+
+    #[test]
     fn the_old_side_resolves_against_pre_image_numbers() {
-        let r = resolve(&session(), "src/app.rs", Some(11), None, "test").unwrap();
+        let r = plain(&session(), "src/app.rs", Some(11), None).unwrap();
         assert_eq!(r.side, Side::Old);
         assert_eq!(r.line, 11);
     }
 
     #[test]
     fn a_reply_to_an_unknown_id_is_rejected() {
-        let store = CommentStore::disabled();
-        assert!(check_reply_target(&store, None).is_ok());
-        assert!(check_reply_target(&store, Some("nope12")).is_err());
+        let err = anchor(
+            Some(&session()),
+            &CommentStore::disabled(),
+            None,
+            None,
+            None,
+            Some("nope12"),
+            "test",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("no comment with id nope12"), "{err}");
+    }
+
+    /// The whole point of fixing this: the parent's line has left the diff (the
+    /// fix it asked for landed), and replying to it still works — at the parent's
+    /// anchor, carrying the parent's hash so the thread doesn't read half-stale.
+    /// It works with no diff at all (`None`), which is what a committed fix or a
+    /// clean tree leaves behind.
+    #[test]
+    fn a_reply_inherits_its_parents_anchor_even_when_that_line_is_gone() {
+        let (store, parent) = store_with("src/app.rs", 999, Some("deadbeef"));
+        let r = anchor(None, &store, None, None, None, Some(&parent), "test")
+            .expect("a reply is not re-validated against the current diff");
+        assert_eq!(
+            (r.file.as_str(), r.side, r.line),
+            ("src/app.rs", Side::New, 999)
+        );
+        assert_eq!(r.diff_hash.as_deref(), Some("deadbeef"));
+    }
+
+    /// A reply that names its own line is refused rather than honored: honoring
+    /// it is what detached replies from their thread.
+    #[test]
+    fn a_reply_may_not_carry_an_anchor_of_its_own() {
+        let (store, parent) = store_with("src/app.rs", 13, None);
+        let s = session();
+        for (file, old, new) in [
+            (Some("src/app.rs"), None, None),
+            (None, None, Some(14)),
+            (None, Some(11), None),
+        ] {
+            let err = anchor(Some(&s), &store, file, old, new, Some(&parent), "test")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("carries no anchor of its own"), "{err}");
+            assert!(
+                err.contains("src/app.rs:13"),
+                "it names what it inherits: {err}"
+            );
+        }
     }
 
     #[test]
@@ -448,6 +672,42 @@ mod tests {
             serde_json::from_str::<Batch>(r#"{"comments":[{"file":"f","line":1,"body":"x"}]}"#)
                 .is_err()
         );
+    }
+
+    /// The batch path takes the same anchors as `add`, so it has to refuse the
+    /// same thing: a `replyTo` item may not also name a line.
+    #[test]
+    fn a_batch_reply_carrying_a_line_is_rejected_and_one_without_applies() {
+        let (store, parent) = store_with("src/app.rs", 999, Some("deadbeef"));
+        let s = session();
+        let batch: Batch = serde_json::from_str(&format!(
+            r#"{{"comments":[
+                 {{"replyTo":"{parent}","newLine":13,"body":"done"}},
+                 {{"replyTo":"{parent}","body":"done"}}
+               ]}}"#
+        ))
+        .expect("a replyTo item needs no file");
+
+        let resolve_item = |item: &BatchItem| {
+            anchor(
+                Some(&s),
+                &store,
+                item.file.as_deref(),
+                item.old_line,
+                item.new_line,
+                item.reply_to.as_deref(),
+                "test",
+            )
+        };
+        assert!(
+            resolve_item(&batch.comments[0])
+                .unwrap_err()
+                .to_string()
+                .contains("carries no anchor of its own")
+        );
+        // The same item without the line applies, though the parent's line is no
+        // longer anywhere in the diff.
+        assert_eq!(resolve_item(&batch.comments[1]).unwrap().line, 999);
     }
 
     #[test]

@@ -181,9 +181,34 @@ impl CommentStore {
         self.comments.iter().filter(|c| c.file == file).count()
     }
 
+    /// The comment a thread hangs from: `c` itself when it starts one, otherwise
+    /// the furthest ancestor its `reply_to` chain reaches.
+    ///
+    /// A thread is one conversation, so the root's anchor is the thread's — see
+    /// [`Self::threads`]. A reply whose parent isn't in the store at all is its
+    /// own root, which is what promotes an orphan instead of dropping it, and so
+    /// is one caught in a `reply_to` cycle a hand-edited file left behind.
+    pub fn root_of<'a>(&'a self, c: &'a Comment) -> &'a Comment {
+        let mut root = c;
+        let mut seen = vec![root.id.as_str()];
+        while let Some(parent) = root.reply_to.as_deref().and_then(|p| self.get(p)) {
+            if seen.contains(&parent.id.as_str()) {
+                break; // only reachable from a hand-edited cycle
+            }
+            seen.push(parent.id.as_str());
+            root = parent;
+        }
+        root
+    }
+
     /// Comments on `file`, grouped by anchor and ordered for display: anchors in
     /// line order, and within each anchor every root comment followed by the
     /// thread beneath it, oldest first.
+    ///
+    /// Each comment is placed at *its thread's* anchor rather than its own. The
+    /// two can differ: a reply written after the file's diff shifted carries a
+    /// line of its own, and grouping on that would break it out of the thread
+    /// into a box that reads as an unrelated note. The parent's anchor wins.
     ///
     /// The walk under a root is depth-first, so a reply to a reply lands under
     /// the note it answers instead of vanishing — `c` on a reply row, and
@@ -193,28 +218,36 @@ impl CommentStore {
     /// root so the text is never silently dropped, and so is anything a hand-
     /// edited file leaves unreachable.
     pub fn threads(&self, file: &str) -> Vec<(Anchor, Vec<&Comment>)> {
-        let mut anchors: Vec<Anchor> = self
+        // Resolve each comment's thread anchor once: `root_of` walks a chain, and
+        // the grouping below would otherwise re-walk it for every anchor.
+        let placed: Vec<(&Comment, Anchor)> = self
             .comments
             .iter()
-            .filter(|c| c.file == file)
-            .map(|c| c.anchor())
+            .map(|c| (c, self.root_of(c)))
+            .filter(|(_, root)| root.file == file)
+            .map(|(c, root)| (c, root.anchor()))
             .collect();
+
+        let mut anchors: Vec<Anchor> = placed.iter().map(|(_, a)| *a).collect();
         anchors.sort_unstable();
         anchors.dedup();
 
         anchors
             .into_iter()
             .map(|anchor| {
-                let here: Vec<&Comment> = self
-                    .comments
+                let here: Vec<&Comment> = placed
                     .iter()
-                    .filter(|c| c.file == file && c.anchor() == anchor)
+                    .filter(|(_, a)| *a == anchor)
+                    .map(|(c, _)| *c)
                     .collect();
                 // Oldest first, with the id as a tiebreaker so the order is
                 // stable across runs for comments written in the same second.
                 let by_age =
                     |a: &&Comment, b: &&Comment| (a.created, &a.id).cmp(&(b.created, &b.id));
 
+                // A parent absent from `here` is a parent absent from the store:
+                // every descendant of a root resolves to that root's anchor, so
+                // the whole thread groups together whatever lines it carries.
                 let mut roots: Vec<&Comment> = here
                     .iter()
                     .copied()
@@ -466,6 +499,54 @@ mod tests {
         assert_eq!(store.threads("f")[0].1.len(), 1);
     }
 
+    /// The diff moves while a review is under way — comment, fix, reply is the
+    /// normal loop — so a reply can carry a line its parent doesn't. It still
+    /// belongs to the conversation it answers, at the anchor that thread hangs on.
+    #[test]
+    fn a_reply_stored_on_another_line_still_renders_inside_its_thread() {
+        let mut store = CommentStore::disabled();
+        let root = store.add(draft("f", 100, "no backoff here"));
+        let mut reply = draft("f", 92, "fixed — the loop backs off now");
+        reply.created = 200;
+        reply.reply_to = Some(root.clone());
+        let reply = store.add(reply);
+        // A reply to that reply, drifted again.
+        let mut nested = draft("f", 80, "thanks");
+        nested.created = 300;
+        nested.reply_to = Some(reply);
+        store.add(nested);
+
+        let threads = store.threads("f");
+        assert_eq!(threads.len(), 1, "one conversation is one box: {threads:?}");
+        assert_eq!(threads[0].0.line, 100, "the root's anchor governs");
+        let bodies: Vec<&str> = threads[0].1.iter().map(|c| c.body.as_str()).collect();
+        assert_eq!(
+            bodies,
+            [
+                "no backoff here",
+                "fixed — the loop backs off now",
+                "thanks"
+            ]
+        );
+    }
+
+    /// A reply follows its parent even across files, so a hand-edited store can't
+    /// leave half a thread hanging off a file the rest of it isn't in.
+    #[test]
+    fn a_reply_stored_against_another_file_follows_its_parent() {
+        let mut store = CommentStore::disabled();
+        let root = store.add(draft("a", 10, "root"));
+        let mut reply = draft("b", 3, "reply");
+        reply.created = 200;
+        reply.reply_to = Some(root);
+        store.add(reply);
+
+        assert!(store.threads("b").is_empty(), "not a thread of its own");
+        let threads = store.threads("a");
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].1.len(), 2);
+    }
+
     #[test]
     fn orphaned_reply_is_promoted_rather_than_dropped() {
         let mut store = CommentStore::disabled();
@@ -483,6 +564,22 @@ mod tests {
         orphan.reply_to = Some("deadbe".to_string());
         store.add(orphan);
         assert_eq!(store.threads("f")[0].1.len(), 1);
+    }
+
+    /// Only a hand-edited file can produce one, but resolving a thread's anchor
+    /// walks `reply_to`, so a cycle must terminate and keep every note visible.
+    #[test]
+    fn a_reply_to_cycle_terminates_and_drops_nothing() {
+        let mut store = CommentStore::disabled();
+        let a = store.add(draft("f", 1, "a"));
+        let mut second = draft("f", 1, "b");
+        second.reply_to = Some(a.clone());
+        let b = store.add(second);
+        // Close the loop: a replies to b, which replies to a.
+        store.comments[0].reply_to = Some(b);
+
+        let shown: usize = store.threads("f").iter().map(|(_, t)| t.len()).sum();
+        assert_eq!(shown, 2, "both notes still render");
     }
 
     #[test]
