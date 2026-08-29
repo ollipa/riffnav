@@ -64,10 +64,12 @@
 #   "staged"    – staged changes only
 #   "unstaged"  – unstaged changes only
 # Omit for "unstaged", matching plain `git diff` (plus untracked files, which
-# `git diff` omits). Override per run with the matching flag (`riffnav diff
-# --all`, `--committed`, `--staged`, `--unstaged`). Ignored when you pass your
-# own arguments to `riffnav diff`, so `riffnav diff HEAD~1` stays `git diff
-# HEAD~1`.
+# `git diff` omits) — and, when that is empty, falling on to your staged work or
+# branch-vs-base rather than showing nothing. Setting this key opts out of that
+# fallback: a view you chose is shown as asked. Override per run with the
+# matching flag (`riffnav diff --all`, `--committed`, `--staged`, `--unstaged`).
+# Ignored when you pass your own arguments to `riffnav diff`, so `riffnav diff
+# HEAD~1` stays `git diff HEAD~1`.
 # diff_source = "all"
 
 # --- Inline review comments ---

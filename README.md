@@ -37,6 +37,7 @@ Use `riffnav diff` and `riffnav show` wherever you'd type `git diff` and
 
 ```sh
 riffnav diff                  # unstaged changes, like `git diff`
+                              # (branch vs base when the tree is clean)
 riffnav diff --staged         # staged changes
 riffnav diff HEAD~3           # any revision(s) git accepts
 riffnav diff -- src/          # scoped to a pathspec
@@ -219,6 +220,12 @@ riffnav diff --all         # all uncommitted: staged + unstaged + untracked
 riffnav diff --committed   # branch vs base — `git diff <base>...HEAD`, the PR view
 riffnav diff --base develop --committed   # against a specific base branch
 ```
+
+When that default comes back empty — a clean tree, where `git diff` has nothing
+to say — a bare `riffnav diff` steps on to a view that does: your staged work if
+there is any, otherwise branch-vs-base, so opening riffnav on a committed branch
+shows the branch. A view you named yourself is shown as asked, empty or not:
+`riffnav diff --unstaged` on a clean tree correctly reports no changes.
 
 The two working-tree views (`riffnav diff` and `--all`) also list untracked,
 non-ignored files, rendered as fully added — `git diff` omits them by design,

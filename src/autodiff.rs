@@ -332,29 +332,38 @@ fn is_untracked(path: &str) -> bool {
         .is_some_and(|s| !s.trim().is_empty())
 }
 
-/// Pick a source adaptively and load it: prefer uncommitted work, and only fall
-/// back to the branch-vs-base view when the tree is clean. Returns the chosen
-/// source alongside its diff text so the caller can show which view it is.
+/// The view to show when the one asked for renders nothing: uncommitted work if
+/// there is any, else what the branch has committed over its base. `None` when
+/// neither has anything (or there's no base for the second), leaving the caller
+/// on whatever it already had.
 ///
-/// This is the guess the `riffnav comment` subcommands make when no window has
-/// published a session — there is no user-chosen view to go on, so it picks the
-/// diff the user is most likely working on.
+/// Two callers want this. A bare `riffnav diff` defaults to git's own view —
+/// unstaged work — which on a clean tree is empty by definition, while the diff
+/// worth reading is the branch's. And the `riffnav comment` subcommands make the
+/// same guess when no window has published a session, since there's no
+/// user-chosen view to go on.
 ///
-/// On an unborn branch (no commits yet) `git diff HEAD` fails; we treat that
-/// probe as "no uncommitted changes" rather than erroring, so such a repo simply
+/// On an unborn branch (no commits yet) `git diff HEAD` fails; that probe is
+/// treated as "no uncommitted changes" rather than an error, so such a repo just
 /// reports nothing to show.
-pub fn load_initial(base: Option<&str>) -> Result<(DiffSource, String)> {
+pub fn fallback_view(base: Option<&str>) -> Result<Option<(DiffSource, String)>> {
     let uncommitted = load(DiffSource::AllUncommitted, base).unwrap_or_default();
     if !uncommitted.trim().is_empty() {
-        return Ok((DiffSource::AllUncommitted, uncommitted));
+        return Ok(Some((DiffSource::AllUncommitted, uncommitted)));
     }
-    if base.is_some() {
-        let committed = load(DiffSource::Committed, base)?;
-        return Ok((DiffSource::Committed, committed));
-    }
-    // Nothing uncommitted and no base to diff against — leave it empty; the
-    // caller's "no changes to display" path takes over.
-    Ok((DiffSource::AllUncommitted, uncommitted))
+    let Some(base) = base else {
+        return Ok(None);
+    };
+    let committed = load(DiffSource::Committed, Some(base))?;
+    Ok((!committed.trim().is_empty()).then_some((DiffSource::Committed, committed)))
+}
+
+/// Pick a source adaptively and load it, for a caller that needs *some* view
+/// even when every one of them is empty.
+pub fn load_initial(base: Option<&str>) -> Result<(DiffSource, String)> {
+    // Nothing anywhere: hand back the empty uncommitted view and let the
+    // caller's "no changes to display" path take over.
+    Ok(fallback_view(base)?.unwrap_or((DiffSource::AllUncommitted, String::new())))
 }
 
 /// Run `git` with `args`, returning trimmed stdout or `None` on any failure or

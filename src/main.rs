@@ -39,14 +39,54 @@ struct Input {
 /// selector onto the user's would quietly turn `riffnav diff HEAD~1` into
 /// `git diff --staged HEAD~1`. A view flag still wins — that one was typed
 /// alongside the arguments, so it was meant.
-fn diff_command(args: cli::DiffArgs, config: &config::Config) -> GitDiff {
+///
+/// The flag returned alongside says whether the view was riffnav's own default
+/// rather than the user's choice, which is what licenses the empty-diff fallback
+/// in [`diff_input`].
+fn diff_command(args: cli::DiffArgs, config: &config::Config) -> (GitDiff, bool) {
     let configured = args.args.is_empty().then_some(config.diff_source).flatten();
-    let source = args.view().or(configured).unwrap_or(DiffSource::Unstaged);
+    let chosen = args.view().or(configured);
+    let defaulted = chosen.is_none() && args.args.is_empty();
+    let source = chosen.unwrap_or(DiffSource::Unstaged);
     let base = args
         .base
         .or_else(|| config.base_branch.clone())
         .or_else(autodiff::detect_base);
-    GitDiff::diff(source, base, cli::git_args(args.args))
+    (
+        GitDiff::diff(source, base, cli::git_args(args.args)),
+        defaulted,
+    )
+}
+
+/// Load the diff for `riffnav diff`, stepping to another view when the defaulted
+/// one is empty.
+///
+/// A bare `riffnav diff` means `git diff`: unstaged work. On a clean tree that
+/// is nothing at all, and printing "no changes to display" in a repo whose
+/// branch is full of commits is unhelpful — what the user wants to read there is
+/// what the branch adds over its base, the same diff `riffnav diff --committed`
+/// shows. So an *empty* default steps on: to the staged work if there is any,
+/// then to branch-vs-base. A view the user named is left alone, empty or not:
+/// `riffnav diff --unstaged` on a clean tree correctly shows nothing.
+fn diff_input(args: cli::DiffArgs, config: &config::Config) -> Result<Input> {
+    let (git, defaulted) = diff_command(args, config);
+    let text = git.load()?;
+    if defaulted
+        && text.trim().is_empty()
+        && let Some((source, found)) = autodiff::fallback_view(git.base.as_deref())?
+    {
+        // Re-made rather than patched, so the header names the view on screen
+        // and `r` re-runs the command that produced it.
+        let git = GitDiff::diff(source, git.base, vec![]);
+        return Ok(Input {
+            text: found,
+            git: Some(git),
+        });
+    }
+    Ok(Input {
+        text,
+        git: Some(git),
+    })
 }
 
 /// Read the unified diff piped or redirected in on stdin (the pager path).
@@ -65,13 +105,7 @@ fn main() -> Result<()> {
     let input = match cli.command {
         // `diff`/`show` are just another way to *source* the diff — they still
         // open the TUI, so they fall through to the app below.
-        Some(cli::Command::Diff(args)) => {
-            let git = diff_command(args, &config);
-            Input {
-                text: git.load()?,
-                git: Some(git),
-            }
-        }
+        Some(cli::Command::Diff(args)) => diff_input(args, &config)?,
         Some(cli::Command::Show { args }) => {
             let git = GitDiff::show(cli::git_args(args));
             Input {
@@ -155,7 +189,17 @@ mod tests {
             Some(cli::Command::Diff(args)) => args,
             _ => panic!("expected a diff command"),
         };
-        diff_command(args, &config).view
+        diff_command(args, &config).0.view
+    }
+
+    /// Whether that command line left the view to riffnav — the condition for
+    /// the empty-diff fallback.
+    fn defaulted(line: &str, config: &config::Config) -> bool {
+        let args = match cli::Cli::parse_from(line.split_whitespace()).command {
+            Some(cli::Command::Diff(args)) => args,
+            _ => panic!("expected a diff command"),
+        };
+        diff_command(args, config).1
     }
 
     #[test]
@@ -183,6 +227,30 @@ mod tests {
                 "{line} should fall back to git's own default"
             );
         }
+    }
+
+    /// The fallback to branch-vs-base is for the view riffnav picked on its own.
+    /// Anything the user named — a flag, a configured `diff_source`, or their own
+    /// arguments — is shown as asked, empty or not.
+    #[test]
+    fn only_riffnavs_own_default_view_may_fall_back_when_empty() {
+        let bare = config::Config {
+            base_branch: Some("origin/main".to_string()),
+            ..Default::default()
+        };
+        assert!(defaulted("riffnav diff", &bare));
+        assert!(!defaulted("riffnav diff --unstaged", &bare));
+        assert!(!defaulted("riffnav diff --committed", &bare));
+        assert!(!defaulted("riffnav diff HEAD~1", &bare));
+
+        let configured = config::Config {
+            diff_source: Some(DiffSource::Unstaged),
+            ..bare.clone()
+        };
+        assert!(
+            !defaulted("riffnav diff", &configured),
+            "a configured view was still a choice"
+        );
     }
 
     #[test]
