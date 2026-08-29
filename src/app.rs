@@ -395,7 +395,12 @@ impl App {
     }
 
     /// The `r` key: re-run the diff and reload it, so work done since launch
-    /// shows up without restarting.
+    /// shows up without restarting. Notes written elsewhere are re-read with it:
+    /// they're part of "what has changed since", and the filesystem watcher that
+    /// normally brings them in isn't always there — no watch can be established
+    /// on some filesystems, and none exists at all outside a repo scope. `r` is
+    /// the key you press when the screen looks stale, so it re-reads everything
+    /// rather than leaving one half to a watcher that may be missing.
     fn refresh_diff(&mut self) {
         let Some(git) = &self.git else { return };
         // The immutable borrow of `self.git` ends here (the text is owned),
@@ -404,8 +409,25 @@ impl App {
         match loaded {
             Ok(text) => self.reload_in_place(crate::diff::parse(&text)),
             // `{e:#}` includes the command's own message.
-            Err(e) => self.set_status(format!("refresh: {e:#}")),
+            Err(e) => {
+                self.set_status(format!("refresh: {e:#}"));
+                return;
+            }
         }
+        if let Some(new) = self.reload_comments() {
+            self.set_status(format!("💬 {new} new comment(s)"));
+        }
+    }
+
+    /// Re-read the comment file, discarding what was in memory (every local write
+    /// has already been saved). Reports how many notes appeared, or `None` when
+    /// none did — a reload that brings nothing new isn't worth a status line.
+    fn reload_comments(&mut self) -> Option<usize> {
+        let before = self.comments.all().len();
+        self.comments.reload();
+        self.bump_comments();
+        let new = self.comments.all().len().checked_sub(before)?;
+        (new > 0).then_some(new)
     }
 
     /// Swap in a freshly loaded file set the way a refresh wants it: as
@@ -587,12 +609,8 @@ impl App {
         {
             return;
         }
-        let before = self.comments.all().len();
-        self.comments.reload();
-        self.bump_comments();
-        let after = self.comments.all().len();
-        if after > before {
-            self.set_status(format!("💬 {} new comment(s)", after - before));
+        if let Some(new) = self.reload_comments() {
+            self.set_status(format!("💬 {new} new comment(s)"));
         }
     }
 
@@ -2711,6 +2729,43 @@ mod tests {
             app.comments.all().is_empty(),
             "the reply went with its root"
         );
+    }
+
+    /// `r` re-reads the notes as well as the diff. The filesystem watcher usually
+    /// gets there first, but it isn't always there to — this is what makes a
+    /// stale-looking screen fixable by hand.
+    #[test]
+    fn refreshing_re_reads_notes_written_by_another_process() {
+        let dir = std::env::temp_dir().join(format!("riffnav-refresh-{}", std::process::id()));
+        let path = dir.join("scope.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut app = app_with(vec![file_with_raw("a.rs")]);
+        app.install_comments_for_test(CommentStore::with_path(path.clone()));
+        assert!(app.comments.all().is_empty());
+
+        // An agent in another terminal writes to the same scope file.
+        let mut theirs = CommentStore::with_path(path.clone());
+        theirs.add(Comment {
+            id: String::new(),
+            file: "a.rs".to_string(),
+            side: crate::comment::Side::New,
+            line: 2,
+            body: "written elsewhere".to_string(),
+            author: "claude".to_string(),
+            created: crate::state::now_unix(),
+            reply_to: None,
+            diff_hash: None,
+        });
+        theirs.save();
+
+        let rev = app.comment_rev;
+        assert_eq!(app.reload_comments(), Some(1), "the note is picked up");
+        assert_eq!(app.comments.all()[0].body, "written elsewhere");
+        assert_ne!(app.comment_rev, rev, "and the renders re-splice");
+        assert_eq!(app.reload_comments(), None, "a second pass adds nothing");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     /// `Ctrl-O` is the escape hatch for a note that outgrows the field: it hands
