@@ -52,7 +52,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                     } else {
                         icon.chars().count() + 1
                     };
-                    let left = row.depth * 2 + 2 + icon_w + row.name.chars().count();
                     // The speech bubble is double-width, so the badge is one
                     // column wider than its char count.
                     let notes_w = if notes.is_empty() {
@@ -61,6 +60,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                         notes.chars().count() + 1
                     };
                     let badge = notes_w + adds.len() + 1 + dels.len();
+                    // The badge gets its columns before the name does. A name too
+                    // long for the pane is cut short rather than shoving the
+                    // counts off the right edge, where the widget would simply
+                    // clip them — those counts, and the note badge especially, are
+                    // what the tree is scanned for, and a hidden one reads as no
+                    // comments at all.
+                    let fixed = row.depth * 2 + 2 + icon_w + badge + 1;
+                    let name = truncate(&row.name, inner.saturating_sub(fixed));
+                    let left = row.depth * 2 + 2 + icon_w + name.chars().count();
                     let pad = inner.saturating_sub(left + badge).max(1);
 
                     // A reviewed file shows a green ✓ in place of its A/M/D sigil
@@ -83,7 +91,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                     if !icon.is_empty() {
                         spans.push(Span::styled(format!("{icon} "), name_style));
                     }
-                    spans.push(Span::styled(row.name.clone(), name_style));
+                    spans.push(Span::styled(name, name_style));
                     spans.push(Span::raw(" ".repeat(pad)));
                     if !notes.is_empty() {
                         spans.push(Span::styled(notes, Style::new().fg(Color::Yellow)));
@@ -123,6 +131,22 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
     frame.render_stateful_widget(list, area, &mut app.tree_state);
 }
 
+/// `name` cut to `room` columns, ending in an ellipsis when anything was
+/// dropped so a truncated name doesn't read as the whole one. The tail is what
+/// goes: file names are told apart by their beginnings far more often than by
+/// their ends, and the extension is usually already given by the icon.
+fn truncate(name: &str, room: usize) -> String {
+    if name.chars().count() <= room {
+        return name.to_string();
+    }
+    // Below two columns there's no room for a name *and* the mark that says it
+    // was cut, so all that's left is the mark itself — or nothing.
+    name.chars()
+        .take(room.saturating_sub(1))
+        .chain("…".chars().take(room.min(1)))
+        .collect()
+}
+
 pub(super) fn status_color(status: FileStatus) -> Color {
     match status {
         FileStatus::Added => Color::Green,
@@ -130,5 +154,26 @@ pub(super) fn status_color(status: FileStatus) -> Color {
         FileStatus::Deleted => Color::Red,
         FileStatus::Renamed => Color::Cyan,
         FileStatus::Copied => Color::Magenta,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncation_never_exceeds_the_room_it_was_given() {
+        assert_eq!(
+            truncate("main.rs", 7),
+            "main.rs",
+            "an exact fit is untouched"
+        );
+        assert_eq!(truncate("main.rs", 9), "main.rs");
+        assert_eq!(truncate("main.rs", 5), "main…");
+        assert_eq!(truncate("main.rs", 1), "…");
+        assert_eq!(truncate("main.rs", 0), "");
+        for room in 0..10 {
+            assert!(truncate("a_long_file_name.rs", room).chars().count() <= room);
+        }
     }
 }

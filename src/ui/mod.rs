@@ -590,6 +590,50 @@ mod tests {
         );
     }
 
+    /// A name wider than the tree pane must give way to the badges, not push them
+    /// off the edge: a clipped `💬` count reads as no comments at all.
+    #[test]
+    fn a_long_name_is_cut_short_so_its_badges_stay_on_screen() {
+        let cfg = Config {
+            icon_style: IconStyle::Ascii,
+            ..Config::default()
+        };
+        let path = "a_file_whose_name_runs_well_past_the_pane_edge.rs";
+        let mut app = App::new(
+            vec![file(path, FileStatus::Modified, 40, 0)],
+            false,
+            false,
+            &cfg,
+        );
+        let mut store = crate::comment::CommentStore::disabled();
+        store.add(crate::comment::Comment {
+            id: String::new(),
+            file: path.to_string(),
+            side: crate::comment::Side::New,
+            line: 1,
+            body: "a note".to_string(),
+            author: "claude".to_string(),
+            created: crate::state::now_unix(),
+            reply_to: None,
+            diff_hash: None,
+        });
+        app.install_comments_for_test(store);
+
+        let out = render(&mut app, 72, 8);
+        let row = out
+            .lines()
+            .find(|l| l.contains("a_file_whose"))
+            .expect("the file is in the tree");
+        // Everything left of the pane's border is the tree's own row.
+        let row = row.split('│').next().expect("the tree pane's columns");
+        assert!(row.contains("💬 1 +40 -0"), "the badges survive\n{out}");
+        assert!(row.contains('…'), "and the name says it was cut\n{row}");
+        assert!(
+            row.chars().count() <= app.tree_width as usize,
+            "the row still fits the pane\n{row}"
+        );
+    }
+
     #[test]
     fn commented_files_show_a_count_in_the_tree() {
         let (mut app, width, height) = app_with_comments(&[(2, "a", "one"), (4, "b", "two")]);
