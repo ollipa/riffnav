@@ -198,7 +198,7 @@ fn render_help(
     ];
     if comments {
         entries.push(("c", "comment on the line (or reply, inside a thread)"));
-        entries.push(("x", "delete the comment under the cursor"));
+        entries.push(("x", "delete the comment under the cursor (asks first)"));
         entries.push(("] / [", "next / previous comment"));
     }
     if can_refresh {

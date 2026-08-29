@@ -232,6 +232,9 @@ pub struct App {
     /// rendered before the cursor can be put on the comment it was aimed at:
     /// `true` for its first comment, `false` for its last.
     comment_landing: Option<bool>,
+    /// The id `x` has asked about deleting, waiting on the y/N answer. Holds the
+    /// next keypress hostage, which is the whole point of it.
+    confirm_delete: Option<String>,
     /// The comment being typed, if any. While it's open it owns every keypress.
     composer: Option<Composer>,
     /// A comment handed off from the composer to `$EDITOR` (`Ctrl-O`), run once
@@ -317,6 +320,7 @@ impl App {
             cursor_anchor: None,
             cursor_token: None,
             comment_landing: None,
+            confirm_delete: None,
             composer: None,
             pending_comment: None,
             matcher: SkimMatcherV2::default(),
@@ -1458,7 +1462,11 @@ impl App {
             .collect()
     }
 
-    /// Delete the comment the cursor is on (and any replies beneath it).
+    /// `x`: ask before deleting the comment the cursor is on. A note takes real
+    /// thought to write and nothing here can bring one back — the store is
+    /// rewritten on the spot — so the key arms a prompt instead of deleting, and
+    /// the next keypress answers it. The CLI's `comment rm` is unaffected: a
+    /// script naming an id has already made the decision.
     fn delete_comment(&mut self) {
         let Some(id) = self
             .block_at_cursor()
@@ -1468,6 +1476,26 @@ impl App {
             self.set_status("Put the cursor on a comment to delete it");
             return;
         };
+        let doomed = self.comments.thread_ids(&id).len();
+        // Deliberately not `set_status`: the question must stay up until it's
+        // answered rather than time out under the cursor.
+        self.status = Some(match doomed {
+            0 | 1 => format!("Delete comment #{id}?  y/N"),
+            n => format!("Delete comment #{id} and {} repl(ies)?  y/N", n - 1),
+        });
+        self.status_deadline = None;
+        self.confirm_delete = Some(id);
+    }
+
+    /// The answer to that prompt: `y` deletes, anything else backs out.
+    fn answer_delete(&mut self, key: KeyCode) {
+        let Some(id) = self.confirm_delete.take() else {
+            return;
+        };
+        if !matches!(key, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            self.set_status("Delete cancelled");
+            return;
+        }
         let removed = self.comments.remove(&id);
         self.comments.save();
         self.bump_comments();
@@ -1854,6 +1882,14 @@ impl App {
             ) {
                 self.show_help = false;
             }
+            return Ok(());
+        }
+
+        // A delete waiting on y/N owns the next key, whatever it is — including
+        // `q` and `Esc`, which read as backing out of the question rather than
+        // out of riffnav.
+        if self.confirm_delete.is_some() {
+            self.answer_delete(key.code);
             return Ok(());
         }
 
@@ -2609,6 +2645,72 @@ mod tests {
         type_into(&mut app, "third");
         app.press_for_test(KeyCode::Char('s'), true);
         assert!(app.comments.all()[2].reply_to.is_none());
+    }
+
+    /// An app with one saved note and the cursor parked on it — the state `x` is
+    /// pressed from.
+    fn app_on_a_saved_comment() -> App {
+        let mut app = app_ready_to_comment();
+        app.press_for_test(KeyCode::Char('c'), false);
+        type_into(&mut app, "why the retry here?");
+        app.press_for_test(KeyCode::Enter, false);
+        app.seed_render_for_test(60, seed_text()); // splice the note into rows
+        app.resync_cursor();
+        app.jump_comment(true);
+        app
+    }
+
+    /// `x` is one keystroke away from throwing away a written note that nothing
+    /// can bring back, so it asks first and the answer is the next key.
+    #[test]
+    fn deleting_a_comment_asks_before_it_goes() {
+        let mut app = app_on_a_saved_comment();
+
+        app.press_for_test(KeyCode::Char('x'), false);
+        assert_eq!(app.comments.all().len(), 1, "nothing is deleted yet");
+        let prompt = app.status.clone().expect("the question is on screen");
+        assert!(prompt.contains("Delete comment #"), "{prompt}");
+        assert!(prompt.ends_with("y/N"), "{prompt}");
+        assert!(
+            app.status_deadline.is_none(),
+            "the question must not time out under the cursor"
+        );
+
+        // Any key but `y` backs out — and `q` answers the question rather than
+        // quitting riffnav.
+        app.press_for_test(KeyCode::Char('q'), false);
+        assert_eq!(app.comments.all().len(), 1, "the note survived");
+        assert!(!app.quit, "`q` answered the prompt, it didn't quit");
+        assert_eq!(app.status.as_deref(), Some("Delete cancelled"));
+
+        app.press_for_test(KeyCode::Char('x'), false);
+        app.press_for_test(KeyCode::Char('y'), false);
+        assert!(app.comments.all().is_empty(), "confirmed, so it went");
+        assert!(app.status.unwrap().starts_with("Deleted comment #"));
+    }
+
+    /// The prompt counts the replies that would go with the note, since deleting
+    /// a thread's root takes the whole thread.
+    #[test]
+    fn the_delete_prompt_counts_the_replies_that_would_go_too() {
+        let mut app = app_on_a_saved_comment();
+        // `c` on a comment row replies to it.
+        app.press_for_test(KeyCode::Char('c'), false);
+        type_into(&mut app, "because the API flakes");
+        app.press_for_test(KeyCode::Enter, false);
+        app.seed_render_for_test(60, seed_text());
+        app.resync_cursor();
+        app.jump_comment(true); // onto the thread's first row: its root
+
+        app.press_for_test(KeyCode::Char('x'), false);
+        let prompt = app.status.clone().expect("the question is on screen");
+        assert!(prompt.contains("and 1 repl(ies)?"), "{prompt}");
+
+        app.press_for_test(KeyCode::Char('y'), false);
+        assert!(
+            app.comments.all().is_empty(),
+            "the reply went with its root"
+        );
     }
 
     /// `Ctrl-O` is the escape hatch for a note that outgrows the field: it hands

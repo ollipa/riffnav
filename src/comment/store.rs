@@ -265,15 +265,19 @@ impl CommentStore {
         id
     }
 
-    /// Delete the comment with `id` and the whole thread beneath it — replies to
-    /// its replies included, or they'd be left dangling as roots of their own.
-    /// Returns how many were removed.
-    pub fn remove(&mut self, id: &str) -> usize {
-        let before = self.comments.len();
-        let mut doomed = vec![id.to_string()];
+    /// `id` and every comment replying beneath it, transitively — exactly what a
+    /// delete of `id` would take with it, so it can be counted before it goes.
+    /// Empty when nothing carries that id.
+    pub fn thread_ids(&self, id: &str) -> Vec<String> {
+        let mut doomed: Vec<String> = self
+            .comments
+            .iter()
+            .filter(|c| c.id == id)
+            .map(|c| c.id.clone())
+            .collect();
         // Each pass adopts the children of everything condemned so far; the set
         // only grows, so a fixed point is reached in at most `comments` passes.
-        loop {
+        while !doomed.is_empty() {
             let next: Vec<String> = self
                 .comments
                 .iter()
@@ -288,6 +292,15 @@ impl CommentStore {
             }
             doomed.extend(next);
         }
+        doomed
+    }
+
+    /// Delete the comment with `id` and the whole thread beneath it — replies to
+    /// its replies included, or they'd be left dangling as roots of their own.
+    /// Returns how many were removed.
+    pub fn remove(&mut self, id: &str) -> usize {
+        let doomed = self.thread_ids(id);
+        let before = self.comments.len();
         self.comments.retain(|c| !doomed.contains(&c.id));
         let removed = before - self.comments.len();
         self.dirty |= removed > 0;
