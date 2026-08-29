@@ -85,7 +85,11 @@ pub fn sweep(dir: &Path, retention: u64, keep: &Path) {
                 remaining += 1;
             }
         }
-        if remaining == 0 {
+        // The scope being opened now is left alone even before its file exists:
+        // a window may be watching this directory for the first comment to land
+        // in it, and pruning it would break that watch for the session.
+        let keeping = keep.parent() == Some(repo_path.as_path());
+        if remaining == 0 && !keeping {
             // Only succeeds if truly empty, so this can't clobber a live repo.
             let _ = std::fs::remove_dir(&repo_path);
         }
@@ -185,6 +189,30 @@ mod tests {
             .map(|e| e.file_name())
             .collect();
         assert_eq!(leftovers, ["scope.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scope holds no file until its first comment, and the window watching it
+    /// is watching that directory. Pruning it as "empty" pulls it out from under
+    /// the watch, so the scope being opened keeps its directory.
+    #[test]
+    fn sweep_keeps_the_directory_of_the_scope_being_opened() {
+        let dir = std::env::temp_dir().join(format!("riffnav-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let keep = scope_path(&dir, "/repo", "branch");
+        let other = scope_path(&dir, "/elsewhere", "branch");
+        std::fs::create_dir_all(keep.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+
+        sweep(&dir, DAY_SECS, &keep);
+        assert!(
+            keep.parent().unwrap().is_dir(),
+            "the scope being opened keeps its directory"
+        );
+        assert!(
+            !other.parent().unwrap().exists(),
+            "an unrelated empty directory is still swept"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
