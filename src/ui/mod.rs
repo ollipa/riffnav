@@ -756,6 +756,49 @@ mod tests {
         }
     }
 
+    /// Arriving at a comment has to show the comment: `]` scrolls the whole box
+    /// into view, not just the row the cursor lands on, or a note anchored near
+    /// the foot of the pane is jumped to and still unreadable.
+    #[test]
+    fn jumping_brings_the_whole_comment_box_into_view() {
+        // A short pane, and a thread deep enough that landing the cursor on its
+        // first row alone would leave the rest of the box below the fold.
+        let (mut app, width, _) = app_with_comments(&[
+            (6, "claude", "why the retry here?"),
+            (6, "ollipa", "the upstream flaps"),
+            (6, "claude", "then it wants backoff"),
+        ]);
+        let height = 14;
+        render(&mut app, width, height);
+
+        app.jump_comment(true);
+        let render = app
+            .cache
+            .get(
+                app.selected_file().unwrap(),
+                width - app.tree_width,
+                false,
+                app.diff_theme,
+            )
+            .expect("seeded render");
+        let block = render.comment_rows.first().expect("the note is spliced in");
+        let (top, bottom) = (
+            render.row_of(block.start),
+            render.row_of(block.start + block.len),
+        );
+        assert!(
+            bottom > app.diff_height,
+            "the box must overrun the pane from the top, or this proves nothing"
+        );
+        assert!(
+            top >= app.diff_scroll && bottom <= app.diff_scroll + app.diff_height,
+            "the whole box is on screen: rows {top}..{bottom}, \
+             view {}..{}",
+            app.diff_scroll,
+            app.diff_scroll + app.diff_height
+        );
+    }
+
     /// `]` steps to the next comment; the cursor landing on it is what `c` and `x`
     /// then act on.
     #[test]

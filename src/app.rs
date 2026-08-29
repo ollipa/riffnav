@@ -1172,6 +1172,34 @@ impl App {
         self.scroll_cursor_into_view();
     }
 
+    /// Land the cursor on the comment block starting at `line` and bring the
+    /// whole of it into view. A note is read as a unit, so stopping `]` with its
+    /// first line on the last row — the rest of the box below the fold — has
+    /// arrived at the comment without showing it. A block too tall for the pane
+    /// is aligned to its top, which is where reading starts.
+    fn set_cursor_on_block(&mut self, line: usize) {
+        self.set_cursor(line);
+        let height = self.diff_height;
+        if height == 0 {
+            return;
+        }
+        let Some((top, bottom)) = self.current_render().and_then(|r| {
+            let block = r.comment_rows.iter().find(|b| b.start == line)?;
+            Some((r.row_of(block.start), r.row_of(block.start + block.len)))
+        }) else {
+            return;
+        };
+        let pad = CURSOR_PADDING.min(height / 3);
+        if bottom + pad > self.diff_scroll + height {
+            self.diff_scroll = (bottom + pad).saturating_sub(height);
+        }
+        // Last, so a block taller than the pane keeps its top rather than its
+        // foot: the two pulls are in opposite directions and only one can win.
+        if top < self.diff_scroll + pad {
+            self.diff_scroll = top.saturating_sub(pad);
+        }
+    }
+
     /// Scroll the minimum needed to keep the cursor line — all of it, when it
     /// wraps onto several rows — inside the viewport, with [`CURSOR_PADDING`]
     /// rows of lead so the cursor never sits flush against an edge.
@@ -1278,7 +1306,7 @@ impl App {
             starts.iter().rev().find(|&&s| s < cursor).copied()
         };
         if let Some(target) = here {
-            self.set_cursor(target);
+            self.set_cursor_on_block(target);
             return;
         }
         // Off the end of this file: carry on into the next file that has notes.
@@ -1293,7 +1321,7 @@ impl App {
             starts.last()
         };
         match wrapped {
-            Some(&target) => self.set_cursor(target),
+            Some(&target) => self.set_cursor_on_block(target),
             None => self.set_status("No comments in this diff"),
         }
     }
@@ -1353,7 +1381,7 @@ impl App {
             render.comment_rows.last()
         };
         if let Some(start) = block.map(|b| b.start) {
-            self.set_cursor(start);
+            self.set_cursor_on_block(start);
         }
     }
 
