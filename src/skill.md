@@ -28,13 +28,21 @@ comment to a line outside those ranges.
 Read the code with your normal tools (`git diff`, Read); riffnav's CLI is for
 writing and reading *comments*, not for reading the diff.
 
+## Sign every comment
+
+Always pass `--author` (or `"author"` in a batch), naming yourself — `claude`,
+or whatever the user calls you. Without it the note is recorded under `$USER`,
+so your review arrives looking like something the user wrote themselves: the
+window colors each author differently and draws the user's own name in its own
+color, and a thread is only readable when it says who is speaking.
+
 ## Commands
 
 ```bash
 riffnav comment context [--json]
 riffnav comment list [--file <path>] [--author <name>] [--json]
 riffnav comment add --file <path> (--new-line <n> | --old-line <n>) --body <text>
-                    [--author <name>] [--reply-to <id>]
+                    --author <name> [--reply-to <id>]
 riffnav comment apply --stdin
 riffnav comment rm <id>
 riffnav comment clear [--file <path>] --yes
@@ -55,7 +63,8 @@ same ones the user sees in riffnav's gutter.
 ### One comment
 
 ```bash
-riffnav comment add --file src/app.rs --new-line 103 --body "This retry loop has no backoff."
+riffnav comment add --file src/app.rs --new-line 103 --author claude \
+  --body "This retry loop has no backoff."
 ```
 
 Pass `--body -` to read the text from stdin when it is long or full of quotes.
@@ -67,15 +76,15 @@ of it is written, so a bad line number fails cleanly instead of half-applying.
 
 ```bash
 printf '%s' '{"comments":[
-  {"file":"src/app.rs","newLine":103,"body":"This retry loop has no backoff."},
-  {"file":"src/app.rs","oldLine":88,"body":"Why was the guard here dropped?"},
-  {"file":"README.md","newLine":12,"body":"Stale: the flag is now --diff."}
+  {"file":"src/app.rs","newLine":103,"author":"claude","body":"This retry loop has no backoff."},
+  {"file":"src/app.rs","oldLine":88,"author":"claude","body":"Why was the guard here dropped?"},
+  {"file":"README.md","newLine":12,"author":"claude","body":"Stale: the flag is now --diff."}
 ]}' | riffnav comment apply --stdin
 ```
 
-Each item needs `file`, `body`, and exactly one of `newLine` or `oldLine`.
-Optional: `author`, `replyTo`. Field names are camelCase. `apply` takes no flags
-but `--stdin`, so a batch sets its author per item.
+Each item needs `file`, `body`, `author`, and exactly one of `newLine` or
+`oldLine`; `replyTo` is optional. Field names are camelCase. `apply` takes no
+flags but `--stdin`, so every item carries its own author.
 
 ### Replying
 
@@ -83,7 +92,7 @@ but `--stdin`, so a batch sets its author per item.
 
 ```bash
 riffnav comment add --file src/app.rs --new-line 103 --reply-to a3f1c2 \
-  --body "Agreed — I'll add exponential backoff."
+  --author claude --body "Agreed — I'll add exponential backoff."
 ```
 
 Replies render inside the same box as the comment they answer, marked `↳`.
