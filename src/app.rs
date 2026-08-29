@@ -540,6 +540,7 @@ impl App {
     fn comment_layer<'a>(
         files: &'a [FileDiff],
         comments: &'a CommentStore,
+        me: &'a str,
         diff_hash: u128,
         rev: u64,
         enabled: bool,
@@ -552,6 +553,7 @@ impl App {
         CommentLayer {
             threads: comments.threads(file),
             file,
+            me,
             diff_hash,
             rev,
         }
@@ -785,6 +787,7 @@ impl App {
                 let layer = Self::comment_layer(
                     &self.files,
                     &self.comments,
+                    &self.comment_author,
                     diff_hash,
                     self.comment_rev,
                     self.comments_on,
@@ -963,13 +966,7 @@ impl App {
             // Still differs: swap the diff in place. The tree is unchanged (same
             // path → same index), so only this file's render and hash refresh —
             // and the scroll position is left alone (the draw clamps it).
-            (Some(i), Some(file)) => {
-                self.file_hashes[i] = crate::review::file_hash(&file.raw);
-                self.files[i] = file;
-                self.cache.invalidate(i);
-                self.last_width = 0; // force a re-render at the next draw
-                self.publish_session();
-            }
+            (Some(i), Some(file)) => self.swap_file_diff(i, file),
             // No longer differs (changes reverted): drop it from the tree.
             // Removal shifts later indices, so reload the remaining set wholesale.
             (Some(i), None) => {
@@ -980,6 +977,24 @@ impl App {
             // The path is gone from the set; nothing sensible to splice.
             (None, _) => {}
         }
+    }
+
+    /// Replace file `i`'s diff with a freshly read one, dropping everything
+    /// derived from the old text: its hash, its cached render, and the line
+    /// cursor's index into that render.
+    ///
+    /// Clearing `cursor_token` is what makes the cursor recover. `last_width = 0`
+    /// forces the re-render, but the next frame sets it straight back to the same
+    /// width — so the token [`App::resync_cursor`] compares would be unchanged and
+    /// the cursor would keep an index into a render that no longer exists, leaving
+    /// it on a different line (or past the end) of the new diff.
+    fn swap_file_diff(&mut self, i: usize, file: FileDiff) {
+        self.file_hashes[i] = crate::review::file_hash(&file.raw);
+        self.files[i] = file;
+        self.cache.invalidate(i);
+        self.last_width = 0; // force a re-render at the next draw
+        self.cursor_token = None; // and let the cursor re-resolve from its anchor
+        self.publish_session();
     }
 
     fn diff_pane_width(&self, total: u16) -> u16 {
@@ -1897,6 +1912,7 @@ impl App {
         let layer = Self::comment_layer(
             &self.files,
             &self.comments,
+            &self.comment_author,
             0,
             self.comment_rev,
             self.comments_on,
@@ -2511,6 +2527,55 @@ mod tests {
             app.comments.all().is_empty(),
             "nothing is stored until it's saved"
         );
+    }
+
+    /// Re-reading one file's diff (the `o` key, via `refresh_file`) rebuilds its
+    /// render at the same width and theme, so nothing in `resync_cursor`'s token
+    /// changes on its own — only dropping the token keeps the cursor off a row
+    /// index that means nothing in the new render. Left stale, `c` would anchor
+    /// the next note to whatever line happens to sit at that row.
+    #[test]
+    fn a_re_read_file_puts_the_cursor_back_on_its_diff_line() {
+        // Comments stay off: this is the line cursor's own bookkeeping, and it
+        // keeps `publish_session` from touching the real state directory.
+        let mut app = app_with(vec![file_with_raw("a.rs")]);
+        app.focus = Focus::Diff;
+        app.diff_height = 20;
+        app.seed_render_for_test(60, seed_text());
+        app.resync_cursor();
+
+        app.move_cursor(2);
+        assert_eq!(app.cursor_anchor.map(|a| a.line), Some(3));
+
+        app.swap_file_diff(0, file_with_raw("a.rs"));
+        assert!(app.cursor_token.is_none(), "the token is dropped");
+
+        // The re-read diff carries two rows of delta decoration ahead of the
+        // code, so diff line 3 now sits two rows further down. Seeded the way the
+        // event loop would, leaving the cursor state alone.
+        let text = ratatui::text::Text::from(
+            ["a.rs".to_string(), "────".to_string()]
+                .into_iter()
+                .chain((1..=3).map(|n| format!("{n:>5}⋮{n:>5}│let x{n} = {n};")))
+                .map(ratatui::text::Line::from)
+                .collect::<Vec<_>>(),
+        );
+        let layer = App::comment_layer(
+            &app.files,
+            &app.comments,
+            &app.comment_author,
+            0,
+            app.comment_rev,
+            app.comments_on,
+            0,
+        );
+        app.cache
+            .insert_for_test_with_comments(0, 60, false, app.diff_theme, text, &layer);
+        app.last_width = 60;
+
+        app.resync_cursor();
+        assert_eq!(app.diff_cursor, 4, "the cursor followed diff line 3 down");
+        assert_eq!(app.cursor_anchor.map(|a| a.line), Some(3));
     }
 
     /// Comments off means no line cursor, so j/k must scroll the pane exactly as

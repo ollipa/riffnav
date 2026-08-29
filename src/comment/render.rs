@@ -14,6 +14,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
+use twox_hash::XxHash3_128;
 use unicode_width::UnicodeWidthChar;
 
 use super::anchor::LineMap;
@@ -63,11 +64,16 @@ impl CommentBlock {
 /// through. Threads whose anchor is no longer in the render are appended at the
 /// end rather than dropped, so a comment can never go missing because the code
 /// moved underneath it.
+///
+/// `me` is the name this window records as the author of its own comments, which
+/// is what tells a note the reader wrote from one an agent left.
+#[allow(clippy::too_many_arguments)]
 pub fn splice(
     text: &mut Text<'static>,
     map: &mut LineMap,
     threads: &[(Anchor, Vec<&Comment>)],
     file: &str,
+    me: &str,
     width: u16,
     diff_hash: u128,
     theme: DiffTheme,
@@ -86,7 +92,7 @@ pub fn splice(
         // An orphan goes after the last line; several of them stack in order.
         let row = map.row_for(*anchor).map_or(text.lines.len(), |r| r + 1);
         let (lines, entries) = block(
-            comments, file, *anchor, width, diff_hash, now, &palette, orphaned,
+            comments, file, me, *anchor, width, diff_hash, now, &palette, orphaned,
         );
         placed.push(Placed {
             row,
@@ -149,6 +155,7 @@ struct Placed {
 fn block(
     comments: &[&Comment],
     file: &str,
+    me: &str,
     anchor: Anchor,
     width: u16,
     diff_hash: u128,
@@ -168,7 +175,9 @@ fn block(
         }
         header.push(Span::styled(
             c.author.clone(),
-            Style::new().fg(palette.accent).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(palette.author(&c.author, me))
+                .add_modifier(Modifier::BOLD),
         ));
         header.push(Span::styled(
             format!(" · {}", ago(now, c.created)),
@@ -388,6 +397,9 @@ struct Palette {
     meta: Color,
     body: Color,
     stale: Color,
+    /// Hues for authors other than the reader. None of them is the accent or the
+    /// stale red, so a name can never be mistaken for the frame or a warning.
+    names: &'static [Color],
 }
 
 impl Palette {
@@ -399,12 +411,28 @@ impl Palette {
                 meta: Color::Rgb(0x6e, 0x77, 0x81),
                 body: Color::Rgb(0x1f, 0x23, 0x28),
                 stale: Color::Rgb(0xcf, 0x22, 0x2e),
+                names: &[
+                    Color::Rgb(0x09, 0x69, 0xda), // blue
+                    Color::Rgb(0x1a, 0x7f, 0x37), // green
+                    Color::Rgb(0x82, 0x50, 0xdf), // purple
+                    Color::Rgb(0xbf, 0x39, 0x89), // pink
+                    Color::Rgb(0x1b, 0x7c, 0x83), // teal
+                    Color::Rgb(0xbc, 0x4c, 0x00), // orange
+                ],
             },
             DiffTheme::GitHubDark => Self {
                 accent: Color::Rgb(0xd2, 0x99, 0x22),
                 meta: Color::Rgb(0x6e, 0x76, 0x81),
                 body: Color::Rgb(0xc9, 0xd1, 0xd9),
                 stale: Color::Rgb(0xf8, 0x51, 0x49),
+                names: &[
+                    Color::Rgb(0x58, 0xa6, 0xff), // blue
+                    Color::Rgb(0x3f, 0xb9, 0x50), // green
+                    Color::Rgb(0xbc, 0x8c, 0xff), // purple
+                    Color::Rgb(0xf7, 0x78, 0xba), // pink
+                    Color::Rgb(0x39, 0xc5, 0xcf), // teal
+                    Color::Rgb(0xf0, 0x88, 0x3e), // orange
+                ],
             },
             // The baseline theme follows the user's own gitconfig colors, so use
             // terminal-palette names and let their scheme decide the shades.
@@ -413,8 +441,32 @@ impl Palette {
                 meta: Color::DarkGray,
                 body: Color::Reset,
                 stale: Color::Red,
+                names: &[
+                    Color::Cyan,
+                    Color::Green,
+                    Color::Magenta,
+                    Color::Blue,
+                    Color::LightGreen,
+                    Color::LightMagenta,
+                ],
             },
         }
+    }
+
+    /// The color to draw one author's name in.
+    ///
+    /// The reader's own name keeps the frame's accent, so their notes read as the
+    /// box's own voice. Every other name — an agent's, a second reviewer's — is
+    /// hashed into [`Self::names`]: nobody has to configure anything, and a name
+    /// keeps the same color across sessions, machines and themes, which is what
+    /// makes a thread scannable by who is speaking.
+    fn author(&self, author: &str, me: &str) -> Color {
+        if author.eq_ignore_ascii_case(me) {
+            return self.accent;
+        }
+        let key = author.to_ascii_lowercase();
+        let slot = XxHash3_128::oneshot(key.as_bytes()) % self.names.len() as u128;
+        self.names[slot as usize]
     }
 }
 
@@ -474,6 +526,7 @@ mod tests {
             &mut map,
             &store.threads("f"),
             "f",
+            "me",
             40,
             0,
             DiffTheme::GitHubDark,
@@ -522,6 +575,7 @@ mod tests {
             &mut map,
             &store.threads("f"),
             "f",
+            "me",
             40,
             0,
             DiffTheme::GitHubDark,
@@ -547,6 +601,7 @@ mod tests {
             &mut map,
             &store.threads("f"),
             "f",
+            "me",
             40,
             0,
             DiffTheme::GitHubDark,
@@ -581,6 +636,7 @@ mod tests {
             &mut map,
             &store.threads("f"),
             "f",
+            "me",
             40,
             0,
             DiffTheme::GitHubDark,
@@ -604,6 +660,7 @@ mod tests {
             &mut map,
             &store.threads("f"),
             "f",
+            "me",
             24,
             0,
             DiffTheme::GitHubDark,
@@ -643,6 +700,75 @@ mod tests {
     }
 
     #[test]
+    fn a_name_keeps_one_color_and_mine_keeps_the_accent() {
+        for theme in [
+            DiffTheme::Delta,
+            DiffTheme::GitHubDark,
+            DiffTheme::GitHubLight,
+        ] {
+            let p = Palette::for_theme(theme);
+            // My own notes stay in the frame's accent...
+            assert_eq!(p.author("olli", "olli"), p.accent);
+            assert_eq!(p.author("Olli", "olli"), p.accent, "case doesn't matter");
+            // ...and nobody else can land on it, or on the staleness red.
+            for name in ["claude", "codex", "agent", "reviewer", "ada"] {
+                let c = p.author(name, "olli");
+                assert_eq!(c, p.author(name, "olli"), "{name} must be stable");
+                assert_eq!(c, p.author(&name.to_uppercase(), "olli"));
+                assert_ne!(c, p.accent, "{name} must not read as mine");
+                assert_ne!(c, p.stale);
+            }
+            // A handful of names should actually spread over the palette rather
+            // than collapsing onto one hue.
+            let names = ["claude", "codex", "gemini", "ada", "grace", "linus"];
+            let used: std::collections::HashSet<_> =
+                names.iter().map(|n| p.author(n, "olli")).collect();
+            assert!(used.len() >= 4, "{theme:?} bunched names up: {used:?}");
+        }
+    }
+
+    #[test]
+    fn two_authors_in_one_thread_are_colored_apart() {
+        let (mut text, mut map) = render(DIFF);
+        let mut store = store_with(&[(2, "claude", "why?")]);
+        let parent = store.all()[0].id.clone();
+        store.add(Comment {
+            id: String::new(),
+            file: "f".to_string(),
+            side: Side::New,
+            line: 2,
+            body: "because of the timeout".to_string(),
+            author: "olli".to_string(),
+            created: 0,
+            reply_to: Some(parent),
+            diff_hash: None,
+        });
+        splice(
+            &mut text,
+            &mut map,
+            &store.threads("f"),
+            "f",
+            "olli",
+            40,
+            0,
+            DiffTheme::GitHubDark,
+        );
+        // The name span of each header: the agent's is hashed, mine is the accent.
+        let color_of = |row: usize, name: &str| {
+            text.lines[row]
+                .spans
+                .iter()
+                .find(|s| s.content == name)
+                .unwrap_or_else(|| panic!("no {name} span in row {row}"))
+                .style
+                .fg
+        };
+        let agent = color_of(2, "claude");
+        assert_eq!(color_of(4, "olli"), Some(accent(DiffTheme::GitHubDark)));
+        assert_ne!(agent, Some(accent(DiffTheme::GitHubDark)));
+    }
+
+    #[test]
     fn relative_time_covers_each_bucket() {
         assert_eq!(ago(100, 100), "just now");
         assert_eq!(ago(60 * 5, 0), "5m ago");
@@ -670,6 +796,7 @@ mod tests {
             &mut map,
             &store.threads("f"),
             "f",
+            "me",
             60,
             9, // the file's diff hash is no longer 7
             DiffTheme::GitHubDark,

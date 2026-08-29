@@ -67,6 +67,7 @@ pub struct Config {
     /// how `review_retention_days` ages out viewed marks.
     pub comment_retention_days: u64,
     /// Name recorded as the author of comments written here. `None` uses `$USER`.
+    /// Also what tells "my" notes from an agent's when coloring author names.
     pub comment_author: Option<String>,
 }
 

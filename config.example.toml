@@ -69,9 +69,10 @@
 # --- Inline review comments ---
 
 # Show review comments beside the code, and bind the keys that write them:
-# `c` comment on the cursor line, `r` reply, `x` delete, `]`/`[` jump between
-# them. Comments are written either here or by an AI agent running
-# `riffnav comment add` in another terminal (see `riffnav skill`).
+# `c` comment on the cursor line (or reply, when it's inside a thread), `x`
+# delete, `]`/`[` jump between them. Comments are written either here or by an
+# AI agent running `riffnav comment add` in another terminal (see
+# `riffnav skill`).
 # Turning this off also turns off the diff pane's line cursor, so `j`/`k` scroll
 # the pane instead of moving a cursor.
 # show_comments = true
@@ -81,5 +82,7 @@
 # branch under $XDG_STATE_HOME/riffnav/comments/.
 # comment_retention_days = 90
 
-# Name recorded as the author of comments written here. Omit to use $USER.
+# Name recorded as the author of comments written here. Omit to use $USER. This
+# is also the name drawn in the comment box's own color; every other author is
+# colored by a hash of their name.
 # comment_author = "olli"

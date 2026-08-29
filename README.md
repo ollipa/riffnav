@@ -142,6 +142,11 @@ deletes the comment under the cursor along with the replies beneath it. Saved
 notes are drawn as a box under the line they annotate, with each reply on a
 divider inside it. Files carrying comments show a `💬` count in the tree.
 
+Your own name — `comment_author`, or `$USER` — is drawn in the box's own color;
+every other author gets one picked from a palette by hashing the name, so an
+agent (or a second reviewer) keeps the same color everywhere and a thread can be
+read by who is speaking.
+
 ### Letting an agent comment
 
 The `riffnav comment` subcommands are the agent-facing half. They're ordinary

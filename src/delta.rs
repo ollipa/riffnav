@@ -348,6 +348,7 @@ fn splice_and_measure(
         &mut map,
         &comments.threads,
         comments.file,
+        comments.me,
         width,
         comments.diff_hash,
         theme,
@@ -380,6 +381,9 @@ pub struct CommentLayer<'a> {
     pub threads: Vec<(Anchor, Vec<&'a Comment>)>,
     /// The file's tree path, for labelling a thread whose anchor has vanished.
     pub file: &'a str,
+    /// The name this window writes its own comments under, so a note the reader
+    /// left is colored apart from one an agent did.
+    pub me: &'a str,
     /// `review::file_hash` of the file's current diff, for staleness marking.
     pub diff_hash: u128,
     /// Bumped whenever the comment store changes. A cached render built at an
@@ -393,6 +397,7 @@ impl CommentLayer<'_> {
         Self {
             threads: Vec::new(),
             file: "",
+            me: "",
             diff_hash: 0,
             rev: 0,
         }
