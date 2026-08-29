@@ -30,19 +30,6 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
-    /// Watch for changes and refresh automatically. The diff is produced by
-    /// --watch-cmd (stdin is ignored in this mode).
-    #[arg(short = 'w', long)]
-    pub watch: bool,
-
-    /// Command that produces the diff in watch mode [default: "git diff"].
-    #[arg(long, value_name = "CMD")]
-    pub watch_cmd: Option<String>,
-
-    /// Seconds between periodic watch refreshes [default: 2].
-    #[arg(long, value_name = "SECS")]
-    pub watch_interval: Option<f64>,
-
     /// On a bare launch (no piped diff), which diff to show: all (uncommitted) |
     /// committed (branch vs base) | staged | unstaged. Omit for the adaptive
     /// default — uncommitted changes, or branch-vs-base when the tree is clean.

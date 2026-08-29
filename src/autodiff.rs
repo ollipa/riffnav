@@ -1,6 +1,5 @@
-//! Auto-diff mode: when riffnav is launched bare (no piped diff, not watch mode),
-//! produce a diff straight from the current git repository instead of reading
-//! stdin.
+//! Auto-diff mode: when riffnav is launched bare (no piped diff), produce a diff
+//! straight from the current git repository instead of reading stdin.
 //!
 //! The diff is one of several "views" of the branch / working tree, modeled by
 //! [`DiffSource`]. At startup the source is chosen adaptively by
@@ -11,8 +10,8 @@
 //!
 //! `git diff` never reports untracked files, so the working-tree views fold them
 //! in explicitly (see [`untracked_diff`]) — otherwise a brand-new file would be
-//! invisible until staged. Piped-stdin and `--watch` launches never reach this
-//! module; bare launch is the only new entry path.
+//! invisible until staged. A piped-stdin launch never reaches this module; bare
+//! launch is the only new entry path.
 
 use std::process::Command;
 

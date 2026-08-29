@@ -75,7 +75,7 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `y` | Copy the selected file's path |
 | `v` / `V` | Mark the file viewed / jump to the next unviewed file |
 | `d` | Cycle the diff source — uncommitted → staged → unstaged → branch-vs-base (only on a [bare launch](#run-without-a-piped-diff)) |
-| `r` | Re-read the diff, picking up changes made since (bare launch or watch mode) |
+| `r` | Re-read the diff, picking up changes made since (only on a [bare launch](#run-without-a-piped-diff)) |
 | `o` | Open the selected file in `$EDITOR` |
 | `c` | [Comment](#review-comments) on the cursor's line, or reply when it's inside a thread |
 | `x` | Delete the comment under the cursor, and its replies |
@@ -187,7 +187,7 @@ sliding onto a different line.
 
 ## Run without a piped diff
 
-Launch `riffnav` bare — no diff on stdin, not watch mode — inside a git repo and
+Launch `riffnav` bare — no diff on stdin — inside a git repo and
 it diffs the repo for you. By default it shows your **uncommitted** changes
 (staged, unstaged, and untracked files); when the working tree is clean it falls
 back to what your **branch adds over its base** (`git diff <base>...HEAD`, like a
@@ -213,25 +213,8 @@ picking whichever branched off your current branch more recently — so commits
 you already merged into a local `main` aren't counted as your branch's work. Set
 it explicitly with `--base <ref>` or the `base_branch` config key.
 Choose the starting view with `--diff <all|committed|staged|unstaged>` or the
-`diff_source` config key. Piping a diff in (or `--watch`) behaves exactly as
-before — the bare launch is just an extra entry point.
-
-## Watch mode
-
-`-w` / `--watch` keeps riffnav open and refreshes when your working tree changes —
-handy on a second monitor while you edit.
-
-```sh
-riffnav --watch                       # re-runs `git diff` on change
-riffnav --watch --watch-cmd "git diff --staged"
-riffnav --watch --watch-interval 1    # also poll every second
-```
-
-In watch mode the diff is produced by `--watch-cmd` (default `git diff`), not
-stdin. Changes are detected by a filesystem watcher (debounced) plus the polling
-interval as a safety net; the view only rebuilds when the diff actually changes,
-and your selected file is preserved across refreshes. `r` runs the command
-immediately, for a change the watcher can't see.
+`diff_source` config key. Piping a diff in behaves exactly as before — the bare
+launch is just an extra entry point.
 
 ## herdr integration
 

@@ -26,7 +26,6 @@ use crate::review::ReviewStore;
 use crate::session::Session;
 use crate::theme::DiffTheme;
 use crate::tree::{self, Node, Row, RowKind};
-use crate::watch::Watch;
 
 const MIN_DIFF_WIDTH: u16 = 20;
 const HALF_PAGE: i32 = 15;
@@ -207,9 +206,8 @@ pub struct App {
     last_width: u16,
     quit: bool,
     pending_editor: Option<String>,
-    watch: Option<Watch>,
     /// Auto-diff state when launched bare (no piped diff): the active git-derived
-    /// source and the base it can compare against. `None` for a piped/watch diff.
+    /// source and the base it can compare against. `None` for a piped diff.
     autodiff: Option<AutoDiff>,
     herdr: Option<Herdr>,
     /// The detected source-code forge (e.g. GitHub), enabling the `W` web-diff
@@ -288,7 +286,6 @@ impl App {
             last_width: 0,
             quit: false,
             pending_editor: None,
-            watch: None,
             autodiff: None,
             herdr: None,
             forge: None,
@@ -296,21 +293,6 @@ impl App {
             zoomed: false,
             status_deadline: None,
         }
-    }
-
-    /// Turn on watch mode: refresh the diff when the working tree changes.
-    pub fn enable_watch(
-        &mut self,
-        cmd: String,
-        interval: Duration,
-        initial_diff: String,
-    ) -> Result<()> {
-        self.watch = Some(Watch::new(cmd, interval, initial_diff)?);
-        Ok(())
-    }
-
-    pub fn is_watching(&self) -> bool {
-        self.watch.is_some()
     }
 
     /// Enter auto-diff mode (bare launch): record which git-derived source is
@@ -321,7 +303,7 @@ impl App {
     }
 
     /// The active auto-diff source's label (e.g. "all uncommitted"), or `None`
-    /// when the diff came from stdin or a watch command.
+    /// when the diff came from stdin.
     pub fn autodiff_label(&self) -> Option<&'static str> {
         self.autodiff.as_ref().map(|a| a.source.label())
     }
@@ -360,26 +342,20 @@ impl App {
     }
 
     /// Whether there's a diff source that can be re-read, which is what makes the
-    /// `r` refresh key worth binding: a git-derived bare launch, or watch mode's
-    /// command. A diff piped in on stdin can only be read once.
+    /// `r` refresh key worth binding: a git-derived bare launch. A diff piped in
+    /// on stdin can only be read once.
     pub fn can_refresh(&self) -> bool {
-        self.autodiff.is_some() || self.watch.is_some()
+        self.autodiff.is_some()
     }
 
     /// The `r` key: re-run the diff and reload it, so work done since launch
-    /// shows up without restarting. In watch mode this forces the command now
-    /// instead of waiting on the debounce or the interval.
+    /// shows up without restarting.
     fn refresh_diff(&mut self) {
-        let loaded = if let Some(auto) = &self.autodiff {
-            let (source, base) = (auto.source, auto.base.clone());
-            // The immutable borrow of `self.autodiff` ends here (source/base are
-            // owned), freeing `self` for the mutable reload below.
-            crate::autodiff::load(source, base.as_deref())
-        } else if let Some(watch) = self.watch.as_mut() {
-            watch.reload_now()
-        } else {
-            return;
-        };
+        let Some(auto) = &self.autodiff else { return };
+        let (source, base) = (auto.source, auto.base.clone());
+        // The immutable borrow of `self.autodiff` ends here (source/base are
+        // owned), freeing `self` for the mutable reload below.
+        let loaded = crate::autodiff::load(source, base.as_deref());
         match loaded {
             Ok(text) => self.reload_in_place(crate::diff::parse(&text)),
             // `{e:#}` includes the command's own message.
@@ -488,11 +464,7 @@ impl App {
         if !self.comments_on {
             return;
         }
-        let source = self.autodiff_label().unwrap_or(if self.watch.is_some() {
-            "watch"
-        } else {
-            "stdin"
-        });
+        let source = self.autodiff_label().unwrap_or("stdin");
         let base = self.autodiff.as_ref().and_then(|a| a.base.clone());
         Session::new(&self.files, source, base).save();
     }
@@ -809,22 +781,18 @@ impl App {
             terminal.draw(|frame| crate::ui::draw(frame, self, diff_width))?;
             let last_draw = Instant::now();
 
-            if self.watch.is_some() {
-                self.watch_tick()?;
-            } else {
-                self.wait_for_event()?;
-                // Cap the redraw rate: keep applying buffered input (so scroll
-                // distance is preserved) until this frame's budget elapses or the
-                // input goes quiet, then loop back to a single redraw. Without
-                // this a fast wheel triggers a full-screen repaint per event and
-                // the terminal can't keep up. Quitting/editor break out at once.
-                while !self.quit && self.pending_editor.is_none() {
-                    let remaining = FRAME_MIN.saturating_sub(last_draw.elapsed());
-                    if remaining.is_zero() || !event::poll(remaining)? {
-                        break;
-                    }
-                    self.handle_event()?;
+            self.wait_for_event()?;
+            // Cap the redraw rate: keep applying buffered input (so scroll
+            // distance is preserved) until this frame's budget elapses or the
+            // input goes quiet, then loop back to a single redraw. Without this a
+            // fast wheel triggers a full-screen repaint per event and the
+            // terminal can't keep up. Quitting/editor break out at once.
+            while !self.quit && self.pending_editor.is_none() {
+                let remaining = FRAME_MIN.saturating_sub(last_draw.elapsed());
+                if remaining.is_zero() || !event::poll(remaining)? {
+                    break;
                 }
+                self.handle_event()?;
             }
 
             // Suspending the TUI to run an editor needs the owned terminal.
@@ -840,8 +808,7 @@ impl App {
         Ok(())
     }
 
-    /// Interactive (non-watch) input wait. Normally blocks for the next event,
-    /// but bounds the wait when something needs servicing without a keypress: a
+    /// Input wait. Normally blocks for the next event, but bounds the wait when something needs servicing without a keypress: a
     /// timed status that must expire, or an in-flight GitHub sync whose result
     /// should be surfaced. Both are handled after the wait returns.
     fn wait_for_event(&mut self) -> Result<()> {
@@ -885,28 +852,8 @@ impl App {
         }
     }
 
-    /// One watch-mode iteration: wait briefly for input, then service any due
-    /// reload. The bounded wait keeps filesystem changes responsive even when no
-    /// key is pressed.
-    fn watch_tick(&mut self) -> Result<()> {
-        let timeout = self.watch.as_ref().expect("watch present").poll_timeout();
-        if event::poll(timeout)? {
-            self.handle_event()?;
-        }
-        self.expire_status();
-        match self.watch.as_mut().expect("watch present").poll_reload() {
-            Some(Ok(text)) => {
-                let files = crate::diff::parse(&text);
-                self.reload_files(files);
-            }
-            Some(Err(e)) => self.status = Some(format!("watch error: {e}")),
-            None => {}
-        }
-        Ok(())
-    }
-
-    /// Swap in a freshly parsed file set (a watch refresh), rebuilding the tree
-    /// while preserving the selected file by path where it still exists.
+    /// Swap in a freshly parsed file set, rebuilding the tree while preserving
+    /// the selected file by path where it still exists.
     fn reload_files(&mut self, files: Vec<FileDiff>) {
         let prev_path = self
             .selected_file()

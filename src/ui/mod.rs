@@ -116,9 +116,6 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(Color::Yellow),
         ));
     }
-    if app.is_watching() {
-        spans.push(Span::styled("   ● watch", Style::new().fg(Color::Green)));
-    }
     if app.in_herdr() {
         spans.push(Span::styled(
             "   ⧉ herdr",
