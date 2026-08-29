@@ -252,10 +252,10 @@ fn composer_hint(width: u16) -> &'static str {
     .unwrap_or("")
 }
 
-/// The note being typed, as a bordered field pinned to the line it will hang on:
-/// below that line where there's room, otherwise above it, so the code under
-/// discussion stays on screen while it's written. A no-op when nothing is being
-/// composed.
+/// The note being typed, as a bordered field pinned to what it will hang on:
+/// below it where there's room, otherwise above, so the code — or, for a reply,
+/// the thread — under discussion stays on screen while it's written. A no-op
+/// when nothing is being composed.
 fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
     let Some(composer) = app.composer() else {
         return;
@@ -273,7 +273,7 @@ fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
     // scrolls inside the field.
     let max_body = area.height.saturating_sub(2).min(COMPOSER_MAX_ROWS);
     let height = (layout.rows.len() as u16).clamp(1, max_body) + 2;
-    let y = match app.cursor_rows() {
+    let y = match app.composer_rows() {
         Some((_, bottom)) if bottom + height <= area.height => area.y + bottom,
         Some((top, _)) if top >= height => area.y + top - height,
         // The cursor is off-screen, or hemmed in on both sides: fall back to the
@@ -680,6 +680,38 @@ mod tests {
         let out = render(&mut app, width, height);
         assert!(!out.contains("save · Esc"), "the field closed\n{out}");
         assert_eq!(app.comment_total(), 1, "the note was stored\n{out}");
+    }
+
+    /// A reply's field opens under the *whole* thread, not under the one row the
+    /// cursor happens to sit on: pinned to that row it would open through the
+    /// middle of the box, hiding the very note being replied to.
+    #[test]
+    fn a_replys_field_opens_below_the_thread_it_answers() {
+        use ratatui::crossterm::event::KeyCode;
+
+        let (mut app, width, height) = app_with_comments(&[(2, "claude", "why the retry here?")]);
+        render(&mut app, width, height);
+        app.jump_comment(true); // onto the thread, where `c` replies
+        app.press_for_test(KeyCode::Char('c'), false);
+        let out = render(&mut app, width, height);
+        let rows: Vec<&str> = out.lines().collect();
+        let field = rows
+            .iter()
+            .position(|r| r.contains("Reply") || r.contains("Comment on"))
+            .expect("the field is on screen");
+
+        assert!(
+            rows[..field]
+                .iter()
+                .any(|r| r.contains("why the retry here?")),
+            "the note being replied to stays visible above the field\n{out}"
+        );
+        assert!(
+            !rows[field..]
+                .iter()
+                .any(|r| r.contains("why the retry here?")),
+            "and the field doesn't cut through the box\n{out}"
+        );
     }
 
     /// With no room below the anchored line, the field opens above it instead —

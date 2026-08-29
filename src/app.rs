@@ -1214,14 +1214,23 @@ impl App {
         }
     }
 
-    /// The rows the line cursor occupies inside the diff pane — `(top, bottom)`,
-    /// bottom exclusive, counted from the pane's top edge — or `None` when it's
-    /// off-screen or nothing is rendered yet. Lets the composer open beside the
-    /// line it will hang on.
-    pub fn cursor_rows(&self) -> Option<(u16, u16)> {
+    /// The rows the composer must open clear of, inside the diff pane —
+    /// `(top, bottom)`, bottom exclusive, counted from the pane's top edge — or
+    /// `None` when they're off-screen or nothing is rendered yet.
+    ///
+    /// Normally that's the line the note will hang on. Inside a thread — where
+    /// `c` writes a reply — it's the whole box instead: the reply belongs under
+    /// the comment it answers, and a field pinned to the one row the cursor sits
+    /// on would open through the middle of it, hiding the very note being
+    /// replied to.
+    pub fn composer_rows(&self) -> Option<(u16, u16)> {
         let render = self.current_render()?;
-        let top = render.row_of(self.diff_cursor);
-        let bottom = render.row_of(self.diff_cursor + 1).max(top + 1);
+        let (first, past) = match self.block_at_cursor() {
+            Some(block) => (block.start, block.start + block.len),
+            None => (self.diff_cursor, self.diff_cursor + 1),
+        };
+        let top = render.row_of(first);
+        let bottom = render.row_of(past).max(top + 1);
         let top = top.checked_sub(self.diff_scroll)?;
         let bottom = bottom.saturating_sub(self.diff_scroll);
         (top < self.diff_height).then_some((top, bottom))
