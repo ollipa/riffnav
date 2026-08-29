@@ -228,6 +228,10 @@ pub struct App {
     /// Identity of the render `diff_cursor` indexes into. When it changes, the
     /// index is stale and gets re-resolved from `cursor_anchor`.
     cursor_token: Option<(usize, u16, bool, DiffTheme, u64)>,
+    /// A `]`/`[` jump that crossed into another file, waiting for that file to be
+    /// rendered before the cursor can be put on the comment it was aimed at:
+    /// `true` for its first comment, `false` for its last.
+    comment_landing: Option<bool>,
     /// The comment being typed, if any. While it's open it owns every keypress.
     composer: Option<Composer>,
     /// A comment handed off from the composer to `$EDITOR` (`Ctrl-O`), run once
@@ -312,6 +316,7 @@ impl App {
             diff_cursor: 0,
             cursor_anchor: None,
             cursor_token: None,
+            comment_landing: None,
             composer: None,
             pending_comment: None,
             matcher: SkimMatcherV2::default(),
@@ -815,6 +820,8 @@ impl App {
             // The render may have changed shape (new comments, new theme, new
             // width), so put the cursor back on the line it was on.
             self.resync_cursor();
+            // A `]`/`[` jump into this file has been waiting for that render.
+            self.land_on_comment();
 
             terminal.draw(|frame| crate::ui::draw(frame, self, diff_width))?;
             let last_draw = Instant::now();
@@ -1224,30 +1231,99 @@ impl App {
             .find(|b| cursor >= b.start && cursor < b.start + b.len)
     }
 
-    /// Jump the cursor to the next or previous comment in this file, wrapping
-    /// around. Reports when there's nothing to jump to.
+    /// Jump the cursor to the next or previous comment, walking off the end of
+    /// this file into the next commented one and wrapping around the whole diff,
+    /// so `]` held down visits every note in the review exactly once per lap.
+    /// Reports when there's nothing to jump to.
     pub(crate) fn jump_comment(&mut self, forward: bool) {
-        let Some(render) = self.current_render() else {
-            return;
-        };
-        let starts: Vec<usize> = render.comment_rows.iter().map(|b| b.start).collect();
-        if starts.is_empty() {
-            self.set_status("No comments in this file");
-            return;
-        }
+        let starts: Vec<usize> = self
+            .current_render()
+            .map(|r| r.comment_rows.iter().map(|b| b.start).collect())
+            .unwrap_or_default();
         let cursor = self.diff_cursor;
-        let target = if forward {
+        let here = if forward {
             starts.iter().find(|&&s| s > cursor).copied()
         } else {
             starts.iter().rev().find(|&&s| s < cursor).copied()
         };
-        // Wrap: past the last comment go back to the first, and vice versa.
-        let target = target.unwrap_or(if forward {
-            starts[0]
+        if let Some(target) = here {
+            self.set_cursor(target);
+            return;
+        }
+        // Off the end of this file: carry on into the next file that has notes.
+        if self.jump_commented_file(forward) {
+            return;
+        }
+        // Nowhere else to go — this file holds every comment there is, so wrap
+        // inside it, or say there are none at all.
+        let wrapped = if forward {
+            starts.first()
         } else {
-            starts[starts.len() - 1]
-        });
-        self.set_cursor(target);
+            starts.last()
+        };
+        match wrapped {
+            Some(&target) => self.set_cursor(target),
+            None => self.set_status("No comments in this diff"),
+        }
+    }
+
+    /// Select the next/previous *other* file carrying comments, in tree order and
+    /// wrapping around, and arm the cursor to land on the comment nearest the
+    /// edge we entered from. Returns whether such a file was found.
+    ///
+    /// The landing is deferred because the target file isn't rendered yet: the
+    /// event loop renders whatever is selected, so the row a comment occupies is
+    /// only known on the next pass through it.
+    fn jump_commented_file(&mut self, forward: bool) -> bool {
+        // Tree order with nothing folded, so a note inside a collapsed folder is
+        // still reachable; `reveal_file` opens the folder on the way in.
+        let order: Vec<usize> = tree::flatten(&self.nodes, &HashSet::new())
+            .iter()
+            .filter_map(|row| match row.kind {
+                RowKind::File { diff_index } => Some(diff_index),
+                RowKind::Dir { .. } => None,
+            })
+            .collect();
+        let n = order.len();
+        if n == 0 {
+            return false;
+        }
+        let here = self.selected_file();
+        let from = here
+            .and_then(|idx| order.iter().position(|&d| d == idx))
+            // A folder row is selected, so there's no file to start from: sweep
+            // the whole list from its far end instead.
+            .unwrap_or(if forward { n - 1 } else { 0 });
+        // Every file but the one we're on, in the direction of travel.
+        let target = (1..=n)
+            .map(|off| order[(if forward { from + off } else { from + n - off }) % n])
+            .find(|&idx| Some(idx) != here && self.comment_count(idx) > 0);
+        let Some(idx) = target else {
+            return false;
+        };
+        self.reveal_file(idx);
+        self.comment_landing = Some(forward);
+        true
+    }
+
+    /// Finish a `]`/`[` jump that crossed into another file, once the event loop
+    /// has rendered it: the cursor goes on that file's first comment when we came
+    /// in going forward, its last when going back.
+    fn land_on_comment(&mut self) {
+        let Some(first) = self.comment_landing.take() else {
+            return;
+        };
+        let Some(render) = self.current_render() else {
+            return;
+        };
+        let block = if first {
+            render.comment_rows.first()
+        } else {
+            render.comment_rows.last()
+        };
+        if let Some(start) = block.map(|b| b.start) {
+            self.set_cursor(start);
+        }
     }
 
     /// Start composing a note on whatever the cursor is over: a comment on the
@@ -2601,6 +2677,119 @@ mod tests {
         app.resync_cursor();
         assert_eq!(app.diff_cursor, 4, "the cursor followed diff line 3 down");
         assert_eq!(app.cursor_anchor.map(|a| a.line), Some(3));
+    }
+
+    /// Two files, one note each, both rendered — the state `]` crosses a file
+    /// boundary from. The event loop renders only what's selected, so each file
+    /// is seeded while it is.
+    fn app_with_a_note_in_two_files() -> App {
+        let mut app = app_with(vec![file_with_raw("a.rs"), file_with_raw("b.rs")]);
+        let mut store = CommentStore::disabled();
+        for (path, line) in [("a.rs", 1u32), ("b.rs", 2)] {
+            store.add(Comment {
+                id: String::new(),
+                file: path.to_string(),
+                side: crate::comment::Side::New,
+                line,
+                body: format!("a note in {path}"),
+                author: "tester".to_string(),
+                created: crate::state::now_unix(),
+                reply_to: None,
+                diff_hash: None,
+            });
+        }
+        app.install_comments_for_test(store);
+        app.focus = Focus::Diff;
+        app.diff_height = 20;
+
+        app.select(1); // b.rs, so its render exists when the jump arrives
+        app.seed_render_for_test(60, seed_text());
+        app.select(0);
+        app.seed_render_for_test(60, seed_text());
+        app.resync_cursor();
+        app
+    }
+
+    /// One pass through the event loop: render, resync, then land a pending
+    /// cross-file jump. The render is already seeded, so only the last two steps
+    /// are left to do.
+    fn settle(app: &mut App) {
+        app.resync_cursor();
+        app.land_on_comment();
+    }
+
+    /// `]` past the last note in a file carries on into the next file that has
+    /// one, so a review is walked end to end rather than circling one file.
+    #[test]
+    fn jumping_walks_off_the_end_of_a_file_into_the_next_commented_one() {
+        let mut app = app_with_a_note_in_two_files();
+
+        app.jump_comment(true);
+        assert_eq!(app.selected_file(), Some(0), "the note in a.rs comes first");
+        assert_eq!(app.diff_cursor, 1, "the block under diff line 1");
+
+        app.jump_comment(true);
+        settle(&mut app);
+        assert_eq!(app.selected_file(), Some(1), "`]` crossed into b.rs");
+        assert_eq!(app.diff_cursor, 2, "onto its note, not the top of the file");
+
+        // Past the last note in the last file, the lap starts over.
+        app.jump_comment(true);
+        settle(&mut app);
+        assert_eq!(app.selected_file(), Some(0));
+        assert_eq!(app.diff_cursor, 1);
+
+        // And `[` off the top of a file lands on the *last* note in the one before
+        // it, which here is b.rs again.
+        app.jump_comment(false);
+        settle(&mut app);
+        assert_eq!(app.selected_file(), Some(1));
+        assert_eq!(app.diff_cursor, 2);
+    }
+
+    /// A folded folder hides its files from the tree rows, but the notes inside
+    /// it are still part of the review, so the jump opens the folder rather than
+    /// stepping over them.
+    #[test]
+    fn jumping_reaches_a_note_inside_a_collapsed_folder() {
+        let mut app = app_with(vec![file_with_raw("a.rs"), file_with_raw("src/b.rs")]);
+        let mut store = CommentStore::disabled();
+        store.add(Comment {
+            id: String::new(),
+            file: "src/b.rs".to_string(),
+            side: crate::comment::Side::New,
+            line: 2,
+            body: "behind a fold".to_string(),
+            author: "tester".to_string(),
+            created: crate::state::now_unix(),
+            reply_to: None,
+            diff_hash: None,
+        });
+        app.install_comments_for_test(store);
+        app.collapsed.insert("src".to_string());
+        app.rows = tree::flatten(&app.nodes, &app.collapsed);
+        assert_eq!(app.selected_file(), Some(0), "a.rs is open, src is folded");
+
+        app.jump_comment(true);
+        assert_eq!(app.selected_file(), Some(1), "the fold was opened");
+        assert_eq!(app.comment_landing, Some(true), "and the landing is armed");
+    }
+
+    /// With every note in the file that's open there's nowhere to cross to, so
+    /// the jump still wraps where it always did.
+    #[test]
+    fn jumping_wraps_inside_the_file_when_no_other_file_has_notes() {
+        let mut app = app_with_a_note_in_two_files();
+        app.comments.clear(Some("b.rs"));
+        app.bump_comments();
+        app.seed_render_for_test(60, seed_text());
+        app.resync_cursor();
+
+        app.jump_comment(true);
+        assert_eq!(app.diff_cursor, 1);
+        app.jump_comment(true);
+        assert_eq!(app.selected_file(), Some(0), "stayed in a.rs");
+        assert_eq!(app.diff_cursor, 1, "wrapped back onto the only note");
     }
 
     /// Comments off means no line cursor, so j/k must scroll the pane exactly as

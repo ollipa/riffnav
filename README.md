@@ -92,7 +92,7 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `o` | Open the selected file in `$EDITOR` |
 | `c` | [Comment](#review-comments) on the cursor's line, or reply when it's inside a thread |
 | `x` | Delete the comment under the cursor, and its replies |
-| `]` / `[` | Jump to the next / previous comment |
+| `]` / `[` | Jump to the next / previous comment, across files |
 | `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
 | `?` | Toggle the help overlay |
 | `q` / `Esc` / `Ctrl-c` | Quit |
@@ -158,6 +158,10 @@ replies to the comment you're on instead; there's no separate reply key. `x`
 deletes the comment under the cursor along with the replies beneath it. Saved
 notes are drawn as a box under the line they annotate, with each reply on a
 divider inside it. Files carrying comments show a `💬` count in the tree.
+
+`]` / `[` walk every note in the diff, not just the open file's: past the last
+one they carry on into the next file that has comments — opening its folder if
+the tree had it collapsed — and lap back to the start at the end.
 
 Your own name — `comment_author`, or `$USER` — is drawn in the box's own color;
 every other author gets one picked from a palette by hashing the name, so an
