@@ -211,16 +211,27 @@ mod tests {
         assert_eq!(d.base_branch, None);
         assert_eq!(d.diff_source, None);
 
-        let c = from_toml("base_branch = \"develop\"\ndiff_source = \"committed\"").unwrap();
+        let c = from_toml("base_branch = \"develop\"\ndiff_source = \"vs-base\"").unwrap();
         assert_eq!(c.base_branch.as_deref(), Some("develop"));
-        assert_eq!(c.diff_source, Some(DiffSource::Committed));
+        assert_eq!(c.diff_source, Some(DiffSource::VsBase));
 
-        // The friendly "all" spelling maps to the uncommitted view.
+        // The multi-word views are spelled in kebab-case, matching their flags.
         assert_eq!(
             from_toml("diff_source = \"all\"").unwrap().diff_source,
+            Some(DiffSource::All)
+        );
+        assert_eq!(
+            from_toml("diff_source = \"all-uncommitted\"")
+                .unwrap()
+                .diff_source,
             Some(DiffSource::AllUncommitted)
         );
         assert!(from_toml("diff_source = \"nonsense\"").is_err());
+        // The pre-1.1 spellings are gone rather than quietly remapped: "all" now
+        // means a wider view than it used to, so a stale config that still parsed
+        // would show a diff its author never chose.
+        assert!(from_toml("diff_source = \"committed\"").is_err());
+        assert!(from_toml("diff_source = \"uncommitted\"").is_err());
     }
 
     #[test]

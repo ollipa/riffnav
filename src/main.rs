@@ -43,6 +43,9 @@ struct Input {
 /// The flag returned alongside says whether the view was riffnav's own default
 /// rather than the user's choice, which is what licenses the empty-diff fallback
 /// in [`diff_input`].
+///
+/// The base is resolved for every view, not just the base-relative ones, so `d`
+/// and the number keys can reach those without re-detecting it mid-session.
 fn diff_command(args: cli::DiffArgs, config: &config::Config) -> (GitDiff, bool) {
     let configured = args.args.is_empty().then_some(config.diff_source).flatten();
     let chosen = args.view().or(configured);
@@ -64,16 +67,20 @@ fn diff_command(args: cli::DiffArgs, config: &config::Config) -> (GitDiff, bool)
 /// A bare `riffnav diff` means `git diff`: unstaged work. On a clean tree that
 /// is nothing at all, and printing "no changes to display" in a repo whose
 /// branch is full of commits is unhelpful — what the user wants to read there is
-/// what the branch adds over its base, the same diff `riffnav diff --committed`
-/// shows. So an *empty* default steps on: to the staged work if there is any,
-/// then to branch-vs-base. A view the user named is left alone, empty or not:
-/// `riffnav diff --unstaged` on a clean tree correctly shows nothing.
+/// what the branch adds over its base, the same diff `riffnav diff --vs-base`
+/// shows. So an *empty* default steps on to the narrowest view that shows
+/// everything there is (see [`autodiff::fallback_view`]). A view the user named
+/// is left alone, empty or not: `riffnav diff --unstaged` on a clean tree
+/// correctly shows nothing.
 fn diff_input(args: cli::DiffArgs, config: &config::Config) -> Result<Input> {
+    if let Some((old, new)) = args.renamed_flag() {
+        anyhow::bail!("{old} was renamed to {new} in riffnav 1.1");
+    }
     let (git, defaulted) = diff_command(args, config);
     let text = git.load()?;
     if defaulted
         && text.trim().is_empty()
-        && let Some((source, found)) = autodiff::fallback_view(git.base.as_deref())?
+        && let Some((source, found)) = autodiff::fallback_view(git.base.as_deref())
     {
         // Re-made rather than patched, so the header names the view on screen
         // and `r` re-runs the command that produced it.
@@ -240,7 +247,7 @@ mod tests {
         };
         assert!(defaulted("riffnav diff", &bare));
         assert!(!defaulted("riffnav diff --unstaged", &bare));
-        assert!(!defaulted("riffnav diff --committed", &bare));
+        assert!(!defaulted("riffnav diff --vs-base", &bare));
         assert!(!defaulted("riffnav diff HEAD~1", &bare));
 
         let configured = config::Config {

@@ -67,8 +67,8 @@ A reply is the exception: it takes no anchor at all. See [Replying](#replying).
 **Editing files changes the diff.** Comment, fix, reply is the normal loop, and
 each fix moves the hunks — so line numbers from an earlier `context` run go
 stale, and the diff riffnav is showing can flip on its own (a clean tree shows
-the branch against its base; a dirty one shows all uncommitted work). Re-run
-`riffnav comment context` after you touch the code.
+the branch against its base; the first edit widens that to everything since the
+branch forked). Re-run `riffnav comment context` after you touch the code.
 
 **If an anchor is rejected, stop and report it.** Never hunt for a nearby line
 that the CLI will accept. The error means the line you meant is not in the diff

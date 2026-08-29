@@ -72,13 +72,21 @@ pub enum Command {
 /// wants to hand to `git diff`.
 #[derive(Args, Debug)]
 pub struct DiffArgs {
-    /// All uncommitted work: staged and unstaged vs HEAD, plus untracked files
+    /// Everything since the branch forked: its commits plus all uncommitted work
+    ///
+    /// Committed, staged, unstaged and untracked, measured against the fork point
+    /// — the whole of what the branch has done, whether or not you've committed
+    /// it yet.
     #[arg(long, group = "view")]
     pub all: bool,
 
+    /// All uncommitted work: staged and unstaged vs HEAD, plus untracked files
+    #[arg(long, group = "view")]
+    pub all_uncommitted: bool,
+
     /// What the branch adds over its base (`<base>...HEAD`) — the PR view
     #[arg(long, group = "view")]
-    pub committed: bool,
+    pub vs_base: bool,
 
     /// Staged changes only
     #[arg(long, group = "view")]
@@ -91,12 +99,19 @@ pub struct DiffArgs {
     #[arg(long, group = "view")]
     pub unstaged: bool,
 
-    /// Base branch for --committed [default: detected]
+    /// Base branch for --all and --vs-base [default: detected]
     ///
     /// Detection picks origin/HEAD or a local main/master, whichever forks off
     /// the current branch later.
     #[arg(long, value_name = "REF")]
     pub base: Option<String>,
+
+    /// The pre-1.1 name for `--vs-base`. Declared only so it can be turned into
+    /// an error that names its replacement: without it the flag would fall
+    /// through to git as a pass-through argument, and the user would get
+    /// `error: invalid option: --committed` from a program they didn't call.
+    #[arg(long, hide = true)]
+    pub committed: bool,
 
     /// Arguments passed straight through to `git diff`
     ///
@@ -115,13 +130,21 @@ impl DiffArgs {
     /// The view the flags select, or `None` to fall back to the `diff_source`
     /// config key (and then to unstaged, matching `git diff`).
     pub fn view(&self) -> Option<DiffSource> {
-        match (self.all, self.committed, self.staged, self.unstaged) {
-            (true, _, _, _) => Some(DiffSource::AllUncommitted),
-            (_, true, _, _) => Some(DiffSource::Committed),
-            (_, _, true, _) => Some(DiffSource::Staged),
-            (_, _, _, true) => Some(DiffSource::Unstaged),
-            _ => None,
-        }
+        [
+            (self.all, DiffSource::All),
+            (self.all_uncommitted, DiffSource::AllUncommitted),
+            (self.staged, DiffSource::Staged),
+            (self.unstaged, DiffSource::Unstaged),
+            (self.vs_base, DiffSource::VsBase),
+        ]
+        .into_iter()
+        .find_map(|(given, source)| given.then_some(source))
+    }
+
+    /// The renamed flag the user typed, if any, and what to type instead. `--all`
+    /// isn't here: it still parses, having been reused for the wider view.
+    pub fn renamed_flag(&self) -> Option<(&'static str, &'static str)> {
+        self.committed.then_some(("--committed", "--vs-base"))
     }
 }
 
@@ -277,11 +300,12 @@ mod tests {
             Some(Command::Diff(args)) => args.view(),
             _ => panic!("expected a diff command"),
         };
-        assert_eq!(view("riffnav diff --all"), Some(DiffSource::AllUncommitted));
+        assert_eq!(view("riffnav diff --all"), Some(DiffSource::All));
         assert_eq!(
-            view("riffnav diff --committed"),
-            Some(DiffSource::Committed)
+            view("riffnav diff --all-uncommitted"),
+            Some(DiffSource::AllUncommitted)
         );
+        assert_eq!(view("riffnav diff --vs-base"), Some(DiffSource::VsBase));
         assert_eq!(view("riffnav diff --staged"), Some(DiffSource::Staged));
         assert_eq!(view("riffnav diff --unstaged"), Some(DiffSource::Unstaged));
         // No flag defers to the config file, and then to unstaged.

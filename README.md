@@ -37,7 +37,7 @@ Use `riffnav diff` and `riffnav show` wherever you'd type `git diff` and
 
 ```sh
 riffnav diff                  # unstaged changes, like `git diff`
-                              # (branch vs base when the tree is clean)
+                              # (steps on to a fuller view when that's empty)
 riffnav diff --staged         # staged changes
 riffnav diff HEAD~3           # any revision(s) git accepts
 riffnav diff -- src/          # scoped to a pathspec
@@ -88,7 +88,8 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `T` | Cycle diff theme (delta → github-dark → github-light) |
 | `y` | Copy the selected file's path |
 | `v` / `V` | Mark the file viewed / jump to the next unviewed file |
-| `d` | Cycle the diff view — uncommitted → staged → unstaged → branch-vs-base (only for a plain [`riffnav diff`](#diff-views)) |
+| `d` | Cycle the diff view — all → all-uncommitted → staged → unstaged → branch-vs-base (only for a plain [`riffnav diff`](#diff-views)) |
+| `1`–`5` | Jump straight to one of those five [views](#diff-views), in that order |
 | `r` | Re-read the diff, picking up changes made since (not for a diff piped in) |
 | `o` | Open the selected file in `$EDITOR` |
 | `c` | [Comment](#review-comments) on the cursor's line, or reply when it's inside a thread |
@@ -118,8 +119,8 @@ open_depth   = 64        # expand folders shallower than this on launch
 review_retention_days = 90 # days to keep "viewed" marks before GC
 review_auto_advance = true # jump to next unviewed file after marking viewed
 review_sync_github = false # push "viewed" marks to the matching GitHub PR (needs `gh`)
-# base_branch = "main"     # base for "branch vs base"; omit to auto-detect
-# diff_source = "all"      # default view for `riffnav diff`: all|committed|staged|unstaged
+# base_branch = "main"     # base for the base-relative views; omit to auto-detect
+# diff_source = "all"      # default view: all|all-uncommitted|staged|unstaged|vs-base
 ```
 
 See [`config.example.toml`](config.example.toml) for the annotated version.
@@ -214,29 +215,41 @@ sliding onto a different line.
 of the other views:
 
 ```sh
-riffnav diff               # unstaged — `git diff`, plus untracked files
-riffnav diff --staged      # staged — `git diff --staged`
-riffnav diff --all         # all uncommitted: staged + unstaged + untracked
-riffnav diff --committed   # branch vs base — `git diff <base>...HEAD`, the PR view
-riffnav diff --base develop --committed   # against a specific base branch
+riffnav diff                    # unstaged — `git diff`, plus untracked files
+riffnav diff --staged           # staged — `git diff --staged`
+riffnav diff --all-uncommitted  # staged + unstaged + untracked, vs HEAD
+riffnav diff --vs-base          # branch vs base — `git diff <base>...HEAD`, the PR view
+riffnav diff --all              # everything since the branch forked: its commits
+                                # plus all of the above
+riffnav diff --base develop --vs-base   # against a specific base branch
 ```
 
-When that default comes back empty — a clean tree, where `git diff` has nothing
-to say — a bare `riffnav diff` steps on to a view that does: your staged work if
-there is any, otherwise branch-vs-base, so opening riffnav on a committed branch
-shows the branch. A view you named yourself is shown as asked, empty or not:
-`riffnav diff --unstaged` on a clean tree correctly reports no changes.
+`--all` is the only view that spans the last commit: it diffs the working tree
+against the point where your branch forked, so the branch's commits and the work
+you haven't committed yet appear together. It's the view to reach for mid-branch,
+when what you want to read is "everything I've done here" and you don't much care
+which side of a commit each piece landed on.
 
-The two working-tree views (`riffnav diff` and `--all`) also list untracked,
-non-ignored files, rendered as fully added — `git diff` omits them by design,
-which would leave a brand-new file invisible until you staged it. That's the one
-way they differ from the git command they shadow.
+When the default comes back empty — a clean tree, where `git diff` has nothing to
+say — a bare `riffnav diff` steps on to the narrowest view that still shows
+everything there is: `--all` when you have both commits and uncommitted work,
+otherwise whichever of the two has anything, so opening riffnav on a committed
+branch shows the branch. A view you named yourself is shown as asked, empty or
+not: `riffnav diff --unstaged` on a clean tree correctly reports no changes.
 
-Press `d` to cycle between those four views without restarting, and `r` to
-re-read the diff — commits, stages, and edits made since you opened riffnav show
-up without losing your place in the file you're reading.
+The three views that reach the working tree (`riffnav diff`, `--all-uncommitted`
+and `--all`) also list untracked, non-ignored files, rendered as fully added —
+`git diff` omits them by design, which would leave a brand-new file invisible
+until you staged it. That's the one way they differ from the git command they
+shadow.
 
-The base branch for `--committed` is auto-detected from `origin/HEAD` and a local
+Press `d` to cycle between the five views without restarting, or `1`–`5` to jump
+straight to one (in the order listed by `?`, widest first: all, all uncommitted,
+staged, unstaged, branch vs base). `r` re-reads the diff — commits, stages, and
+edits made since you opened riffnav show up without losing your place in the file
+you're reading.
+
+The base branch for `--all` and `--vs-base` is auto-detected from `origin/HEAD` and a local
 `main`/`master`, picking whichever branched off your current branch more
 recently — so commits you already merged into a local `main` aren't counted as
 your branch's work. Set it explicitly with `--base <ref>` or the `base_branch`

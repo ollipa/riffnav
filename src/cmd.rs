@@ -282,8 +282,7 @@ fn require_session() -> Result<Session> {
         );
     }
     let base = crate::autodiff::detect_base();
-    let (source, text) = crate::autodiff::load_initial(base.as_deref())
-        .context("deriving the current diff from git")?;
+    let (source, text) = crate::autodiff::load_initial(base.as_deref());
     let files = crate::diff::parse(&text);
     if files.is_empty() {
         bail!("no changes to comment on in this repository");
@@ -387,7 +386,7 @@ fn resolve(
 /// has moved since the existing comments on the file were written.
 ///
 /// The anchor space is a property of the diff on screen, and that flips on its
-/// own — `branch vs base` becomes `all uncommitted` the moment the tree is
+/// own — `branch vs base` becomes `all vs base` the moment the tree is
 /// dirty. Without this the error reads as "you picked a bad line" when the truth
 /// is "the lines you were reading are no longer the ones in force".
 fn target_hint(

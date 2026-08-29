@@ -206,6 +206,10 @@ fn render_help(
     }
     if auto_diff {
         entries.push(("d", "cycle git diff source"));
+        entries.push((
+            "1 - 5",
+            "all vs base / all uncommitted / staged / unstaged / branch vs base",
+        ));
     }
     if has_forge {
         entries.push(("W", "open PR diff in browser"));

@@ -357,24 +357,54 @@ impl App {
         self.git.as_ref().and_then(GitDiff::plain_source).is_some()
     }
 
-    /// Cycle to the next diff view (the `d` key): re-run the matching git command
-    /// and reload the file set. The branch-vs-base view is skipped when no base
-    /// was detected, and a source that yields nothing reloads to an empty set
-    /// with an explanatory status.
+    /// Cycle to the next diff view (the `d` key). Views needing a base branch are
+    /// skipped when none was detected.
     fn cycle_diff_source(&mut self) {
         let Some(git) = &self.git else { return };
         let Some(source) = git.plain_source() else {
             return;
         };
-        let next = source.next(git.base.is_some());
+        self.set_diff_source(source.next(git.base.is_some()));
+    }
+
+    /// Jump straight to the view at 1-based position `n` in the cycle (the number
+    /// keys). Out-of-range digits are inert; a view that needs a base branch when
+    /// none was detected says so rather than silently leaving the screen as it
+    /// was, since nothing else would explain the keypress doing nothing.
+    fn select_diff_source(&mut self, n: usize) {
+        let Some(git) = &self.git else { return };
+        let Some(source) = DiffSource::nth(n) else {
+            return;
+        };
+        if !source.available(git.base.is_some()) {
+            self.set_status(format!("◆ {} · no base branch detected", source.label()));
+            return;
+        }
+        if git.plain_source() == Some(source) {
+            self.set_status(format!("◆ {} · already showing", source.label()));
+            return;
+        }
+        self.set_diff_source(source);
+    }
+
+    /// Switch to `next`: re-run the matching git command and reload the file set.
+    /// A source that yields nothing reloads to an empty set with an explanatory
+    /// status, rather than leaving the previous view's files on screen under the
+    /// new view's name.
+    fn set_diff_source(&mut self, next: DiffSource) {
+        let Some(git) = &self.git else { return };
         let candidate = GitDiff::diff(next, git.base.clone(), vec![]);
         // The immutable borrow of `self.git` ends here (candidate is owned),
         // freeing `self` for the mutable reload below.
         match candidate.load() {
             Ok(text) => {
                 let files = crate::diff::parse(&text);
-                self.reload_files(files);
+                // Before the reload, not after: `reload_files` publishes the
+                // session, and it reads the view's name off `self.git`. Swapped,
+                // the CLI would be told the new file set is the old view's, and
+                // nothing would publish again to correct it.
                 self.git = Some(candidate);
+                self.reload_files(files);
                 let summary = if self.files.is_empty() {
                     format!("◆ {} · no changes", next.label())
                 } else {
@@ -484,12 +514,14 @@ impl App {
 
     /// Whether a viewed mark for the selected file should be pushed to GitHub:
     /// sync is armed AND we're in the branch-vs-base view (the only view that
-    /// mirrors the PR diff). The uncommitted/staged/unstaged views stay local.
+    /// mirrors the PR diff). Every other view stays local — including `all vs
+    /// base`, whose extra files are uncommitted ones the PR has never seen, and
+    /// which GitHub would reject a mark for.
     fn syncs_viewed_marks(&self) -> bool {
         self.review_sync.is_some()
             && matches!(
                 self.git.as_ref().and_then(GitDiff::plain_source),
-                Some(DiffSource::Committed)
+                Some(DiffSource::VsBase)
             )
     }
 
@@ -2019,6 +2051,11 @@ impl App {
             KeyCode::Char('V') => self.jump_unviewed(),
             // Only bound on a bare launch (auto-diff mode); inert otherwise.
             KeyCode::Char('d') if self.can_cycle_source() => self.cycle_diff_source(),
+            // The same views `d` steps through, by their position in that cycle,
+            // for jumping straight to one. A digit past the end is inert.
+            KeyCode::Char(c) if c.is_ascii_digit() && self.can_cycle_source() => {
+                self.select_diff_source(c.to_digit(10).unwrap_or(0) as usize);
+            }
             // Only bound where the diff can be re-read; a piped one can't be.
             KeyCode::Char('r') if self.can_refresh() => self.refresh_diff(),
             // Only bound inside herdr; an inert no-op elsewhere.
@@ -2245,7 +2282,37 @@ mod tests {
     }
 
     #[test]
-    fn syncs_viewed_marks_only_in_committed_view_when_armed() {
+    fn a_number_key_for_an_unreachable_view_says_why() {
+        // Without a detected base the base-relative views can't be produced, so
+        // their digits report that instead of appearing to do nothing. Both of
+        // these stop before any git command runs — the test shells out to
+        // nothing, which is also why it can assert on the status at all.
+        let mut app = app_with(vec![file("a.rs")]);
+        app.enable_git_diff(GitDiff::diff(DiffSource::Unstaged, None, vec![]));
+
+        app.press_for_test(KeyCode::Char('1'), false);
+        assert_eq!(
+            app.status.as_deref(),
+            Some("◆ all vs base · no base branch detected")
+        );
+
+        app.status = None;
+        app.press_for_test(KeyCode::Char('4'), false);
+        assert_eq!(
+            app.status.as_deref(),
+            Some("◆ unstaged · already showing"),
+            "the view already on screen is reloaded by `r`, not by its own digit"
+        );
+
+        // Past the end of the cycle, and `0`: inert, leaving the status alone.
+        app.status = None;
+        app.press_for_test(KeyCode::Char('9'), false);
+        app.press_for_test(KeyCode::Char('0'), false);
+        assert_eq!(app.status, None);
+    }
+
+    #[test]
+    fn syncs_viewed_marks_only_in_the_branch_vs_base_view_when_armed() {
         let mut app = app_with(vec![file("a.rs")]);
         let view = |source| GitDiff::diff(source, Some("origin/main".into()), vec![]);
 
@@ -2258,13 +2325,13 @@ mod tests {
         assert!(!app.syncs_viewed_marks());
 
         // Branch-vs-base view with sync armed: this is the PR view, so it syncs.
-        app.enable_git_diff(view(DiffSource::Committed));
+        app.enable_git_diff(view(DiffSource::VsBase));
         assert!(app.syncs_viewed_marks());
 
         // The same view but with pass-through arguments is no longer guaranteed
         // to be the PR diff (a pathspec would narrow it), so it stays local.
         app.enable_git_diff(GitDiff::diff(
-            DiffSource::Committed,
+            DiffSource::VsBase,
             Some("origin/main".into()),
             vec!["--".into(), "src/".into()],
         ));
