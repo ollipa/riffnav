@@ -74,6 +74,39 @@ fn disable_mouse() {
     write_stdout(MOUSE_OFF);
 }
 
+/// Kitty-style key reporting, asked for on the same schedule as mouse reporting.
+/// The composer saves on `Enter` and breaks the line on `Shift-Enter`, and a
+/// legacy terminal encodes both as a bare carriage return — only the enhanced
+/// protocol tells them apart. Terminals that don't answer the query are left
+/// alone, where `Alt-Enter` stands in for the new line.
+fn enable_enhanced_keys() {
+    use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+
+    if !crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+        return;
+    }
+    let pushed = crossterm::execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+    if pushed.is_ok() {
+        ENHANCED_KEYS.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn disable_enhanced_keys() {
+    if ENHANCED_KEYS.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::PopKeyboardEnhancementFlags
+        );
+    }
+}
+
+/// Whether we have a keyboard-enhancement stack entry to pop, so handing the
+/// terminal back never pops a mode we never pushed.
+static ENHANCED_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn write_stdout(bytes: &[u8]) {
     use std::io::Write;
     let mut out = std::io::stdout();
@@ -732,7 +765,9 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         let mut terminal = ratatui::init();
         enable_mouse();
+        enable_enhanced_keys();
         let result = self.event_loop(&mut terminal);
+        disable_enhanced_keys();
         disable_mouse();
         ratatui::restore();
         self.restore_herdr_zoom();
@@ -1293,12 +1328,14 @@ impl App {
     fn composer_key(&mut self, key: crossterm::event::KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            // Enter breaks the line, so saving needs a key of its own. Alt-Enter
-            // is the same key for terminals that report the modifier, and reads
-            // as "done" to anyone who never finds Ctrl-S.
+            // A bare Enter posts the note; any modifier on it breaks the line
+            // instead (Shift-Enter where the terminal reports it, Alt-Enter
+            // everywhere else). Ctrl-S stays as it was, for the fingers that
+            // learned it.
+            KeyCode::Enter if !(shift || alt || ctrl) => self.finish_comment(),
             KeyCode::Char('s') if ctrl => self.finish_comment(),
-            KeyCode::Enter if alt || ctrl => self.finish_comment(),
             KeyCode::Esc => self.cancel_comment(),
             KeyCode::Char('c') if ctrl => self.cancel_comment(),
             KeyCode::Char('o') if ctrl => self.comment_to_editor(),
@@ -1307,6 +1344,7 @@ impl App {
                     return;
                 };
                 match key.code {
+                    // Only a modified Enter reaches here; the bare one saved.
                     KeyCode::Enter => c.newline(),
                     KeyCode::Backspace => c.backspace(),
                     KeyCode::Delete => c.delete(),
@@ -1499,6 +1537,7 @@ impl App {
         terminal: &mut DefaultTerminal,
         path: &str,
     ) -> (String, std::io::Result<std::process::ExitStatus>) {
+        disable_enhanced_keys();
         disable_mouse();
         ratatui::restore();
         let editor = std::env::var("VISUAL")
@@ -1518,6 +1557,7 @@ impl App {
 
         *terminal = ratatui::init();
         enable_mouse();
+        enable_enhanced_keys();
         let _ = terminal.clear();
         self.last_width = 0; // force a re-render into the fresh screen
         (editor, status)
@@ -1855,6 +1895,11 @@ impl App {
         } else {
             KeyModifiers::NONE
         };
+        self.press_mods_for_test(code, mods);
+    }
+
+    /// The same, for the keys whose meaning turns on a modifier other than Ctrl.
+    pub(crate) fn press_mods_for_test(&mut self, code: KeyCode, mods: KeyModifiers) {
         let _ = self.dispatch_key(crossterm::event::KeyEvent::new(code, mods));
     }
 
@@ -2378,17 +2423,32 @@ mod tests {
         assert!(app.composer.is_some(), "`c` opens the composer");
 
         type_into(&mut app, "no backoff");
-        app.press_for_test(KeyCode::Enter, false); // a second line, not a save
+        app.press_mods_for_test(KeyCode::Enter, KeyModifiers::SHIFT); // a second line
         type_into(&mut app, "here");
-        assert!(app.composer.is_some(), "Enter must not end the note");
+        assert!(app.composer.is_some(), "Shift-Enter must not end the note");
 
-        app.press_for_test(KeyCode::Char('s'), true);
+        app.press_for_test(KeyCode::Enter, false);
         assert!(app.composer.is_none());
         assert!(app.pending_comment.is_none(), "no editor was involved");
         let saved = app.comments.all();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].body, "no backoff\nhere");
         assert_eq!(saved[0].line, 1, "anchored to the cursor's line");
+    }
+
+    /// Terminals that don't report Shift on Enter still need a way to break a
+    /// line, so Alt-Enter — which survives the legacy encoding — does it too.
+    #[test]
+    fn alt_enter_breaks_the_line_where_shift_enter_cant_be_seen() {
+        let mut app = app_ready_to_comment();
+        app.press_for_test(KeyCode::Char('c'), false);
+        type_into(&mut app, "one");
+        app.press_mods_for_test(KeyCode::Enter, KeyModifiers::ALT);
+        type_into(&mut app, "two");
+        assert!(app.composer.is_some(), "Alt-Enter must not end the note");
+
+        app.press_for_test(KeyCode::Enter, false);
+        assert_eq!(app.comments.all()[0].body, "one\ntwo");
     }
 
     /// While a note is being typed the composer owns every key, so the ones that

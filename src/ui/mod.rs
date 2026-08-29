@@ -241,10 +241,11 @@ fn render_help(
 fn composer_hint(width: u16) -> &'static str {
     let room = width.saturating_sub(2) as usize;
     [
-        " Ctrl-S save · Esc cancel · Ctrl-O $EDITOR ",
-        " ^S save · Esc cancel · ^O editor ",
-        " ^S save · Esc cancel ",
-        " ^S · Esc ",
+        " Enter save · Shift-Enter newline · Esc cancel · Ctrl-O $EDITOR ",
+        " Enter save · S-Enter newline · Esc cancel · ^O editor ",
+        " Enter save · S-Enter newline · Esc cancel ",
+        " Enter save · Esc cancel ",
+        " Enter · Esc ",
     ]
     .into_iter()
     .find(|hint| hint.chars().count() <= room)
@@ -667,8 +668,8 @@ mod tests {
 
     #[test]
     fn the_composer_hint_shrinks_rather_than_being_clipped() {
-        assert!(composer_hint(80).contains("Ctrl-S save"));
-        assert!(composer_hint(40).contains("^S save"));
+        assert!(composer_hint(80).contains("Shift-Enter newline"));
+        assert!(composer_hint(40).contains("Enter save"));
         // Whatever survives must still fit between the frame's corners.
         for width in 0..80u16 {
             let hint = composer_hint(width);

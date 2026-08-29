@@ -143,11 +143,15 @@ piped in) marking still works for the session but isn't persisted.
 Leave notes on a line of the diff, and read notes an AI agent left for you.
 
 Press `c` to comment on the line under the cursor. A field opens right where the
-note will live — type into it, `Ctrl-S` to save, `Esc` to discard. It takes the
-usual editing keys (`Enter` for a new line, `Ctrl-W` / `Ctrl-U` to rub out a word
-or the line, `Ctrl-A` / `Ctrl-E` for its ends), and `Ctrl-O` moves what you've
-typed into `$EDITOR` when a note outgrows the field — a git-commit-style buffer,
-where you type above the scissors line and save empty to abort.
+note will live — type into it, `Enter` to save, `Esc` to discard. It takes the
+usual editing keys (`Shift-Enter` for a new line, `Ctrl-W` / `Ctrl-U` to rub out
+a word or the line, `Ctrl-A` / `Ctrl-E` for its ends), and `Ctrl-O` moves what
+you've typed into `$EDITOR` when a note outgrows the field — a git-commit-style
+buffer, where you type above the scissors line and save empty to abort.
+
+`Shift-Enter` needs a terminal that speaks the kitty keyboard protocol (kitty,
+ghostty, WezTerm, foot, recent Alacritty); elsewhere use `Alt-Enter` for a new
+line. `Ctrl-S` still saves in either case.
 
 Press `c` inside an existing thread — where `]` / `[` leave the cursor — and it
 replies to the comment you're on instead; there's no separate reply key. `x`
