@@ -650,6 +650,34 @@ mod tests {
         );
     }
 
+    /// Clicking a diff line puts the line cursor on it, so `c` then comments on
+    /// the line that was clicked.
+    #[test]
+    fn clicking_a_diff_line_moves_the_cursor_there() {
+        let (mut app, width, height) = app_with_comments(&[]);
+        let out = render(&mut app, width, height);
+        let area = app.diff_area.expect("the diff pane was laid out");
+
+        let rows: Vec<&str> = out.lines().collect();
+        let y = rows
+            .iter()
+            .position(|r| r.contains("let x4 = 4;"))
+            .expect("line 4 is on screen") as u16;
+        app.click(ratatui::layout::Position::new(area.x + 10, y));
+        let out = render(&mut app, width, height);
+
+        let line = app.selected_file().and_then(|idx| {
+            let r = app
+                .cache
+                .get(idx, width - app.tree_width, false, app.diff_theme)?;
+            Some(r.text.lines[app.diff_cursor].to_string())
+        });
+        assert!(
+            line.is_some_and(|l| l.contains("let x4 = 4;")),
+            "the cursor must land on the clicked line\n{out}"
+        );
+    }
+
     /// `c` opens a field over the diff pane, right under the line being
     /// annotated, and the note is typed into it — no editor, no lost screen.
     #[test]

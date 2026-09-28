@@ -1843,8 +1843,9 @@ impl App {
     }
 
     /// Left-click: select the tree row under the cursor (folding/unfolding a
-    /// directory, like a file explorer), or just move focus to the diff pane.
-    fn click(&mut self, pos: Position) {
+    /// directory, like a file explorer), or focus the diff pane and put the line
+    /// cursor on the clicked line.
+    pub(crate) fn click(&mut self, pos: Position) {
         if let Some(area) = self.tree_area
             && area.contains(pos)
         {
@@ -1863,7 +1864,24 @@ impl App {
             && area.contains(pos)
         {
             self.focus = Focus::Diff;
+            self.click_diff_row(pos.y - area.y);
         }
+    }
+
+    /// Put the line cursor on whatever line occupies screen row `y` of the diff
+    /// pane. The line is already on screen, so the view is left where it is
+    /// rather than scrolled to pad the cursor away from the edge.
+    fn click_diff_row(&mut self, y: u16) {
+        let Some(render) = self.current_render() else {
+            return;
+        };
+        // Clicks on the empty space below a short diff land nowhere.
+        let row = self.diff_scroll.saturating_add(y);
+        if row >= render.height {
+            return;
+        }
+        self.diff_cursor = render.line_at(row);
+        self.remember_cursor_anchor();
     }
 
     /// Wheel scrolling acts on whichever pane the cursor is over, independent of
