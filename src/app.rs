@@ -58,6 +58,9 @@ const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l";
 /// the cursor scrolls before it reaches the very top or bottom. Matches the file
 /// tree's `SCROLL_PADDING`.
 const CURSOR_PADDING: u16 = 4;
+
+/// Lines of context `+`/`-` add or take away around each change, per press.
+const CONTEXT_STEP: u32 = 1;
 /// While watching for comments written elsewhere, cap the input wait so an
 /// agent's note appears without needing a keypress.
 const COMMENT_POLL: Duration = Duration::from_millis(250);
@@ -228,6 +231,10 @@ pub struct App {
     /// Identity of the render `diff_cursor` indexes into. When it changes, the
     /// index is stale and gets re-resolved from `cursor_anchor`.
     cursor_token: Option<(usize, u16, bool, DiffTheme, u64)>,
+    /// The screen row the cursor sat on before `+`/`-` reloaded the diff, to put
+    /// it back there once the new render exists. Widening the context pushes the
+    /// cursor's line down the render; without this it would slide off screen.
+    cursor_screen_row: Option<u16>,
     /// A `]`/`[` jump that crossed into another file, waiting for that file to be
     /// rendered before the cursor can be put on the comment it was aimed at:
     /// `true` for its first comment, `false` for its last.
@@ -319,6 +326,7 @@ impl App {
             diff_cursor: 0,
             cursor_anchor: None,
             cursor_token: None,
+            cursor_screen_row: None,
             comment_landing: None,
             confirm_delete: None,
             composer: None,
@@ -393,7 +401,8 @@ impl App {
     /// new view's name.
     fn set_diff_source(&mut self, next: DiffSource) {
         let Some(git) = &self.git else { return };
-        let candidate = GitDiff::diff(next, git.base.clone(), vec![]);
+        let mut candidate = GitDiff::diff(next, git.base.clone(), vec![]);
+        candidate.context = git.context;
         // The immutable borrow of `self.git` ends here (candidate is owned),
         // freeing `self` for the mutable reload below.
         match candidate.load() {
@@ -447,6 +456,69 @@ impl App {
         if let Some(new) = self.reload_comments() {
             self.set_status(format!("💬 {new} new comment(s)"));
         }
+    }
+
+    /// The `+`/`-` keys: show more or fewer lines of context around each change by
+    /// re-running the diff with `-U<n>`. Never narrower than git's own default,
+    /// which is what the diff opened with.
+    fn change_context(&mut self, wider: bool) {
+        let Some(git) = &self.git else { return };
+        let floor = crate::autodiff::default_context();
+        let current = git.context.unwrap_or(floor);
+        let next = if wider {
+            current.saturating_add(CONTEXT_STEP)
+        } else {
+            current.saturating_sub(CONTEXT_STEP).max(floor)
+        };
+        if next == current {
+            self.set_status(format!("context: {current} lines (minimum)"));
+            return;
+        }
+        let mut candidate = git.clone();
+        candidate.context = (next > floor).then_some(next);
+        match candidate.load() {
+            Ok(text) => {
+                // Before the reload, for the same reason as in `set_diff_source`:
+                // the session it publishes reads the command off `self.git`.
+                self.git = Some(candidate);
+                self.hold_cursor_on_screen();
+                self.reload_in_place(crate::diff::parse(&text));
+                self.set_status(format!("context: {next} lines"));
+            }
+            Err(e) => self.set_status(format!("context: {e:#}")),
+        }
+    }
+
+    /// Lines of context the diff was widened to, or `None` at git's default —
+    /// for the header, which only mentions it when it's been changed.
+    pub fn diff_context(&self) -> Option<u32> {
+        self.git.as_ref().and_then(|g| g.context)
+    }
+
+    /// Remember the cursor's screen row, for [`App::restore_cursor_screen_row`]
+    /// to return it to once the reloaded file has rendered. Only with comments
+    /// on: without them there's no cursor, and the scroll is kept as it was.
+    fn hold_cursor_on_screen(&mut self) {
+        if !self.comments_on {
+            return;
+        }
+        if let Some(render) = self.current_render() {
+            let row = render.row_of(self.diff_cursor);
+            self.cursor_screen_row = Some(row.saturating_sub(self.diff_scroll));
+        }
+    }
+
+    /// Scroll so the cursor lands back on the screen row it held before the
+    /// reload. Waits, like the cursor itself, until the new render exists.
+    fn restore_cursor_screen_row(&mut self) {
+        let Some(offset) = self.cursor_screen_row else {
+            return;
+        };
+        let Some(render) = self.current_render() else {
+            return;
+        };
+        self.diff_scroll = render.row_of(self.diff_cursor).saturating_sub(offset);
+        self.cursor_screen_row = None;
     }
 
     /// Re-read the comment file, discarding what was in memory (every local write
@@ -874,6 +946,7 @@ impl App {
             // The render may have changed shape (new comments, new theme, new
             // width), so put the cursor back on the line it was on.
             self.resync_cursor();
+            self.restore_cursor_screen_row();
             // A `]`/`[` jump into this file has been waiting for that render.
             self.land_on_comment();
 
@@ -2076,6 +2149,9 @@ impl App {
             }
             // Only bound where the diff can be re-read; a piped one can't be.
             KeyCode::Char('r') if self.can_refresh() => self.refresh_diff(),
+            // Context around each change; re-runs the diff, so the same rule.
+            KeyCode::Char('+') if self.can_refresh() => self.change_context(true),
+            KeyCode::Char('-') if self.can_refresh() => self.change_context(false),
             // Only bound inside herdr; an inert no-op elsewhere.
             KeyCode::Char('z') if self.herdr.is_some() => self.toggle_herdr_zoom(),
             // Only bound when a supported forge (e.g. GitHub) is detected.
@@ -2297,6 +2373,29 @@ mod tests {
 
         app.click(Position::new(40, 4));
         assert_eq!(app.focus, Focus::Diff);
+    }
+
+    #[test]
+    fn minus_stops_at_gits_default_context() {
+        // At the default already, `-` says so instead of re-running anything.
+        let mut app = app_with(vec![file("a.rs")]);
+        app.enable_git_diff(GitDiff::diff(DiffSource::Unstaged, None, vec![]));
+
+        app.press_for_test(KeyCode::Char('-'), false);
+        let floor = crate::autodiff::default_context();
+        assert_eq!(
+            app.status.as_deref(),
+            Some(format!("context: {floor} lines (minimum)").as_str())
+        );
+        assert_eq!(app.diff_context(), None);
+    }
+
+    #[test]
+    fn context_keys_are_inert_for_a_piped_diff() {
+        let mut app = app_with(vec![file("a.rs")]);
+        app.press_for_test(KeyCode::Char('+'), false);
+        app.press_for_test(KeyCode::Char('-'), false);
+        assert_eq!(app.status, None);
     }
 
     #[test]

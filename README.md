@@ -91,6 +91,7 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `d` | Cycle the diff view — all → all-uncommitted → staged → unstaged → branch-vs-base (only for a plain [`riffnav diff`](#diff-views)) |
 | `1`–`5` | Jump straight to one of those five [views](#diff-views), in that order |
 | `r` | Re-read the diff, picking up changes made since (not for a diff piped in) |
+| `+` / `-` | Show more / fewer context lines around each change, never fewer than git's default (not for a diff piped in) |
 | `o` | Open the selected file in `$EDITOR` |
 | `c` | [Comment](#review-comments) on the cursor's line, or reply when it's inside a thread |
 | `x` | Delete the comment under the cursor, and its replies (asks first) |

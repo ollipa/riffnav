@@ -165,6 +165,10 @@ pub struct GitDiff {
     pub base: Option<String>,
     /// Extra arguments handed straight to git, after riffnav's own.
     pub extra: Vec<String>,
+    /// Lines of context around each change (`-U<n>`), as widened with `+`/`-`.
+    /// `None` leaves it to git — its `diff.context` setting, or 3 — which is
+    /// also the floor `-` stops at (see [`default_context`]).
+    pub context: Option<u32>,
 }
 
 impl GitDiff {
@@ -174,6 +178,7 @@ impl GitDiff {
             view: View::Diff(source),
             base,
             extra,
+            context: None,
         }
     }
 
@@ -183,6 +188,7 @@ impl GitDiff {
             view: View::Show,
             base: None,
             extra,
+            context: None,
         }
     }
 
@@ -249,6 +255,7 @@ impl GitDiff {
             .chain(PREFIX_ARGS)
             .map(str::to_string)
             .collect();
+        argv.extend(self.context.map(|n| format!("-U{n}")));
         argv.extend(rev);
         argv.extend(self.extra.iter().cloned());
         Ok(argv)
@@ -295,6 +302,14 @@ impl GitDiff {
             Err(e) => Err(e),
         }
     }
+}
+
+/// The context git gives a diff when not told otherwise: the `diff.context`
+/// setting, or git's built-in 3.
+pub fn default_context() -> u32 {
+    git(&["config", "--get", "diff.context"])
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(3)
 }
 
 /// Whether the current directory is inside a git work tree.
@@ -548,6 +563,17 @@ mod tests {
         assert_eq!(argv(DiffSource::AllUncommitted, &[]), expect(&["HEAD"]));
         assert_eq!(argv(DiffSource::Staged, &[]), expect(&["--staged"]));
         assert_eq!(argv(DiffSource::Unstaged, &[]), expect(&[]));
+    }
+
+    #[test]
+    fn widened_context_precedes_the_revision_and_the_users_args() {
+        let mut git = GitDiff::diff(DiffSource::AllUncommitted, None, vec!["-w".to_string()]);
+        git.context = Some(8);
+        assert!(git.argv().unwrap().ends_with(&[
+            "-U8".to_string(),
+            "HEAD".to_string(),
+            "-w".to_string()
+        ]));
     }
 
     #[test]

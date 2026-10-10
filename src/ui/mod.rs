@@ -109,6 +109,12 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(Color::Cyan),
         ));
     }
+    if let Some(context) = app.diff_context() {
+        spans.push(Span::styled(
+            format!("   ±{context} context"),
+            Style::new().add_modifier(Modifier::DIM),
+        ));
+    }
     let comments = app.comment_total();
     if comments > 0 {
         spans.push(Span::styled(
@@ -203,6 +209,7 @@ fn render_help(
     }
     if can_refresh {
         entries.push(("r", "refresh the diff"));
+        entries.push(("+ / -", "more / fewer context lines"));
     }
     if auto_diff {
         entries.push(("d", "cycle git diff source"));
