@@ -1,18 +1,17 @@
 # riffnav
 
-A git diff pager with a GitHub-style file tree, powered by [delta][delta].
+A git diff pager with a GitHub-style file tree.
 
 > 🤖 **Built with AI.** riffnav — its code, tests, and docs — was written with AI assistance
 
-`riffnav` reads a unified diff on stdin, renders each file with `delta`, and wraps
-it in a terminal UI: a navigable file tree on the left, the rendered diff on the
-right. It's a Rust take on [diffnav][diffnav].
+`riffnav` reads a unified diff on stdin and shows it in a terminal UI: a navigable
+file tree on the left, the syntax-highlighted diff on the right. It's a Rust take
+on [diffnav][diffnav].
 
 ![riffnav demo](demo.gif)
 
 ## Requirements
 
-- **[delta][delta]** on your `PATH` — riffnav renders diffs with it.
 - A **[Nerd Font][nerdfonts]** for filetype icons (optional). No Nerd Font? Press
   `i` to cycle to `unicode` or `ascii` icons, or set `icon_style` in the config.
 
@@ -67,8 +66,8 @@ but scoping to `diff`/`show` avoids sending `git log` through it.) This is
 independent of `riffnav diff` — riffnav disables the pager for its own git calls,
 so the two can't loop.
 
-By default riffnav follows your `delta.side-by-side` git setting; force a layout
-for one run with `-s` (side-by-side) or `-u` (unified).
+riffnav starts in unified view unless `side_by_side` is set in the config; pick a
+layout for one run with `-s` (side-by-side) or `-u` (unified).
 
 ## Keybindings
 
@@ -85,7 +84,7 @@ for one run with `-s` (side-by-side) or `-u` (unified).
 | `s` | Toggle side-by-side / unified |
 | `e` | Toggle the file tree |
 | `i` | Cycle icon style (nerd → unicode → ascii) |
-| `T` | Cycle diff theme (delta → github-dark → github-light) |
+| `T` | Switch diff theme (github-dark ↔ github-light) |
 | `y` | Copy the selected file's path |
 | `v` / `V` | Mark the file viewed / jump to the next unviewed file |
 | `d` | Cycle the diff view — all → all-uncommitted → staged → unstaged → branch-vs-base (only for a plain [`riffnav diff`](#diff-views)) |
@@ -108,9 +107,10 @@ optional. Settings resolve as **defaults < config file < CLI flags**.
 
 ```toml
 # ~/.config/riffnav/config.toml
-# side_by_side = false   # omit to follow your delta.side-by-side default
+side_by_side = false     # start in side-by-side view
 icon_style   = "nerd"    # nerd | unicode | ascii
-diff_theme   = "github-dark" # github-dark | github-light | delta (inherit gitconfig)
+diff_theme   = "github-dark" # github-dark | github-light
+tab_width    = 4         # columns between tab stops in the diff
 tree_width   = 32        # columns for the file-tree pane
 show_tree    = true
 start_focus  = "diff"    # "diff": open in the first file (n/p between files) | "tree"
@@ -288,24 +288,22 @@ or help.
 ## How it works
 
 A unified diff — from `git diff`/`git show` run by riffnav, or piped in on stdin
-— is split per file (`diff --git`) into a tree; on selection the file's hunks go
-through `delta` (cached per file/width/layout) and its ANSI output is converted
-to styled text with [ansi-to-tui][ansi-to-tui], drawn with [ratatui][ratatui].
-Because stdin may itself be the diff, key input is read from `/dev/tty`.
+— is split per file (`diff --git`) into a tree. On selection the file's hunks
+become rows, highlighted with [syntect][syntect] and marked word by word where a
+line was edited, then drawn with [ratatui][ratatui] and cached per
+file/width/layout/theme. Because stdin may itself be the diff, key input is read
+from `/dev/tty`.
 
 Comments anchor to a *diff line*, never a screen row, so they stay put across a
-resize, a theme switch, or a unified/side-by-side toggle. riffnav recovers those
-line numbers by pinning delta's line-number gutter to a fixed-width format and
-reading it back out of the rendered output — which is why line numbers are always
-on.
+resize, a theme switch, or a unified/side-by-side toggle. Each rendered row keeps
+the line numbers it came from, so a comment always finds its place.
 
 ## License
 
 MIT
 
-[delta]: https://github.com/dandavison/delta
 [diffnav]: https://github.com/dlvhdr/diffnav
 [nerdfonts]: https://www.nerdfonts.com/
 [ratatui]: https://ratatui.rs/
-[ansi-to-tui]: https://github.com/ratatui/ansi-to-tui
+[syntect]: https://github.com/trishume/syntect
 [herdr-socket]: https://herdr.dev/docs/socket-api/
