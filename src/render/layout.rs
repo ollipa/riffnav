@@ -42,7 +42,12 @@ pub fn unified(
     let mut numbers = vec![LineNumbers::none(); lines.len()];
     for (i, row) in rows.iter().enumerate() {
         let line = match row.kind {
-            RowKind::HunkHeader { new_start } => hunk_header(new_start, &row.text, width, &palette),
+            RowKind::HunkHeader { new_start } => {
+                let header = hunk_header(new_start, &row.text, width, tab, &palette);
+                numbers.resize(numbers.len() + header.len(), LineNumbers::none());
+                lines.extend(header);
+                continue;
+            }
             RowKind::NoNewline => no_newline(&row.text, &palette),
             RowKind::Context | RowKind::Added | RowKind::Removed => {
                 code_line(row, &syntax[i], &emphasis[i], width, tab, &palette)
@@ -118,8 +123,9 @@ pub fn side_by_side(
         }
         match row.kind {
             RowKind::HunkHeader { new_start } => {
-                lines.push(hunk_header(new_start, &row.text, width, &palette));
-                numbers.push(LineNumbers::none());
+                let header = hunk_header(new_start, &row.text, width, panels.tab, &palette);
+                numbers.resize(numbers.len() + header.len(), LineNumbers::none());
+                lines.extend(header);
             }
             RowKind::Context => panels.emit(Some(i), Some(i), &mut lines, &mut numbers),
             // Only reached for a marker with no code row in front of it to carry
@@ -352,24 +358,62 @@ fn file_header(file: &FileDiff, width: usize, palette: &DiffPalette) -> Vec<Line
     ]
 }
 
-/// `── 42: fn enclosing() ─────`, where 42 is the hunk's first new line.
-fn hunk_header(start: u32, context: &str, width: usize, palette: &DiffPalette) -> Line<'static> {
+/// A hunk's enclosing function in a box open on the left, set apart from the
+/// code by a blank row so the eye finds where each hunk starts:
+///
+/// ```text
+/// ────────────────┐
+///  fn enclosing() │
+/// ────────────────┘
+/// ```
+///
+/// git only names a function when it found one, so the hunk's first line number
+/// stands in otherwise, and the box still marks the break.
+fn hunk_header(
+    start: u32,
+    context: &str,
+    width: usize,
+    tab: usize,
+    palette: &DiffPalette,
+) -> Vec<Line<'static>> {
     let rule = Style::new().fg(palette.rule);
-    let mut spans = vec![
-        Span::styled("── ", rule),
-        Span::styled(format!("{start}:"), Style::new().fg(palette.number)),
-    ];
-    let mut used = 4 + start.to_string().len();
-    if !context.is_empty() {
-        let text = format!(" {context}");
-        used += display_width(&text);
-        spans.push(Span::styled(text, palette.heading()));
+    let (label, style) = if context.is_empty() {
+        (format!("{start}:"), Style::new().fg(palette.number))
+    } else {
+        let label = expand(context, &mut 0, tab);
+        (label, palette.heading())
+    };
+    // The pad on each side and the right edge take three columns.
+    let label = truncate(&label, width.saturating_sub(3));
+    let edge = display_width(&label) + 2;
+    vec![
+        Line::default(),
+        Line::from(Span::styled(format!("{}┐", "─".repeat(edge)), rule)),
+        Line::from(vec![
+            Span::styled(format!(" {label} "), style),
+            Span::styled("│", rule),
+        ]),
+        Line::from(Span::styled(format!("{}┘", "─".repeat(edge)), rule)),
+    ]
+}
+
+/// Cut `text` to `cols` columns, ending in `…` if anything was dropped.
+fn truncate(text: &str, cols: usize) -> String {
+    if display_width(text) <= cols {
+        return text.to_string();
     }
-    spans.push(Span::styled(
-        format!(" {}", "─".repeat(width.saturating_sub(used + 1))),
-        rule,
-    ));
-    Line::from(spans)
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let width = c.width().unwrap_or(0);
+        if used + width + 1 > cols {
+            break;
+        }
+        out.push(c);
+        used += width;
+    }
+    out.push('…');
+    out
 }
 
 fn no_newline(text: &str, palette: &DiffPalette) -> Line<'static> {
@@ -651,11 +695,52 @@ mod tests {
     }
 
     #[test]
-    fn a_hunk_header_shows_its_line_and_enclosing_function() {
-        let (text, _) = render(&file_with("@@ -1 +40 @@ fn outer()\n-a\n+b\n"));
-        let header = plain(&text.lines[2]);
-        assert!(header.starts_with("── 40: fn outer() ─"), "{header}");
-        assert_eq!(display_width(&header), usize::from(WIDTH));
+    fn a_hunk_header_boxes_the_enclosing_function() {
+        let (text, map) = render(&file_with("@@ -1 +40 @@ fn outer()\n-a\n+b\n"));
+        let header: Vec<String> = text.lines[2..6].iter().map(plain).collect();
+        assert_eq!(
+            header,
+            ["", "────────────┐", " fn outer() │", "────────────┘"]
+        );
+        assert_eq!(map.first_code_row(), Some(6));
+    }
+
+    #[test]
+    fn a_hunk_with_no_function_shows_its_line_number_instead() {
+        let (text, _) = render(&file_with("@@ -1 +40 @@\n-a\n+b\n"));
+        assert_eq!(plain(&text.lines[4]), " 40: │");
+    }
+
+    #[test]
+    fn a_function_wider_than_the_pane_is_cut_short() {
+        let long = "fn ".to_string() + &"x".repeat(60);
+        let (text, _) = render(&file_with(&format!("@@ -1 +1 @@ {long}\n-a\n+b\n")));
+        for line in &text.lines[3..6] {
+            assert_eq!(line_width(line), usize::from(WIDTH), "{}", plain(line));
+        }
+        assert!(plain(&text.lines[4]).ends_with("… │"));
+    }
+
+    #[test]
+    fn a_tab_in_the_function_line_keeps_the_box_square() {
+        let (text, _) = render(&file_with("@@ -1 +1 @@ fn\ta()\n-a\n+b\n"));
+        assert_eq!(line_width(&text.lines[3]), line_width(&text.lines[4]));
+    }
+
+    #[test]
+    fn each_hunk_is_set_apart_from_the_one_before() {
+        let (text, map) = render(&file_with(
+            "@@ -1 +1 @@ fn a()\n-a\n+b\n@@ -9 +9 @@ fn b()\n-c\n+d\n",
+        ));
+        assert_eq!(text.lines.len(), map.len());
+        let row = map
+            .row_for(Anchor {
+                side: Side::New,
+                line: 1,
+            })
+            .unwrap();
+        assert_eq!(plain(&text.lines[row + 1]), "");
+        assert_eq!(plain(&text.lines[row + 3]), " fn b() │");
     }
 
     fn sbs(raw: &str) -> (Text<'static>, LineMap) {
@@ -723,7 +808,7 @@ mod tests {
             }),
             Some(row)
         );
-        assert_eq!(text.lines.len(), 4);
+        assert_eq!(text.lines.len(), 7);
     }
 
     #[test]
@@ -732,8 +817,8 @@ mod tests {
         let (text, _) = sbs(&file_with(&format!(
             "@@ -1,3 +1,3 @@\n keep\n-{long}\n+日本語{long}\n+extra\n"
         )));
-        // The title is the one row that stops at its own text.
-        for line in text.lines.iter().skip(1) {
+        // The title and the hunk's box stop at their own text.
+        for line in text.lines.iter().skip(6) {
             assert_eq!(line_width(line), usize::from(WIDTH), "{}", plain(line));
         }
     }
@@ -754,7 +839,7 @@ mod tests {
         let shown: usize = text
             .lines
             .iter()
-            .skip(2)
+            .skip(6)
             .map(|l| plain(l).matches('x').count())
             .sum();
         assert_eq!(shown, long.len(), "wrapping must keep every character");
@@ -770,7 +855,7 @@ mod tests {
             .map(|l| plain(l).matches('日').count())
             .sum();
         assert_eq!(shown, 20);
-        for line in text.lines.iter().skip(3) {
+        for line in text.lines.iter().skip(6) {
             assert_eq!(line_width(line), usize::from(WIDTH), "{}", plain(line));
         }
     }
