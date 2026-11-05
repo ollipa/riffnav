@@ -428,8 +428,8 @@ pub struct RenderCache {
     entries: HashMap<Key, Entry>,
     config_sbs: bool,
     tab_width: u8,
-    /// Render unified diffs with [`crate::render`] instead of delta, while the
-    /// two are being compared. Set by `RIFFNAV_RENDERER=native`.
+    /// Render with [`crate::render`] instead of delta, while the two are being
+    /// compared. Set by `RIFFNAV_RENDERER=native`.
     native: bool,
 }
 
@@ -455,7 +455,7 @@ impl RenderCache {
         comments: &CommentLayer<'_>,
     ) -> Result<()> {
         let config_sbs = self.config_sbs;
-        let native = self.native && !side_by_side;
+        let native = self.native;
         let tab_width = self.tab_width;
         let key = Key {
             file,
@@ -464,7 +464,9 @@ impl RenderCache {
             theme,
         };
         if let Slot::Vacant(slot) = self.entries.entry(key.clone()) {
-            let (base, base_map) = if native {
+            let (base, base_map) = if native && side_by_side {
+                crate::render::side_by_side(diff, width, theme, tab_width)
+            } else if native {
                 crate::render::unified(diff, width, theme, tab_width)
             } else {
                 let mut bytes = run(&diff.raw, width, side_by_side, config_sbs, theme)?;

@@ -32,3 +32,8 @@ unicode-width = "0.2.2"
 
 [dev-dependencies]
 insta = "1.48.0"
+
+# Highlighting spends its time in this regex engine, which is unusably slow
+# unoptimized, so debug builds would otherwise crawl.
+[profile.dev.package.fancy-regex]
+opt-level = 2

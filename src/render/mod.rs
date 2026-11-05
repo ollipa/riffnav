@@ -21,7 +21,28 @@ pub fn unified(
     tab_width: u8,
 ) -> (Text<'static>, LineMap) {
     let rows = diff::rows(file);
-    let syntax = highlight::highlight(file.path(), &rows, theme);
-    let emphasis = words::emphasis(&rows);
-    layout::unified(file, &rows, &syntax, &emphasis, width, theme, tab_width)
+    let syntax = highlight::highlight(file, &rows, theme);
+    let changes = words::changes(&rows);
+    layout::unified(
+        file,
+        &rows,
+        &syntax,
+        &changes.emphasis,
+        width,
+        theme,
+        tab_width,
+    )
+}
+
+/// Render one file side by side, `width` columns wide.
+pub fn side_by_side(
+    file: &FileDiff,
+    width: u16,
+    theme: DiffTheme,
+    tab_width: u8,
+) -> (Text<'static>, LineMap) {
+    let rows = diff::rows(file);
+    let syntax = highlight::highlight(file, &rows, theme);
+    let changes = words::changes(&rows);
+    layout::side_by_side(file, &rows, &syntax, &changes, width, theme, tab_width)
 }

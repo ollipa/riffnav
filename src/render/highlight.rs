@@ -14,12 +14,16 @@ use two_face::re_exports::syntect::highlighting::{self, FontStyle};
 use two_face::re_exports::syntect::parsing::{SyntaxReference, SyntaxSet};
 use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 
-use crate::diff::{Row, RowKind};
+use crate::diff::{FileDiff, Row, RowKind};
 use crate::theme::DiffTheme;
 
 /// Lines longer than this skip highlighting. Rendering blocks the UI, and a
 /// minified bundle is one enormous line that would stall it for no useful color.
 pub const MAX_LINE_BYTES: usize = 2_000;
+/// Diffs bigger than this skip highlighting altogether, for the same reason: a
+/// generated file or lockfile would otherwise freeze the UI on selection. Word
+/// emphasis still applies, and it's what matters most on a file that big.
+const MAX_FILE_BYTES: usize = 500_000;
 
 /// A stretch of a row's text in one style, up to byte offset `end`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,11 +48,14 @@ fn assets() -> &'static Assets {
 }
 
 /// Highlighted runs for each of `rows`, index-aligned. Empty for a row with no
-/// syntax color: not code, too long, or a file of no known language.
-pub fn highlight(path: &str, rows: &[Row], theme: DiffTheme) -> Vec<Vec<Run>> {
+/// syntax color: not code, too long, or a file too big or of no known language.
+pub fn highlight(file: &FileDiff, rows: &[Row], theme: DiffTheme) -> Vec<Vec<Run>> {
     let mut out = vec![Vec::new(); rows.len()];
+    if file.raw.len() > MAX_FILE_BYTES {
+        return out;
+    }
     let assets = assets();
-    let Some(syntax) = find_syntax(&assets.syntaxes, path, rows) else {
+    let Some(syntax) = find_syntax(&assets.syntaxes, file.path(), rows) else {
         return out;
     };
     let theme = assets.themes.get(syntax_theme(theme));
@@ -142,9 +149,17 @@ mod tests {
     use super::*;
     use crate::diff::{parse, rows};
 
-    fn file_rows(path: &str, hunk: &str) -> Vec<Row> {
+    fn file(path: &str, hunk: &str) -> FileDiff {
         let raw = format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{hunk}");
-        rows(&parse(&raw).remove(0))
+        parse(&raw).remove(0)
+    }
+
+    /// The file's rows and their highlighting.
+    fn highlighted(path: &str, hunk: &str) -> (Vec<Row>, Vec<Vec<Run>>) {
+        let file = file(path, hunk);
+        let rows = rows(&file);
+        let runs = highlight(&file, &rows, DiffTheme::GitHubDark);
+        (rows, runs)
     }
 
     fn colors(runs: &[Run]) -> usize {
@@ -155,16 +170,14 @@ mod tests {
 
     #[test]
     fn runs_cover_the_text_without_the_newline() {
-        let rows = file_rows("a.rs", "@@ -1 +1 @@\n-fn a() {}\n+fn b() { 1 }\n");
-        let runs = highlight("a.rs", &rows, DiffTheme::GitHubDark);
+        let (rows, runs) = highlighted("a.rs", "@@ -1 +1 @@\n-fn a() {}\n+fn b() { 1 }\n");
         assert_eq!(runs[2].last().unwrap().end, rows[2].text.len());
         assert!(colors(&runs[2]) > 1, "code should be more than one color");
     }
 
     #[test]
     fn an_open_string_on_a_removed_line_leaves_the_added_side_alone() {
-        let rows = file_rows("a.py", "@@ -1 +1 @@\n-x = \"\"\"open\n+def f(): pass\n");
-        let runs = highlight("a.py", &rows, DiffTheme::GitHubDark);
+        let (_, runs) = highlighted("a.py", "@@ -1 +1 @@\n-x = \"\"\"open\n+def f(): pass\n");
         assert!(
             colors(&runs[2]) > 1,
             "the added line must not parse as a string"
@@ -173,31 +186,36 @@ mod tests {
 
     #[test]
     fn a_new_hunk_forgets_the_last_ones_state() {
-        let rows = file_rows(
+        let (_, runs) = highlighted(
             "a.py",
             "@@ -0,0 +1 @@\n+x = \"\"\"open\n@@ -8,0 +9 @@\n+def f(): pass\n",
         );
-        let runs = highlight("a.py", &rows, DiffTheme::GitHubDark);
         assert!(colors(&runs[3]) > 1);
     }
 
     #[test]
     fn a_shebang_names_the_language_of_a_file_with_no_extension() {
-        let rows = file_rows("run", "@@ -0,0 +1,2 @@\n+#!/bin/sh\n+echo hi\n");
-        let runs = highlight("run", &rows, DiffTheme::GitHubDark);
+        let (_, runs) = highlighted("run", "@@ -0,0 +1,2 @@\n+#!/bin/sh\n+echo hi\n");
         assert!(!runs[2].is_empty());
     }
 
     #[test]
     fn plain_text_and_overlong_lines_get_no_runs() {
-        let rows = file_rows("notes.txt", "@@ -1 +1 @@\n-a\n+b\n");
-        let runs = highlight("notes.txt", &rows, DiffTheme::GitHubDark);
+        let (_, runs) = highlighted("notes.txt", "@@ -1 +1 @@\n-a\n+b\n");
         assert!(runs.iter().all(Vec::is_empty));
 
         let long = "x".repeat(MAX_LINE_BYTES + 1);
-        let rows = file_rows("a.rs", &format!("@@ -1 +1 @@\n-a\n+{long}\n"));
-        let runs = highlight("a.rs", &rows, DiffTheme::GitHubDark);
+        let (_, runs) = highlighted("a.rs", &format!("@@ -1 +1 @@\n-a\n+{long}\n"));
         assert!(runs[2].is_empty());
+    }
+
+    #[test]
+    fn a_diff_past_the_size_limit_gets_no_runs() {
+        let line = "+let x = 1;\n";
+        let lines = MAX_FILE_BYTES / line.len() + 1;
+        let hunk = format!("@@ -0,0 +1,{lines} @@\n{}", line.repeat(lines));
+        let (_, runs) = highlighted("a.rs", &hunk);
+        assert!(runs.iter().all(Vec::is_empty));
     }
 
     #[test]

@@ -2,11 +2,12 @@
 
 use std::ops::Range;
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use unicode_width::UnicodeWidthChar;
 
 use super::highlight::Run;
+use super::words::{Changes, change_runs};
 use crate::comment::LineMap;
 use crate::comment::anchor::LineNumbers;
 use crate::diff::{self, FileDiff, FileStatus, Row, RowKind};
@@ -16,6 +17,13 @@ use crate::theme::{DiffPalette, DiffTheme};
 const NUMBER: usize = 5;
 /// Columns the unified gutter takes: two number fields and their separators.
 const GUTTER: usize = NUMBER * 2 + 2;
+/// Columns each side-by-side panel's gutter takes.
+const PANEL_GUTTER: usize = NUMBER + 1;
+/// Closes the left and right panels' number fields.
+const LEFT_DELIM: char = '⋮';
+const RIGHT_DELIM: char = '│';
+/// Ends a side-by-side row that continues on the next.
+const WRAP_MARK: char = '↵';
 
 pub fn unified(
     file: &FileDiff,
@@ -47,6 +55,277 @@ pub fn unified(
         });
     }
     (Text::from(lines), LineMap::from_numbers(numbers))
+}
+
+/// One side of a side-by-side row.
+struct Cell {
+    number: Option<u32>,
+    kind: RowKind,
+    /// The text, already wrapped to the panel.
+    rows: Vec<Vec<Span<'static>>>,
+}
+
+/// Geometry and styling shared by every side-by-side row.
+struct Panels<'a> {
+    left: usize,
+    right: usize,
+    tab: usize,
+    palette: &'a DiffPalette,
+    syntax: &'a [Vec<Run>],
+    emphasis: &'a [Vec<Range<usize>>],
+    rows: &'a [Row],
+}
+
+pub fn side_by_side(
+    file: &FileDiff,
+    rows: &[Row],
+    syntax: &[Vec<Run>],
+    changes: &Changes,
+    width: u16,
+    theme: DiffTheme,
+    tab_width: u8,
+) -> (Text<'static>, LineMap) {
+    let palette = theme.palette();
+    let width = usize::from(width);
+    let left = width / 2;
+    let panels = Panels {
+        left,
+        right: width - left,
+        tab: usize::from(tab_width.max(1)),
+        palette: &palette,
+        syntax,
+        emphasis: &changes.emphasis,
+        rows,
+    };
+
+    let mut lines = file_header(file, width, &palette);
+    let mut numbers = vec![LineNumbers::none(); lines.len()];
+    let mut runs = change_runs(rows).into_iter().peekable();
+    let mut i = 0;
+    while i < rows.len() {
+        let row = &rows[i];
+        if let Some((removed, added)) =
+            runs.next_if(|(removed, added)| removed.first().or(added.first()) == Some(&i))
+        {
+            let last = removed.iter().chain(&added).max().copied().unwrap_or(i);
+            for (old, new) in aligned(&removed, &added, &changes.partner) {
+                panels.emit(old, new, &mut lines, &mut numbers);
+            }
+            i = last + 1;
+            // The marker after the run's last row was emitted with that row.
+            i += usize::from(rows.get(i).is_some_and(|r| r.kind == RowKind::NoNewline));
+            continue;
+        }
+        match row.kind {
+            RowKind::HunkHeader { new_start } => {
+                lines.push(hunk_header(new_start, &row.text, width, &palette));
+                numbers.push(LineNumbers::none());
+            }
+            RowKind::Context => panels.emit(Some(i), Some(i), &mut lines, &mut numbers),
+            // Only reached for a marker with no code row in front of it to carry
+            // it, which git doesn't write.
+            _ => {}
+        }
+        i += 1;
+        if row.kind == RowKind::Context && rows.get(i).is_some_and(|r| r.kind == RowKind::NoNewline)
+        {
+            i += 1;
+        }
+    }
+    (Text::from(lines), LineMap::from_numbers(numbers))
+}
+
+/// The rows of one change, laid out opposite each other. A removed row and its
+/// partner share a row; what's left between partners is zipped together in order,
+/// so a rewrite takes as few rows as it can.
+fn aligned(
+    removed: &[usize],
+    added: &[usize],
+    partner: &[Option<usize>],
+) -> Vec<(Option<usize>, Option<usize>)> {
+    let mut out = Vec::new();
+    let (mut old_from, mut new_from) = (0, 0);
+    for (at, &old) in removed.iter().enumerate() {
+        let Some(new) = partner[old] else { continue };
+        let Some(new_at) = added.iter().position(|&a| a == new) else {
+            continue;
+        };
+        zip_into(&mut out, &removed[old_from..at], &added[new_from..new_at]);
+        out.push((Some(old), Some(new)));
+        (old_from, new_from) = (at + 1, new_at + 1);
+    }
+    zip_into(&mut out, &removed[old_from..], &added[new_from..]);
+    out
+}
+
+fn zip_into(out: &mut Vec<(Option<usize>, Option<usize>)>, old: &[usize], new: &[usize]) {
+    for i in 0..old.len().max(new.len()) {
+        out.push((old.get(i).copied(), new.get(i).copied()));
+    }
+}
+
+impl Panels<'_> {
+    /// Draw the rows at `old` and `new` opposite each other, plus any `\ No
+    /// newline` markers that follow them.
+    fn emit(
+        &self,
+        old: Option<usize>,
+        new: Option<usize>,
+        lines: &mut Vec<Line<'static>>,
+        numbers: &mut Vec<LineNumbers>,
+    ) {
+        let left = old.map(|i| self.cell(i, self.rows[i].old, self.left));
+        let right = new.map(|i| self.cell(i, self.rows[i].new, self.right));
+        let height = [&left, &right]
+            .iter()
+            .filter_map(|cell| cell.as_ref().map(|c| c.rows.len()))
+            .max()
+            .unwrap_or(1);
+        for at in 0..height {
+            let mut spans = self.side(left.as_ref(), at, self.left, LEFT_DELIM);
+            spans.extend(self.side(right.as_ref(), at, self.right, RIGHT_DELIM));
+            lines.push(Line::from(spans));
+            numbers.push(if at == 0 {
+                LineNumbers {
+                    old: left.as_ref().and_then(|c| c.number),
+                    new: right.as_ref().and_then(|c| c.number),
+                }
+            } else {
+                LineNumbers::none()
+            });
+        }
+
+        let marker = |at: Option<usize>| {
+            let next = self.rows.get(at? + 1)?;
+            (next.kind == RowKind::NoNewline).then_some(next.text.as_str())
+        };
+        let (old_marker, new_marker) = (marker(old), marker(new));
+        if old_marker.is_some() || new_marker.is_some() {
+            let mut spans = self.marker_side(old_marker, self.left, LEFT_DELIM);
+            spans.extend(self.marker_side(new_marker, self.right, RIGHT_DELIM));
+            lines.push(Line::from(spans));
+            numbers.push(LineNumbers::none());
+        }
+    }
+
+    fn cell(&self, row: usize, number: Option<u32>, panel: usize) -> Cell {
+        let (spans, _) = code_spans(
+            &self.rows[row],
+            &self.syntax[row],
+            &self.emphasis[row],
+            self.tab,
+            self.palette,
+        );
+        Cell {
+            number,
+            kind: self.rows[row].kind,
+            rows: wrap(spans, panel.saturating_sub(PANEL_GUTTER), self.palette),
+        }
+    }
+
+    /// One panel's share of a screen row: the number on the cell's first row,
+    /// then the text, then padding out to the panel's edge.
+    fn side(
+        &self,
+        cell: Option<&Cell>,
+        at: usize,
+        panel: usize,
+        delim: char,
+    ) -> Vec<Span<'static>> {
+        let kind = cell.map_or(RowKind::Context, |c| c.kind);
+        let number = cell.and_then(|c| c.number).filter(|_| at == 0);
+        let mut spans = vec![panel_gutter(number, kind, delim, self.palette)];
+        let text = cell.and_then(|c| c.rows.get(at));
+        let used: usize = text.map_or(0, |t| t.iter().map(|s| display_width(&s.content)).sum());
+        spans.extend(text.into_iter().flatten().cloned());
+        let fill = panel.saturating_sub(PANEL_GUTTER + used);
+        // An empty panel keeps the terminal's background: tinting it would read
+        // as a change on a side where nothing happened.
+        let style = if cell.is_some() {
+            line_style(kind, self.palette)
+        } else {
+            self.palette.context()
+        };
+        spans.push(Span::styled(" ".repeat(fill), style));
+        spans
+    }
+
+    fn marker_side(&self, text: Option<&str>, panel: usize, delim: char) -> Vec<Span<'static>> {
+        let mut spans = vec![panel_gutter(None, RowKind::Context, delim, self.palette)];
+        let shown = text.map_or_else(String::new, |t| format!("⌀ {t}"));
+        let room = panel.saturating_sub(PANEL_GUTTER);
+        let shown: String = shown.chars().take(room).collect();
+        let fill = room.saturating_sub(display_width(&shown));
+        spans.push(Span::styled(shown, self.palette.marker()));
+        spans.push(Span::styled(" ".repeat(fill), self.palette.context()));
+        spans
+    }
+}
+
+fn panel_gutter(
+    number: Option<u32>,
+    kind: RowKind,
+    delim: char,
+    palette: &DiffPalette,
+) -> Span<'static> {
+    let field = number.map_or_else(String::new, |n| n.to_string());
+    Span::styled(
+        format!("{field:>NUMBER$}{delim}"),
+        Style::new().fg(number_color(kind, palette)),
+    )
+}
+
+fn number_color(kind: RowKind, palette: &DiffPalette) -> Color {
+    match kind {
+        RowKind::Added => palette.plus_number,
+        RowKind::Removed => palette.minus_number,
+        _ => palette.number,
+    }
+}
+
+/// Break styled text into rows of at most `cols` columns, ending every row but
+/// the last with a [`WRAP_MARK`]. Breaks fall between characters: code has no
+/// word boundaries worth keeping, and a wide character that won't fit moves down
+/// whole rather than being split.
+fn wrap(spans: Vec<Span<'static>>, cols: usize, palette: &DiffPalette) -> Vec<Vec<Span<'static>>> {
+    let total: usize = spans.iter().map(|s| display_width(&s.content)).sum();
+    if total <= cols {
+        return vec![spans];
+    }
+    // One column stays free for the mark; at least one holds text, so a pane too
+    // narrow to be useful still makes progress instead of looping.
+    let room = cols.saturating_sub(1).max(1);
+    let mark = Span::styled(WRAP_MARK.to_string(), Style::new().fg(palette.number));
+
+    let mut rows = Vec::new();
+    let mut row: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for span in spans {
+        let mut piece = String::new();
+        for c in span.content.chars() {
+            let width = c.width().unwrap_or(0);
+            if used + width > room && used > 0 {
+                if !piece.is_empty() {
+                    row.push(Span::styled(std::mem::take(&mut piece), span.style));
+                }
+                // Pad a row a wide character left a column short, so the mark
+                // stays at the edge.
+                if used < room {
+                    row.push(Span::styled(" ".repeat(room - used), span.style));
+                }
+                row.push(mark.clone());
+                rows.push(std::mem::take(&mut row));
+                used = 0;
+            }
+            piece.push(c);
+            used += width;
+        }
+        if !piece.is_empty() {
+            row.push(Span::styled(piece, span.style));
+        }
+    }
+    rows.push(row);
+    rows
 }
 
 /// The file's name, how it changed, and anything else git said about it, over a
@@ -96,12 +375,7 @@ fn hunk_header(start: u32, context: &str, width: usize, palette: &DiffPalette) -
 fn no_newline(text: &str, palette: &DiffPalette) -> Line<'static> {
     Line::from(vec![
         gutter(None, None, RowKind::Context, palette),
-        Span::styled(
-            format!("⌀ {text}"),
-            Style::new()
-                .fg(palette.number)
-                .add_modifier(Modifier::ITALIC),
-        ),
+        Span::styled(format!("⌀ {text}"), palette.marker()),
     ])
 }
 
@@ -112,14 +386,9 @@ fn gutter(
     palette: &DiffPalette,
 ) -> Span<'static> {
     let field = |n: Option<u32>| n.map_or_else(String::new, |n| n.to_string());
-    let color = match kind {
-        RowKind::Added => palette.plus_number,
-        RowKind::Removed => palette.minus_number,
-        _ => palette.number,
-    };
     Span::styled(
         format!("{:>NUMBER$}⋮{:>NUMBER$}│", field(old), field(new)),
-        Style::new().fg(color),
+        Style::new().fg(number_color(kind, palette)),
     )
 }
 
@@ -131,10 +400,41 @@ fn code_line(
     tab: usize,
     palette: &DiffPalette,
 ) -> Line<'static> {
-    let (line_style, emph_style) = match row.kind {
-        RowKind::Added => (palette.plus(), palette.plus_emph()),
-        RowKind::Removed => (palette.minus(), palette.minus_emph()),
-        _ => (palette.context(), palette.context()),
+    let (code, column) = code_spans(row, runs, emphasis, tab, palette);
+    let mut spans = vec![gutter(row.old, row.new, row.kind, palette)];
+    spans.extend(code);
+    let fill = width.saturating_sub(GUTTER + column);
+    if fill > 0 {
+        spans.push(Span::styled(
+            " ".repeat(fill),
+            line_style(row.kind, palette),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// The background a row's unemphasized text and padding sit on.
+fn line_style(kind: RowKind, palette: &DiffPalette) -> Style {
+    match kind {
+        RowKind::Added => palette.plus(),
+        RowKind::Removed => palette.minus(),
+        _ => palette.context(),
+    }
+}
+
+/// A row's text as styled spans with tabs expanded, and the columns it takes.
+fn code_spans(
+    row: &Row,
+    runs: &[Run],
+    emphasis: &[Range<usize>],
+    tab: usize,
+    palette: &DiffPalette,
+) -> (Vec<Span<'static>>, usize) {
+    let line = line_style(row.kind, palette);
+    let emph = match row.kind {
+        RowKind::Added => palette.plus_emph(),
+        RowKind::Removed => palette.minus_emph(),
+        _ => palette.context(),
     };
     // Only the added side can introduce a whitespace error: flagging a removed
     // line's would be pointing at something the change just fixed.
@@ -142,27 +442,19 @@ fn code_line(
         .then(|| row.text.trim_end().len())
         .filter(|&end| end < row.text.len());
 
-    let mut spans = vec![gutter(row.old, row.new, row.kind, palette)];
+    let mut spans = Vec::new();
     let mut column = 0;
     for piece in pieces(&row.text, runs, emphasis, trailing) {
         let style = if piece.trailing {
             palette.whitespace_error()
         } else {
-            let background = if piece.emphasized {
-                emph_style
-            } else {
-                line_style
-            };
+            let background = if piece.emphasized { emph } else { line };
             background.patch(piece.syntax.unwrap_or_default())
         };
         let shown = expand(&row.text[piece.range], &mut column, tab);
         spans.push(Span::styled(shown, style));
     }
-    let fill = width.saturating_sub(GUTTER + column);
-    if fill > 0 {
-        spans.push(Span::styled(" ".repeat(fill), line_style));
-    }
-    Line::from(spans)
+    (spans, column)
 }
 
 struct Piece {
@@ -364,6 +656,171 @@ mod tests {
         let header = plain(&text.lines[2]);
         assert!(header.starts_with("── 40: fn outer() ─"), "{header}");
         assert_eq!(display_width(&header), usize::from(WIDTH));
+    }
+
+    fn sbs(raw: &str) -> (Text<'static>, LineMap) {
+        let file = parse(raw).remove(0);
+        render::side_by_side(&file, WIDTH, DiffTheme::GitHubDark, 4)
+    }
+
+    #[test]
+    fn side_by_side_sets_an_edit_opposite_its_original() {
+        let (text, map) = sbs(&file_with(
+            "@@ -1,2 +1,2 @@\n keep\n-let a = 1;\n+let a = 2;\n",
+        ));
+        let row = map
+            .row_for(Anchor {
+                side: Side::New,
+                line: 2,
+            })
+            .unwrap();
+        assert_eq!(
+            map.row_for(Anchor {
+                side: Side::Old,
+                line: 2
+            }),
+            Some(row)
+        );
+        assert_eq!(
+            plain(&text.lines[row]).trim_end(),
+            "    2⋮let a = 1;        2│let a = 2;"
+        );
+    }
+
+    #[test]
+    fn side_by_side_keeps_partners_level_past_unrelated_rows() {
+        let (_, map) = sbs(&file_with(
+            "@@ -1,2 +1,3 @@\n-let a = 1;\n-let b = 1;\n\
+             +println!(\"new\");\n+let a = 2;\n+let b = 2;\n",
+        ));
+        for (old, new) in [(1, 2), (2, 3)] {
+            assert_eq!(
+                map.row_for(Anchor {
+                    side: Side::Old,
+                    line: old
+                }),
+                map.row_for(Anchor {
+                    side: Side::New,
+                    line: new
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn side_by_side_zips_unrelated_lines_rather_than_stacking_them() {
+        let (text, map) = sbs(&file_with("@@ -1 +1 @@\n-alpha\n+omega\n"));
+        let row = map
+            .row_for(Anchor {
+                side: Side::Old,
+                line: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            map.row_for(Anchor {
+                side: Side::New,
+                line: 1
+            }),
+            Some(row)
+        );
+        assert_eq!(text.lines.len(), 4);
+    }
+
+    #[test]
+    fn side_by_side_fills_every_row_to_the_pane_edge() {
+        let long = "word ".repeat(30);
+        let (text, _) = sbs(&file_with(&format!(
+            "@@ -1,3 +1,3 @@\n keep\n-{long}\n+日本語{long}\n+extra\n"
+        )));
+        // The title is the one row that stops at its own text.
+        for line in text.lines.iter().skip(1) {
+            assert_eq!(line_width(line), usize::from(WIDTH), "{}", plain(line));
+        }
+    }
+
+    #[test]
+    fn side_by_side_wraps_each_panel_and_numbers_only_the_first_row() {
+        let long = "x".repeat(30);
+        let (text, map) = sbs(&file_with(&format!("@@ -0,0 +1 @@\n+{long}\n")));
+        let row = map
+            .row_for(Anchor {
+                side: Side::New,
+                line: 1,
+            })
+            .unwrap();
+        let first = plain(&text.lines[row]);
+        assert!(first.ends_with(WRAP_MARK), "{first}");
+        assert_eq!(map.get(row + 1), LineNumbers::none());
+        let shown: usize = text
+            .lines
+            .iter()
+            .skip(2)
+            .map(|l| plain(l).matches('x').count())
+            .sum();
+        assert_eq!(shown, long.len(), "wrapping must keep every character");
+    }
+
+    #[test]
+    fn a_wide_character_at_the_edge_moves_down_whole() {
+        let long = "日".repeat(20);
+        let (text, _) = sbs(&file_with(&format!("@@ -0,0 +1 @@\n+{long}\n")));
+        let shown: usize = text
+            .lines
+            .iter()
+            .map(|l| plain(l).matches('日').count())
+            .sum();
+        assert_eq!(shown, 20);
+        for line in text.lines.iter().skip(3) {
+            assert_eq!(line_width(line), usize::from(WIDTH), "{}", plain(line));
+        }
+    }
+
+    #[test]
+    fn side_by_side_puts_each_missing_newline_marker_under_its_own_side() {
+        let (text, map) = sbs(&file_with(
+            "@@ -1 +1 @@\n-let a = 1;\n+let a = 2;\n\\ No newline at end of file\n",
+        ));
+        let row = map
+            .row_for(Anchor {
+                side: Side::New,
+                line: 1,
+            })
+            .unwrap();
+        let marker = plain(&text.lines[row + 1]);
+        assert_eq!(map.get(row + 1), LineNumbers::none());
+        let split = marker.chars().position(|c| c == RIGHT_DELIM).unwrap();
+        let (left, right): (String, String) = (
+            marker.chars().take(split).collect(),
+            marker.chars().skip(split).collect(),
+        );
+        assert!(!left.contains('⌀'), "{marker}");
+        assert!(right.contains('⌀'), "{marker}");
+    }
+
+    #[test]
+    fn side_by_side_shows_context_on_both_sides() {
+        let (text, map) = sbs(&file_with("@@ -5,1 +9,1 @@\n same\n"));
+        let row = map
+            .row_for(Anchor {
+                side: Side::New,
+                line: 9,
+            })
+            .unwrap();
+        assert_eq!(
+            map.row_for(Anchor {
+                side: Side::Old,
+                line: 5
+            }),
+            Some(row)
+        );
+        assert_eq!(plain(&text.lines[row]).matches("same").count(), 2);
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_the_gutter_still_terminates() {
+        let file = parse(&file_with("@@ -1 +1 @@\n-abcdef\n+ghijkl\n")).remove(0);
+        let (text, map) = render::side_by_side(&file, 8, DiffTheme::GitHubDark, 4);
+        assert_eq!(text.lines.len(), map.len());
     }
 
     #[test]

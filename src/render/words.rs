@@ -17,9 +17,21 @@ const MIN_SIMILARITY: f32 = 0.4;
 /// the work on a large rewrite to a few token diffs per line.
 const PARTNER_WINDOW: usize = 8;
 
-/// Byte ranges to emphasize in each of `rows`, index-aligned.
-pub fn emphasis(rows: &[Row]) -> Vec<Vec<Range<usize>>> {
-    let mut out = vec![Vec::new(); rows.len()];
+/// What the word pass worked out about a file's changed rows.
+#[derive(Debug, Default)]
+pub struct Changes {
+    /// Byte ranges to emphasize in each row, index-aligned with the rows.
+    pub emphasis: Vec<Vec<Range<usize>>>,
+    /// For a removed row, the added row it's an edit of, index-aligned.
+    pub partner: Vec<Option<usize>>,
+}
+
+/// Pair up the edited lines in `rows` and mark what changed in each.
+pub fn changes(rows: &[Row]) -> Changes {
+    let mut out = Changes {
+        emphasis: vec![Vec::new(); rows.len()],
+        partner: vec![None; rows.len()],
+    };
     for (removed, added) in change_runs(rows) {
         let mut next = 0;
         for &old_row in &removed {
@@ -31,8 +43,9 @@ pub fn emphasis(rows: &[Row]) -> Vec<Vec<Range<usize>>> {
                 })
                 .max_by(|a, b| a.2.similarity.total_cmp(&b.2.similarity));
             if let Some((at, new_row, edit)) = best {
-                out[old_row] = edit.old;
-                out[new_row] = edit.new;
+                out.emphasis[old_row] = edit.old;
+                out.emphasis[new_row] = edit.new;
+                out.partner[old_row] = Some(new_row);
                 next = at + 1;
             }
         }
@@ -42,7 +55,8 @@ pub fn emphasis(rows: &[Row]) -> Vec<Vec<Range<usize>>> {
 
 /// Each block of removed rows and the added rows straight after it, as row
 /// indices. A `\ No newline` marker can sit between the two, or inside either.
-fn change_runs(rows: &[Row]) -> Vec<(Vec<usize>, Vec<usize>)> {
+/// Either side can be empty, for a pure addition or deletion.
+pub fn change_runs(rows: &[Row]) -> Vec<(Vec<usize>, Vec<usize>)> {
     let mut runs = Vec::new();
     let (mut removed, mut added) = (Vec::new(), Vec::new());
     for (i, row) in rows.iter().enumerate() {
@@ -51,18 +65,16 @@ fn change_runs(rows: &[Row]) -> Vec<(Vec<usize>, Vec<usize>)> {
             RowKind::Added => added.push(i),
             RowKind::NoNewline => {}
             _ => {
-                if !removed.is_empty() && !added.is_empty() {
+                if !removed.is_empty() || !added.is_empty() {
                     runs.push((std::mem::take(&mut removed), std::mem::take(&mut added)));
                 }
-                removed.clear();
-                added.clear();
                 if row.kind == RowKind::Removed {
                     removed.push(i);
                 }
             }
         }
     }
-    if !removed.is_empty() && !added.is_empty() {
+    if !removed.is_empty() || !added.is_empty() {
         runs.push((removed, added));
     }
     runs
@@ -176,7 +188,8 @@ mod tests {
     fn emphasized(hunk: &str) -> Vec<Vec<String>> {
         let raw = format!("diff --git a/f b/f\n--- a/f\n+++ b/f\n{hunk}");
         let rows = rows(&parse(&raw).remove(0));
-        emphasis(&rows)
+        changes(&rows)
+            .emphasis
             .iter()
             .zip(&rows)
             .map(|(ranges, row)| {
@@ -242,6 +255,21 @@ mod tests {
         let got = emphasized("@@ -1 +1 @@\n-let näme = \"日本\";\n+let näme = \"日本語\";\n");
         assert_eq!(got[1], ["日本"]);
         assert_eq!(got[2], ["日本語"]);
+    }
+
+    #[test]
+    fn a_partner_links_the_removed_row_to_the_added_one() {
+        let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n\
+                   @@ -1,2 +1,2 @@\n-let a = 1;\n-gone\n+let a = 2;\n+other\n";
+        let rows = rows(&parse(raw).remove(0));
+        assert_eq!(changes(&rows).partner, [None, Some(3), None, None, None]);
+    }
+
+    #[test]
+    fn a_pure_addition_is_a_run_of_its_own() {
+        let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n keep\n+new\n";
+        let rows = rows(&parse(raw).remove(0));
+        assert_eq!(change_runs(&rows), [(vec![], vec![2])]);
     }
 
     #[test]

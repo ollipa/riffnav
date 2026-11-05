@@ -61,6 +61,11 @@ impl DiffPalette {
         Style::new().fg(self.heading).add_modifier(Modifier::BOLD)
     }
 
+    /// git's `\\ No newline at end of file` marker.
+    pub fn marker(&self) -> Style {
+        Style::new().fg(self.number).add_modifier(Modifier::ITALIC)
+    }
+
     pub fn whitespace_error(&self) -> Style {
         Style::new()
             .fg(Color::Magenta)
