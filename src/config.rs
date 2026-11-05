@@ -25,6 +25,8 @@ pub struct Config {
     /// Diff color theme: `delta` (inherit gitconfig) | `github-dark` |
     /// `github-light`. Cycle at runtime with the `T` key.
     pub diff_theme: DiffTheme,
+    /// Columns between tab stops in the diff.
+    pub tab_width: u8,
     /// Columns reserved for the file-tree pane, including its right border.
     pub tree_width: u16,
     /// Show the file tree on launch.
@@ -76,6 +78,7 @@ impl Default for Config {
             side_by_side: None,
             icon_style: IconStyle::Nerd,
             diff_theme: DiffTheme::GitHubDark,
+            tab_width: 4,
             tree_width: 32,
             show_tree: true,
             start_focus: Focus::Diff,

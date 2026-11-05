@@ -9,6 +9,7 @@ mod diff;
 mod forge;
 mod herdr;
 mod icons;
+mod render;
 mod review;
 mod session;
 mod state;

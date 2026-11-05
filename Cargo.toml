@@ -24,7 +24,9 @@ notify = "8.2.0"
 ratatui = { version = "0.30.1", features = ["unstable-rendered-line-info"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+similar = "3.2.1"
 toml = "1.1.2"
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 twox-hash = { version = "2.1.2", default-features = false, features = ["xxhash3_128", "std"] }
 unicode-width = "0.2.2"
 

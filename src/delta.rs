@@ -12,6 +12,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::comment::render::CommentBlock;
 use crate::comment::store::{Anchor, Comment};
 use crate::comment::{LineMap, render as comment_render};
+use crate::diff::FileDiff;
 use crate::theme::DiffTheme;
 
 /// Word-wrap setting shared by the height measurement and the per-frame render,
@@ -426,13 +427,19 @@ struct Entry {
 pub struct RenderCache {
     entries: HashMap<Key, Entry>,
     config_sbs: bool,
+    tab_width: u8,
+    /// Render unified diffs with [`crate::render`] instead of delta, while the
+    /// two are being compared. Set by `RIFFNAV_RENDERER=native`.
+    native: bool,
 }
 
 impl RenderCache {
-    pub fn new(config_sbs: bool) -> Self {
+    pub fn new(config_sbs: bool, tab_width: u8) -> Self {
         Self {
             entries: HashMap::new(),
             config_sbs,
+            tab_width,
+            native: std::env::var_os("RIFFNAV_RENDERER").is_some_and(|v| v == "native"),
         }
     }
 
@@ -441,13 +448,15 @@ impl RenderCache {
     pub fn ensure(
         &mut self,
         file: usize,
-        raw: &str,
+        diff: &FileDiff,
         width: u16,
         side_by_side: bool,
         theme: DiffTheme,
         comments: &CommentLayer<'_>,
     ) -> Result<()> {
         let config_sbs = self.config_sbs;
+        let native = self.native && !side_by_side;
+        let tab_width = self.tab_width;
         let key = Key {
             file,
             width,
@@ -455,17 +464,23 @@ impl RenderCache {
             theme,
         };
         if let Slot::Vacant(slot) = self.entries.entry(key.clone()) {
-            let mut bytes = run(raw, width, side_by_side, config_sbs, theme)?;
-            // Unified mode relies on terminal background-color-erase to fill each
-            // line's tint to the edge; ansi_to_tui ignores it, so do it ourselves.
-            // Side-by-side already pads with real spaces and needs no fixup.
-            if !side_by_side {
-                bytes = expand_bce(&bytes, width);
-            }
-            let base = bytes
-                .into_text()
-                .context("converting delta output to ratatui text")?;
-            let base_map = LineMap::build(&base);
+            let (base, base_map) = if native {
+                crate::render::unified(diff, width, theme, tab_width)
+            } else {
+                let mut bytes = run(&diff.raw, width, side_by_side, config_sbs, theme)?;
+                // Unified mode relies on terminal background-color-erase to fill
+                // each line's tint to the edge; ansi_to_tui ignores it, so do it
+                // ourselves. Side-by-side already pads with real spaces and needs
+                // no fixup.
+                if !side_by_side {
+                    bytes = expand_bce(&bytes, width);
+                }
+                let base = bytes
+                    .into_text()
+                    .context("converting delta output to ratatui text")?;
+                let base_map = LineMap::build(&base);
+                (base, base_map)
+            };
             let rendered = splice_and_measure(
                 base.clone(),
                 base_map.clone(),

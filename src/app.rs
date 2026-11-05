@@ -314,7 +314,7 @@ impl App {
             icon_style: cfg.icon_style,
             diff_theme: cfg.diff_theme,
             finder: None,
-            cache: RenderCache::new(config_sbs),
+            cache: RenderCache::new(config_sbs, cfg.tab_width),
             review: ReviewStore::disabled(),
             file_hashes,
             review_auto_advance: cfg.review_auto_advance,
@@ -936,7 +936,7 @@ impl App {
                 );
                 self.cache.ensure(
                     idx,
-                    &self.files[idx].raw,
+                    &self.files[idx],
                     diff_width,
                     side_by_side,
                     self.diff_theme,

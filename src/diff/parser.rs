@@ -124,7 +124,7 @@ pub fn hunks(raw: &str) -> Vec<Hunk> {
 
 /// `@@ -1,5 +1,7 @@ fn foo()` -> its four ranges. A side written without a comma
 /// (`-1`) has an implicit length of 1.
-fn parse_hunk_header(line: &str) -> Option<Hunk> {
+pub(super) fn parse_hunk_header(line: &str) -> Option<Hunk> {
     let rest = line.strip_prefix("@@ ")?;
     let end = rest.find(" @@")?;
     let (old, new) = rest[..end].split_once(' ')?;

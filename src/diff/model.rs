@@ -65,6 +65,14 @@ pub struct Hunk {
 }
 
 impl Hunk {
+    /// The enclosing-function text git appends after the closing `@@`, or `""`.
+    pub fn context(&self) -> &str {
+        self.header
+            .strip_prefix("@@ ")
+            .and_then(|rest| rest.split_once(" @@"))
+            .map_or("", |(_, tail)| tail.trim_start())
+    }
+
     /// Whether `line` falls within this hunk's pre-image range. A zero-length
     /// side (an added file's `-0,0`) contains nothing.
     pub fn contains_old(&self, line: u32) -> bool {

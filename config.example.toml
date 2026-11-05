@@ -15,6 +15,9 @@
 #   "delta"        – inherit your gitconfig/delta theme
 # diff_theme = "github-dark"
 
+# Columns between tab stops in the diff.
+# tab_width = 4
+
 # Columns reserved for the file-tree pane, including its right border.
 # tree_width = 32
 

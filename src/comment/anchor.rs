@@ -82,6 +82,11 @@ impl LineNumbers {
 }
 
 impl LineMap {
+    /// A map for a render that already knows each row's numbers.
+    pub fn from_numbers(rows: Vec<LineNumbers>) -> Self {
+        Self { rows }
+    }
+
     /// Parse the gutter of every line in a delta render.
     pub fn build(text: &Text<'_>) -> Self {
         let plain: Vec<Vec<char>> = text.lines.iter().map(line_chars).collect();
