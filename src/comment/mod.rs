@@ -2,7 +2,7 @@
 //! either by a human in the TUI or by an agent through `riffnav comment add`.
 //!
 //! - [`store`] owns the data model and its on-disk form.
-//! - [`anchor`] maps delta's rendered rows back to diff line numbers.
+//! - [`anchor`] maps rendered rows to diff line numbers.
 //! - [`compose`] is the text field a note is typed into.
 //! - [`render`] turns a thread of comments into the rows drawn beside the code.
 //! - [`watch`] notices notes written by an agent in another terminal.

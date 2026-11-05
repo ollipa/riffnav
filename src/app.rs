@@ -17,11 +17,11 @@ use serde::Deserialize;
 use crate::autodiff::{DiffSource, GitDiff};
 use crate::comment::{Anchor, Comment, CommentStore, CommentWatch, Composer, PendingComment};
 use crate::config::Config;
-use crate::delta::{CommentLayer, RenderCache};
 use crate::diff::{FileDiff, FileStatus};
 use crate::forge::{Forge, ReviewSync};
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
+use crate::render::{CommentLayer, RenderCache};
 use crate::review::ReviewStore;
 use crate::session::Session;
 use crate::theme::DiffTheme;
@@ -272,7 +272,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(files: Vec<FileDiff>, side_by_side: bool, config_sbs: bool, cfg: &Config) -> Self {
+    pub fn new(files: Vec<FileDiff>, side_by_side: bool, cfg: &Config) -> Self {
         let file_hashes = files
             .iter()
             .map(|f| crate::review::file_hash(&f.raw))
@@ -314,7 +314,7 @@ impl App {
             icon_style: cfg.icon_style,
             diff_theme: cfg.diff_theme,
             finder: None,
-            cache: RenderCache::new(config_sbs, cfg.tab_width),
+            cache: RenderCache::new(cfg.tab_width),
             review: ReviewStore::disabled(),
             file_hashes,
             review_auto_advance: cfg.review_auto_advance,
@@ -941,7 +941,7 @@ impl App {
                     side_by_side,
                     self.diff_theme,
                     &layer,
-                )?;
+                );
             }
             // The render may have changed shape (new comments, new theme, new
             // width), so put the cursor back on the line it was on.
@@ -1197,7 +1197,7 @@ impl App {
     }
 
     /// The render backing the current view, if it's already cached.
-    fn current_render(&self) -> Option<&crate::delta::Rendered> {
+    fn current_render(&self) -> Option<&crate::render::Rendered> {
         let idx = self.selected_file()?;
         self.cache.get(
             idx,
@@ -1233,7 +1233,7 @@ impl App {
         self.diff_cursor = match self.cursor_anchor.and_then(|a| render.line_map.row_for(a)) {
             Some(row) => row,
             // Opening a file for the first time: start on the first real diff
-            // line rather than delta's file-header decoration, so `c` works
+            // line rather than the file header, so `c` works
             // straight away instead of reporting there's nothing to comment on.
             None if self.cursor_anchor.is_none() && self.diff_cursor == 0 => {
                 render.line_map.first_code_row().unwrap_or(0)
@@ -2202,8 +2202,8 @@ impl App {
     }
 
     /// Seed the render cache for the selected file, splicing in whatever the
-    /// installed store holds. Tests run without delta on PATH, so this stands in
-    /// for the `RenderCache::ensure` the event loop would do.
+    /// installed store holds. Stands in for the `RenderCache::ensure` the event
+    /// loop would do, for tests that want exact text rather than a diff.
     pub(crate) fn seed_render_for_test(&mut self, width: u16, text: ratatui::text::Text<'static>) {
         let idx = self.selected_file().expect("a file is selected");
         let layer = Self::comment_layer(
@@ -2239,7 +2239,7 @@ mod tests {
     }
 
     fn app_with(files: Vec<FileDiff>) -> App {
-        App::new(files, false, false, &Config::default())
+        App::new(files, false, &Config::default())
     }
 
     /// Like `file`, but with a distinct `raw` so each file hashes differently —
@@ -2259,7 +2259,7 @@ mod tests {
             review_auto_advance: false,
             ..Config::default()
         };
-        App::new(files, false, false, &cfg)
+        App::new(files, false, &cfg)
     }
 
     #[test]
@@ -2466,7 +2466,7 @@ mod tests {
             ..file("new.rs")
         };
         // side_by_side enabled globally; only the added file overrides it.
-        let app = App::new(vec![file("mod.rs"), added], true, false, &Config::default());
+        let app = App::new(vec![file("mod.rs"), added], true, &Config::default());
         assert!(app.side_by_side_for(0), "modified file honors the toggle");
         assert!(!app.side_by_side_for(1), "added file forces unified");
     }
@@ -2634,7 +2634,7 @@ mod tests {
             open_depth: 1,
             ..Config::default()
         };
-        let app = App::new(vec![file("src/diff/parser.rs")], false, false, &cfg);
+        let app = App::new(vec![file("src/diff/parser.rs")], false, &cfg);
         assert!(!app.collapsed.contains("src"));
         assert!(app.collapsed.contains("src/diff"));
     }
@@ -2680,14 +2680,14 @@ mod tests {
 
     #[test]
     fn start_focus_follows_config_but_yields_when_tree_hidden() {
-        let diff_first = App::new(vec![file("a.rs")], false, false, &Config::default());
+        let diff_first = App::new(vec![file("a.rs")], false, &Config::default());
         assert_eq!(diff_first.focus, Focus::Diff); // default: single-file view
 
         let tree_cfg = Config {
             start_focus: Focus::Tree,
             ..Config::default()
         };
-        let tree_first = App::new(vec![file("a.rs")], false, false, &tree_cfg);
+        let tree_first = App::new(vec![file("a.rs")], false, &tree_cfg);
         assert_eq!(tree_first.focus, Focus::Tree);
 
         // With the tree hidden there's nothing to focus but the diff.
@@ -2696,7 +2696,7 @@ mod tests {
             show_tree: false,
             ..Config::default()
         };
-        let hidden = App::new(vec![file("a.rs")], false, false, &hidden_cfg);
+        let hidden = App::new(vec![file("a.rs")], false, &hidden_cfg);
         assert_eq!(hidden.focus, Focus::Diff);
     }
 
@@ -2737,8 +2737,8 @@ mod tests {
         assert_eq!(strip_scissors(&carried), "half a thought");
     }
 
-    /// A three-line diff carrying the gutter delta emits under riffnav's pinned
-    /// number formats, so the line map has real numbers to anchor against.
+    /// A three-line diff with a gutter, so the line map has real numbers to anchor
+    /// against.
     fn seed_text() -> ratatui::text::Text<'static> {
         ratatui::text::Text::from(
             (1..=3)
@@ -3029,7 +3029,7 @@ mod tests {
         app.swap_file_diff(0, file_with_raw("a.rs"));
         assert!(app.cursor_token.is_none(), "the token is dropped");
 
-        // The re-read diff carries two rows of delta decoration ahead of the
+        // The re-read diff carries two header rows ahead of the
         // code, so diff line 3 now sits two rows further down. Seeded the way the
         // event loop would, leaving the cursor state alone.
         let text = ratatui::text::Text::from(

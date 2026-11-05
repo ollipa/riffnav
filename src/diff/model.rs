@@ -24,7 +24,7 @@ impl FileStatus {
 }
 
 /// One file's section of a unified diff: the metadata riffnav needs for the tree
-/// plus the exact `raw` bytes to hand to delta for rendering.
+/// plus the exact `raw` bytes to render.
 #[derive(Debug, Clone)]
 pub struct FileDiff {
     /// Pre-image path (`None` for an added file).

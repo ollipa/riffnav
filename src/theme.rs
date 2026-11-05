@@ -1,15 +1,10 @@
-//! Diff color themes. riffnav renders diffs by shelling out to `delta`, so a
-//! "theme" is really a set of `delta` style flags. `GitHubDark` is the default;
-//! `Delta` is the baseline (inherit the user's gitconfig, riffnav's historical
-//! behavior); the GitHub themes pass `--no-gitconfig` plus explicit styles so
-//! the result is deterministic and matches GitHub's web diff colors.
+//! Diff color themes. `GitHubDark` is the default; both use GitHub's diff colors
+//! and pair them with a syntax theme (see `render::highlight`).
 //!
-//! Why these colors read better than delta's defaults: delta's default +/-
-//! backgrounds are pure, saturated, near-black hues (`#002800` green,
-//! `#3f0001` red). GitHub uses softer, desaturated *tints* for whole lines and
-//! reserves a stronger shade for the exact changed words (word-level emphasis).
-//! The values below are GitHub's actual diff colors — the dark ones are
-//! GitHub's translucent overlays flattened over its `#0d1117` canvas.
+//! GitHub uses soft, desaturated *tints* for whole lines and reserves a stronger
+//! shade for the exact changed words. The values below are GitHub's actual diff
+//! colors — the dark ones are its translucent overlays flattened over its
+//! `#0d1117` canvas.
 //!
 //! Set a default with `diff_theme` in the config, or cycle at runtime with the
 //! `T` key.
@@ -81,11 +76,9 @@ const fn rgb(hex: u32) -> Color {
 // names into `git-hub-dark`) keep the config strings aligned with `name()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 pub enum DiffTheme {
-    /// Baseline: inherit the user's `delta`/gitconfig theme (historical default).
-    #[serde(rename = "delta")]
-    Delta,
-    /// GitHub dark-mode diff colors.
-    #[serde(rename = "github-dark")]
+    /// GitHub dark-mode diff colors. `delta` is what a config from before riffnav
+    /// drew its own diffs might still ask for, and it shouldn't stop it starting.
+    #[serde(rename = "github-dark", alias = "delta")]
     GitHubDark,
     /// GitHub light-mode diff colors (needs a light terminal background).
     #[serde(rename = "github-light")]
@@ -95,9 +88,8 @@ pub enum DiffTheme {
 impl DiffTheme {
     pub fn next(self) -> Self {
         match self {
-            DiffTheme::Delta => DiffTheme::GitHubDark,
             DiffTheme::GitHubDark => DiffTheme::GitHubLight,
-            DiffTheme::GitHubLight => DiffTheme::Delta,
+            DiffTheme::GitHubLight => DiffTheme::GitHubDark,
         }
     }
 
@@ -110,14 +102,10 @@ impl DiffTheme {
             // GitHub's selected-row blue-grey, flattened over each canvas.
             DiffTheme::GitHubDark => Color::Rgb(0x1c, 0x2c, 0x43),
             DiffTheme::GitHubLight => Color::Rgb(0xdd, 0xe7, 0xf5),
-            // The baseline theme borrows the user's own scheme, so use a palette
-            // color their terminal already defines rather than a fixed RGB.
-            DiffTheme::Delta => Color::DarkGray,
         }
     }
 
-    /// The colors this theme paints diffs with: the same GitHub values as
-    /// [`Self::delta_args`], as colors rather than flags.
+    /// The colors this theme paints diffs with.
     pub fn palette(self) -> DiffPalette {
         match self {
             DiffTheme::GitHubLight => DiffPalette {
@@ -133,7 +121,7 @@ impl DiffTheme {
                 heading: rgb(0x0969da),
                 rule: rgb(0xd0d7de),
             },
-            DiffTheme::GitHubDark | DiffTheme::Delta => DiffPalette {
+            DiffTheme::GitHubDark => DiffPalette {
                 plus_bg: rgb(0x12261d),
                 plus_emph_bg: rgb(0x1a4a28),
                 minus_bg: rgb(0x301a1e),
@@ -151,91 +139,8 @@ impl DiffTheme {
 
     pub fn name(self) -> &'static str {
         match self {
-            DiffTheme::Delta => "delta",
             DiffTheme::GitHubDark => "github-dark",
             DiffTheme::GitHubLight => "github-light",
-        }
-    }
-
-    /// Extra `delta` arguments that paint this theme. Empty for `Delta`, which
-    /// keeps riffnav's original gitconfig-driven rendering. Each style flag and
-    /// its value are separate argv entries, as `delta` expects.
-    ///
-    /// `syntax` in a style keeps delta's syntax-highlighted foreground and only
-    /// sets the background — so code stays colorized on top of the diff tint,
-    /// exactly like GitHub.
-    ///
-    /// Line numbers themselves aren't listed here: `delta::run` turns them on for
-    /// every theme, since riffnav reads comment anchors back out of that gutter.
-    pub fn delta_args(self) -> &'static [&'static str] {
-        match self {
-            DiffTheme::Delta => &[],
-            // GitHub dark. Line tints are GitHub's green/red overlays flattened
-            // over #0d1117; the emph shades are the same hues at higher opacity.
-            DiffTheme::GitHubDark => &[
-                "--syntax-theme",
-                "Visual Studio Dark+",
-                "--plus-style",
-                "syntax #12261d",
-                "--plus-emph-style",
-                "syntax #1a4a28",
-                "--minus-style",
-                "syntax #301a1e",
-                "--minus-emph-style",
-                "syntax #6b2a2b",
-                "--zero-style",
-                "syntax",
-                "--line-numbers-plus-style",
-                "#3fb950",
-                "--line-numbers-minus-style",
-                "#f85149",
-                "--line-numbers-zero-style",
-                "#6e7681",
-                "--hunk-header-style",
-                "#58a6ff bold",
-                "--hunk-header-decoration-style",
-                "#30363d box",
-                "--hunk-header-line-number-style",
-                "#6e7681",
-                "--file-style",
-                "#58a6ff bold",
-                "--file-decoration-style",
-                "#30363d ul",
-            ],
-            // GitHub light. Context lines get a forced white background so the
-            // whole pane reads as GitHub's light "card" even when the terminal
-            // itself is dark.
-            DiffTheme::GitHubLight => &[
-                "--light",
-                "--syntax-theme",
-                "GitHub",
-                "--plus-style",
-                "syntax #e6ffec",
-                "--plus-emph-style",
-                "syntax #abf2bc",
-                "--minus-style",
-                "syntax #ffebe9",
-                "--minus-emph-style",
-                "syntax #fdb8c0",
-                "--zero-style",
-                "syntax #ffffff",
-                "--line-numbers-plus-style",
-                "#1a7f37",
-                "--line-numbers-minus-style",
-                "#cf222e",
-                "--line-numbers-zero-style",
-                "#6e7781",
-                "--hunk-header-style",
-                "#0969da bold",
-                "--hunk-header-decoration-style",
-                "#d0d7de box",
-                "--hunk-header-line-number-style",
-                "#6e7781",
-                "--file-style",
-                "#0969da bold",
-                "--file-decoration-style",
-                "#d0d7de ul",
-            ],
         }
     }
 }

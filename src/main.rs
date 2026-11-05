@@ -4,7 +4,6 @@ mod cli;
 mod cmd;
 mod comment;
 mod config;
-mod delta;
 mod diff;
 mod forge;
 mod herdr;
@@ -122,8 +121,7 @@ fn main() -> Result<()> {
             }
         }
         // The `comment`/`skill` subcommands are plain CLI tools: no TUI, no diff
-        // on stdin, no delta. They talk to the same on-disk state a running
-        // window does.
+        // on stdin. They talk to the same on-disk state a running window does.
         Some(command) => return cmd::run(command),
         // No subcommand: either a diff is being piped in, or the user typed
         // `riffnav` with nothing to show it — in which case show them what they
@@ -150,20 +148,16 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    delta::ensure_available()?;
-
-    // Layout precedence: CLI -s/-u win, then the config file, then the user's
-    // delta.side-by-side default.
-    let config_sbs = delta::detect_side_by_side();
+    // Layout precedence: CLI -s/-u win, then the config file.
     let side_by_side = if cli.side_by_side {
         true
     } else if cli.unified {
         false
     } else {
-        config.side_by_side.unwrap_or(config_sbs)
+        config.side_by_side
     };
 
-    let mut app = app::App::new(files, side_by_side, config_sbs, &config);
+    let mut app = app::App::new(files, side_by_side, &config);
     if let Some(git) = input.git {
         app.enable_git_diff(git);
     }

@@ -1,4 +1,4 @@
-//! Drawing comment threads into a delta render.
+//! Drawing comment threads into a render.
 //!
 //! Blocks are spliced straight into the rendered `Text` rather than overlaid at
 //! draw time: the diff pane scrolls by row, so a comment has to occupy real rows
@@ -434,22 +434,6 @@ impl Palette {
                     Color::Rgb(0xf0, 0x88, 0x3e), // orange
                 ],
             },
-            // The baseline theme follows the user's own gitconfig colors, so use
-            // terminal-palette names and let their scheme decide the shades.
-            DiffTheme::Delta => Self {
-                accent: Color::Yellow,
-                meta: Color::DarkGray,
-                body: Color::Reset,
-                stale: Color::Red,
-                names: &[
-                    Color::Cyan,
-                    Color::Green,
-                    Color::Magenta,
-                    Color::Blue,
-                    Color::LightGreen,
-                    Color::LightMagenta,
-                ],
-            },
         }
     }
 
@@ -489,7 +473,7 @@ mod tests {
                 .map(|s| Line::from(s.to_string()))
                 .collect::<Vec<_>>(),
         );
-        let map = LineMap::build(&text);
+        let map = LineMap::from_gutters(&text);
         (text, map)
     }
 
@@ -701,11 +685,7 @@ mod tests {
 
     #[test]
     fn a_name_keeps_one_color_and_mine_keeps_the_accent() {
-        for theme in [
-            DiffTheme::Delta,
-            DiffTheme::GitHubDark,
-            DiffTheme::GitHubLight,
-        ] {
+        for theme in [DiffTheme::GitHubDark, DiffTheme::GitHubLight] {
             let p = Palette::for_theme(theme);
             // My own notes stay in the frame's accent...
             assert_eq!(p.author("olli", "olli"), p.accent);

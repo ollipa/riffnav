@@ -3,7 +3,7 @@
 # Every key is optional; omitted keys use the defaults shown here. CLI flags
 # (e.g. -s/-u) override anything set here.
 
-# Initial layout. Omit to follow your `delta.side-by-side` git config default.
+# Start in side-by-side view rather than unified.
 # side_by_side = false
 
 # File-tree glyphs: "nerd" (needs a Nerd Font) | "unicode" | "ascii".
@@ -12,7 +12,6 @@
 # Diff color theme (cycle at runtime with `T`):
 #   "github-dark"  – GitHub dark-mode diff colors (default)
 #   "github-light" – GitHub light-mode colors (best on a light terminal)
-#   "delta"        – inherit your gitconfig/delta theme
 # diff_theme = "github-dark"
 
 # Columns between tab stops in the diff.

@@ -7,7 +7,7 @@ use super::model::{FileDiff, FileStatus, Hunk};
 pub fn parse(input: &str) -> Vec<FileDiff> {
     // git colorizes diffs when piping to a pager, so `pager.diff = riffnav` feeds
     // us ANSI-wrapped lines the markers below wouldn't match. Strip the codes up
-    // front; delta re-colors from the plain text anyway.
+    // front; the renderer colors from the plain text anyway.
     let input = strip_ansi(input);
     let input = input.as_ref();
 
@@ -115,7 +115,7 @@ fn parse_one(raw: &str) -> FileDiff {
 /// Parse the `@@` headers out of one file's verbatim diff text (`FileDiff::raw`).
 ///
 /// Computed on demand rather than during [`parse`], since only the comment CLI
-/// needs it — the TUI reads line numbers back out of delta's rendered gutter.
+/// needs it — the TUI works from [`super::rows`].
 /// Combined (merge) diffs use `@@@` headers and are skipped: they have no single
 /// pre-image side to anchor a comment to.
 pub fn hunks(raw: &str) -> Vec<Hunk> {
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(files[0].path(), "a.rs");
         assert_eq!(files[0].additions, 1);
         assert_eq!(files[0].deletions, 1);
-        // raw is handed to delta, which re-colors, so it must be free of codes.
+        // raw is what gets rendered, so it must be free of codes.
         assert!(!files[0].raw.contains('\x1b'));
     }
 

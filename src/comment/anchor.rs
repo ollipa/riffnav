@@ -1,43 +1,13 @@
-//! Mapping delta's rendered output back to diff line numbers.
+//! Diff line numbers per rendered row.
 //!
 //! Comments anchor to `(file, side, line)` in diff-line space, but they have to
-//! be drawn next to a *row*. Nothing in delta's ANSI output identifies a row, so
-//! riffnav reads the line numbers back out of delta's own gutter: `run()` pins
-//! `--line-numbers` and both number formats to fixed-width fields, which makes
-//! this parse arithmetic rather than guesswork.
-//!
-//! With `--line-numbers-left-format "{nm:>5}⋮"` and
-//! `--line-numbers-right-format "{np:>5}│"`, delta 0.19 emits:
-//!
-//! ```text
-//! unified        "    2⋮     │use std::process::Command;"   old=2  new=-
-//!                "     ⋮    3│use std::process::{…};"       old=-  new=3
-//! side-by-side   "    3⋮use std::time::…        4│use std::time::…"
-//! ```
-//!
-//! Both modes put the pre-image field in the first five columns followed by `⋮`.
-//! They differ only in where the post-image field sits: immediately after in
-//! unified, at the panel boundary in side-by-side. delta pads the left panel to a
-//! fixed width, so that column is constant for a whole render — [`LineMap::build`]
-//! finds it once by consensus instead of assuming a geometry.
-//!
-//! Alternatives considered and rejected: correlating output rows with the parsed
-//! diff by position breaks on delta's decoration rows (`--file-decoration-style
-//! ul`, `--hunk-header-decoration-style box`), and rendering hunk-by-hunk costs a
-//! subprocess spawn per hunk.
-
-use ratatui::text::{Line, Text};
+//! be drawn next to a *row*. The renderer knows which numbers each row carries,
+//! so [`LineMap`] just keeps them, aligned with the rows as comment blocks are
+//! spliced in.
 
 use super::store::{Anchor, Side};
 
-/// Width of the fixed number field in both pinned formats.
-const FIELD: usize = 5;
-/// Delimiter closing the pre-image field.
-const LEFT_DELIM: char = '⋮';
-/// Delimiter closing the post-image field.
-const RIGHT_DELIM: char = '│';
-
-/// Per rendered line, the diff line numbers delta printed in its gutter.
+/// Per rendered line, the diff line numbers it shows.
 /// Index-aligned with `Text::lines`, and kept aligned as comment blocks are
 /// spliced in (spliced rows get a `LineNumbers::none()`).
 #[derive(Debug, Clone, Default)]
@@ -72,13 +42,6 @@ impl LineNumbers {
             (None, None) => None,
         }
     }
-
-    /// Whether this row is a diff line rather than a header, decoration, or a
-    /// spliced comment row. Only the tests need to assert on it.
-    #[cfg(test)]
-    pub fn is_code(self) -> bool {
-        self.old.is_some() || self.new.is_some()
-    }
 }
 
 impl LineMap {
@@ -87,20 +50,24 @@ impl LineMap {
         Self { rows }
     }
 
-    /// Parse the gutter of every line in a delta render.
-    pub fn build(text: &Text<'_>) -> Self {
-        let plain: Vec<Vec<char>> = text.lines.iter().map(line_chars).collect();
-        let right = consensus_right_column(&plain);
-
-        let rows = plain
-            .iter()
-            .map(|chars| LineNumbers {
-                old: field_at(chars, FIELD, LEFT_DELIM),
-                new: right.and_then(|col| field_at(chars, col, RIGHT_DELIM)),
-            })
-            .collect::<Vec<_>>();
-
-        Self { rows }
+    /// Read the numbers out of rows written `"    1⋮    2│code"`, for tests that
+    /// seed exact text rather than rendering a diff.
+    #[cfg(test)]
+    pub fn from_gutters(text: &ratatui::text::Text<'_>) -> Self {
+        let rows = text.lines.iter().map(|line| {
+            let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let Some((old, rest)) = plain.split_once('⋮') else {
+                return LineNumbers::none();
+            };
+            let new = rest.split_once('│').map_or("", |(new, _)| new);
+            LineNumbers {
+                old: old.trim().parse().ok(),
+                new: new.trim().parse().ok(),
+            }
+        });
+        Self {
+            rows: rows.collect(),
+        }
     }
 
     pub fn get(&self, row: usize) -> LineNumbers {
@@ -125,7 +92,7 @@ impl LineMap {
     }
 
     /// The first row carrying a line number, i.e. the first actual diff line
-    /// past delta's file header and hunk-header decorations. Where the cursor
+    /// past the file header and hunk headers. Where the cursor
     /// starts, so `c` works without hunting for a commentable row.
     pub fn first_code_row(&self) -> Option<usize> {
         self.rows
@@ -142,234 +109,58 @@ impl LineMap {
     }
 }
 
-/// Flatten a styled line to the characters a terminal would show.
-fn line_chars(line: &Line<'_>) -> Vec<char> {
-    line.spans.iter().flat_map(|s| s.content.chars()).collect()
-}
-
-/// Read the `FIELD`-wide number ending just before `delim_col`, requiring the
-/// delimiter to actually be there. An all-blank field (the side this row doesn't
-/// touch) yields `None`, as does anything non-numeric.
-fn field_at(chars: &[char], delim_col: usize, delim: char) -> Option<u32> {
-    if delim_col < FIELD || chars.get(delim_col) != Some(&delim) {
-        return None;
-    }
-    let digits: String = chars[delim_col - FIELD..delim_col]
-        .iter()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    digits.parse().ok()
-}
-
-/// The column holding the post-image delimiter, agreed by majority across the
-/// render.
-///
-/// Deciding once per render rather than per line is what makes side-by-side safe:
-/// the column is constant because delta pads the left panel, so a stray `│` in
-/// the code itself can never outvote it. In unified mode the consensus lands on
-/// `FIELD * 2 + 1` on its own, so both modes share this path.
-fn consensus_right_column(plain: &[Vec<char>]) -> Option<usize> {
-    let mut tally: Vec<(usize, usize)> = Vec::new();
-    for chars in plain {
-        // Only rows that already look like code lines get a vote.
-        if field_at(chars, FIELD, LEFT_DELIM).is_none() && chars.get(FIELD) != Some(&LEFT_DELIM) {
-            continue;
-        }
-        for (col, _) in chars
-            .iter()
-            .enumerate()
-            .filter(|&(col, c)| *c == RIGHT_DELIM && col > FIELD)
-        {
-            if field_at(chars, col, RIGHT_DELIM).is_some() {
-                match tally.iter_mut().find(|(c, _)| *c == col) {
-                    Some((_, n)) => *n += 1,
-                    None => tally.push((col, 1)),
-                }
-            }
-        }
-    }
-    tally
-        .into_iter()
-        .max_by_key(|&(col, n)| (n, usize::MAX - col))
-        .map(|(col, _)| col)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Verbatim delta 0.19.2 output (ANSI stripped) for
-    /// `--line-numbers --line-numbers-left-format "{nm:>5}⋮"
-    ///  --line-numbers-right-format "{np:>5}│"`.
-    const UNIFIED: &[&str] = &[
-        "src/app.rs",
-        "────────────",
-        "    1⋮    1│use std::collections::HashSet;",
-        "    2⋮     │use std::process::Command;",
-        "     ⋮    2│use std::io::IsTerminal;",
-        "     ⋮    3│use std::process::{Command, Stdio};",
-        "    3⋮    4│use std::time::{Duration, Instant};",
+    /// Rows as `(old, new)`, with `(None, None)` for a header.
+    fn map(rows: &[(Option<u32>, Option<u32>)]) -> LineMap {
+        LineMap::from_numbers(
+            rows.iter()
+                .map(|&(old, new)| LineNumbers { old, new })
+                .collect(),
+        )
+    }
+
+    const ROWS: &[(Option<u32>, Option<u32>)] = &[
+        (None, None),
+        (None, None),
+        (Some(1), Some(1)),
+        (Some(2), None),
+        (None, Some(2)),
+        (None, Some(3)),
+        (Some(3), Some(4)),
     ];
 
-    const SIDE_BY_SIDE: &[&str] = &[
-        "src/app.rs",
-        "────────────",
-        "    1⋮use std::collections::HashSet;                  1│use std::collections::HashSet;",
-        "    2⋮use std::process::Command;                      2│use std::io::IsTerminal;",
-        "     ⋮                                                3│use std::process::{Command, Stdio};",
-        "    3⋮use std::time::{Duration, Instant};             4│use std::time::{Duration, Instant};",
-    ];
-
-    fn map(lines: &[&str]) -> LineMap {
-        LineMap::build(&Text::from(
-            lines
-                .iter()
-                .map(|s| Line::from(s.to_string()))
-                .collect::<Vec<_>>(),
-        ))
-    }
-
     #[test]
-    fn unified_gutter_yields_both_sides() {
-        let m = map(UNIFIED);
-        // Header and decoration rows carry no numbers.
-        assert_eq!(m.get(0), LineNumbers::none());
-        assert_eq!(m.get(1), LineNumbers::none());
-        // A context line has both sides.
-        assert_eq!(
-            m.get(2),
-            LineNumbers {
-                old: Some(1),
-                new: Some(1)
-            }
-        );
-        // A removed line has only the pre-image side...
-        assert_eq!(
-            m.get(3),
-            LineNumbers {
-                old: Some(2),
-                new: None
-            }
-        );
-        // ...and an added line only the post-image side.
-        assert_eq!(
-            m.get(4),
-            LineNumbers {
-                old: None,
-                new: Some(2)
-            }
-        );
-    }
-
-    #[test]
-    fn side_by_side_gutter_yields_both_sides() {
-        let m = map(SIDE_BY_SIDE);
-        assert_eq!(
-            m.get(2),
-            LineNumbers {
-                old: Some(1),
-                new: Some(1)
-            }
-        );
-        assert_eq!(
-            m.get(3),
-            LineNumbers {
-                old: Some(2),
-                new: Some(2)
-            }
-        );
-        // A pure insertion leaves the left panel blank.
-        assert_eq!(
-            m.get(4),
-            LineNumbers {
-                old: None,
-                new: Some(3)
-            }
-        );
-        assert_eq!(
-            m.get(5),
-            LineNumbers {
-                old: Some(3),
-                new: Some(4)
-            }
-        );
-    }
-
-    #[test]
-    fn row_lookup_finds_the_anchored_line_in_both_modes() {
-        for lines in [UNIFIED, SIDE_BY_SIDE] {
-            let m = map(lines);
-            let new3 = Anchor {
-                side: Side::New,
-                line: 3,
-            };
-            assert!(m.get(m.row_for(new3).expect("line 3 is rendered")).new == Some(3));
-            let old2 = Anchor {
-                side: Side::Old,
-                line: 2,
-            };
-            assert!(m.get(m.row_for(old2).expect("old line 2 is rendered")).old == Some(2));
-            // A line outside the diff has no row.
-            assert_eq!(
-                m.row_for(Anchor {
-                    side: Side::New,
-                    line: 900
-                }),
-                None
-            );
-        }
-    }
-
-    #[test]
-    fn a_pipe_inside_code_cannot_outvote_the_real_gutter() {
-        // Rust code drawing a box char preceded by digits would be a valid-looking
-        // field on its own line; consensus across the render must ignore it.
-        let m = map(&[
-            "    1⋮    1│let border = \"    9│\";",
-            "    2⋮    2│let other = 1;",
-            "    3⋮    3│let third = 2;",
-        ]);
-        assert_eq!(
-            m.get(0),
-            LineNumbers {
-                old: Some(1),
-                new: Some(1)
-            }
-        );
-        assert_eq!(
-            m.get(2),
-            LineNumbers {
-                old: Some(3),
-                new: Some(3)
-            }
-        );
-    }
-
-    #[test]
-    fn no_gutter_at_all_anchors_nothing() {
-        // delta produced no line numbers, so every anchor misses and the caller
-        // falls back to appending the comments (see `render::splice`).
-        let m = map(&["diff --git a/f b/f", "-old", "+new"]);
-        assert!(!m.get(0).is_code());
+    fn row_lookup_finds_the_anchored_line_on_each_side() {
+        let m = map(ROWS);
+        let new3 = Anchor {
+            side: Side::New,
+            line: 3,
+        };
+        assert_eq!(m.row_for(new3), Some(5));
+        let old2 = Anchor {
+            side: Side::Old,
+            line: 2,
+        };
+        assert_eq!(m.row_for(old2), Some(3));
+        // A line outside the diff has no row.
         assert_eq!(
             m.row_for(Anchor {
                 side: Side::New,
-                line: 1
+                line: 900
             }),
             None
         );
     }
 
     #[test]
-    fn first_code_row_skips_deltas_header_decorations() {
+    fn first_code_row_skips_the_headers() {
         // The cursor opens here, so it must land past the file name and the rule
         // beneath it — otherwise `c` reports there's nothing to comment on.
-        assert_eq!(map(UNIFIED).first_code_row(), Some(2));
-        assert_eq!(map(SIDE_BY_SIDE).first_code_row(), Some(2));
-        assert_eq!(map(&["no gutter here"]).first_code_row(), None);
+        assert_eq!(map(ROWS).first_code_row(), Some(2));
+        assert_eq!(map(&[(None, None)]).first_code_row(), None);
     }
 
     #[test]
@@ -401,24 +192,23 @@ mod tests {
 
     #[test]
     fn inserting_blanks_keeps_later_rows_findable() {
-        let mut m = map(UNIFIED);
-        let before = m
-            .row_for(Anchor {
-                side: Side::New,
-                line: 4,
-            })
-            .unwrap();
+        let mut m = map(ROWS);
+        let anchor = Anchor {
+            side: Side::New,
+            line: 4,
+        };
+        let before = m.row_for(anchor).unwrap();
         m.insert_blanks(3, 2);
-        assert_eq!(m.len(), UNIFIED.len() + 2);
-        assert_eq!(
-            m.row_for(Anchor {
-                side: Side::New,
-                line: 4
-            }),
-            Some(before + 2)
-        );
-        // The inserted rows themselves carry nothing.
-        assert_eq!(m.get(3), LineNumbers::none());
-        assert_eq!(m.get(4), LineNumbers::none());
+        assert_eq!(m.len(), ROWS.len() + 2);
+        assert_eq!(m.row_for(anchor), Some(before + 2));
+    }
+
+    #[test]
+    fn test_gutters_read_back_as_numbers() {
+        let text = ratatui::text::Text::from("    2⋮     │code\n     ⋮    3│code\nheader");
+        let m = LineMap::from_gutters(&text);
+        assert_eq!((m.get(0).old, m.get(0).new), (Some(2), None));
+        assert_eq!((m.get(1).old, m.get(1).new), (None, Some(3)));
+        assert_eq!(m.get(2), LineNumbers::none());
     }
 }

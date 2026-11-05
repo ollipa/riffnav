@@ -197,7 +197,7 @@ fn render_help(
         ("s", "toggle side-by-side / unified"),
         ("e", "toggle file tree"),
         ("i", "cycle icon style (nerd/unicode/ascii)"),
-        ("T", "cycle diff theme (delta/github-dark/github-light)"),
+        ("T", "switch diff theme (github-dark/github-light)"),
         ("y", "copy file path"),
         ("o", "open file in $EDITOR"),
         ("v / V", "mark viewed / jump to next unviewed"),
@@ -446,7 +446,7 @@ mod tests {
             file("src/main.rs", FileStatus::Modified, 12, 4),
             file("src/diff/parser.rs", FileStatus::Added, 40, 0),
         ];
-        App::new(files, false, false, cfg)
+        App::new(files, false, cfg)
     }
 
     fn render(app: &mut App, width: u16, height: u16) -> String {
@@ -489,7 +489,7 @@ mod tests {
         let files: Vec<_> = (0..30)
             .map(|i| file(&format!("file{i:02}.rs"), FileStatus::Modified, 1, 1))
             .collect();
-        let mut app = App::new(files, false, false, &cfg);
+        let mut app = App::new(files, false, &cfg);
         app.tree_state.select(Some(20));
 
         let out = render(&mut app, 64, 12);
@@ -503,7 +503,7 @@ mod tests {
         );
     }
 
-    /// delta leaves unified diffs unwrapped, so a line wider than the pane must
+    /// Unified diffs are left unwrapped, so a line wider than the pane must
     /// be wrapped by the viewer rather than truncated at the edge. Regression
     /// test for long markdown lines losing their tail.
     #[test]
@@ -514,10 +514,10 @@ mod tests {
         };
         let mut app = sample_app(&cfg); // unified mode, first file selected
         let (width, height) = (64, 12);
-        let diff_width = width - app.tree_width; // the pane delta wraps to
+        let diff_width = width - app.tree_width; // the diff pane
 
         // One line several pane-widths long, with no spaces so wrapping has to
-        // break mid-token — exactly the case delta truncates in side-by-side.
+        // break mid-token.
         let long = "X".repeat(diff_width as usize * 3 + 5);
         let idx = app.selected_file().expect("a file is selected");
         app.cache.insert_for_test(
@@ -541,8 +541,7 @@ mod tests {
     }
 
     /// An app whose selected file has a six-line diff and the given comments on
-    /// it. The seeded gutter matches what delta emits under riffnav's pinned
-    /// number formats, so `LineMap` has real numbers to anchor against.
+    /// it. The seeded gutter gives `LineMap` real numbers to anchor against.
     fn app_with_comments(comments: &[(u32, &str, &str)]) -> (App, u16, u16) {
         let cfg = Config {
             icon_style: IconStyle::Ascii,
@@ -610,12 +609,7 @@ mod tests {
             ..Config::default()
         };
         let path = "a_file_whose_name_runs_well_past_the_pane_edge.rs";
-        let mut app = App::new(
-            vec![file(path, FileStatus::Modified, 40, 0)],
-            false,
-            false,
-            &cfg,
-        );
+        let mut app = App::new(vec![file(path, FileStatus::Modified, 40, 0)], false, &cfg);
         let mut store = crate::comment::CommentStore::disabled();
         store.add(crate::comment::Comment {
             id: String::new(),

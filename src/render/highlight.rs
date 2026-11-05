@@ -90,7 +90,7 @@ pub fn highlight(file: &FileDiff, rows: &[Row], theme: DiffTheme) -> Vec<Vec<Run
 fn syntax_theme(theme: DiffTheme) -> EmbeddedThemeName {
     match theme {
         DiffTheme::GitHubLight => EmbeddedThemeName::Github,
-        DiffTheme::GitHubDark | DiffTheme::Delta => EmbeddedThemeName::OneHalfDark,
+        DiffTheme::GitHubDark => EmbeddedThemeName::OneHalfDark,
     }
 }
 

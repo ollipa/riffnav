@@ -17,13 +17,13 @@ use crate::theme::DiffTheme;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Initial layout. `None` follows the user's `delta.side-by-side` default;
-    /// `Some(_)` forces it (CLI `-s`/`-u` still win over this).
-    pub side_by_side: Option<bool>,
+    /// Start in side-by-side view rather than unified (CLI `-s`/`-u` win over
+    /// this).
+    pub side_by_side: bool,
     /// File-tree glyphs: `nerd` | `unicode` | `ascii`.
     pub icon_style: IconStyle,
-    /// Diff color theme: `delta` (inherit gitconfig) | `github-dark` |
-    /// `github-light`. Cycle at runtime with the `T` key.
+    /// Diff color theme: `github-dark` | `github-light`. Switch at runtime with
+    /// the `T` key.
     pub diff_theme: DiffTheme,
     /// Columns between tab stops in the diff.
     pub tab_width: u8,
@@ -75,7 +75,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            side_by_side: None,
+            side_by_side: false,
             icon_style: IconStyle::Nerd,
             diff_theme: DiffTheme::GitHubDark,
             tab_width: 4,
@@ -147,7 +147,7 @@ mod tests {
         assert!(c.show_tree);
         assert!(c.show_header);
         assert_eq!(c.icon_style, IconStyle::Nerd);
-        assert_eq!(c.side_by_side, None);
+        assert!(!c.side_by_side);
         assert_eq!(c.start_focus, Focus::Diff);
     }
 
@@ -175,15 +175,9 @@ mod tests {
     }
 
     #[test]
-    fn side_by_side_can_be_forced() {
-        assert_eq!(
-            from_toml("side_by_side = true").unwrap().side_by_side,
-            Some(true)
-        );
-        assert_eq!(
-            from_toml("side_by_side = false").unwrap().side_by_side,
-            Some(false)
-        );
+    fn side_by_side_can_be_set() {
+        assert!(from_toml("side_by_side = true").unwrap().side_by_side);
+        assert!(!from_toml("side_by_side = false").unwrap().side_by_side);
     }
 
     #[test]
@@ -252,7 +246,7 @@ mod tests {
         assert_eq!(from_toml("").unwrap().diff_theme, DiffTheme::GitHubDark);
         assert_eq!(
             from_toml("diff_theme = \"delta\"").unwrap().diff_theme,
-            DiffTheme::Delta
+            DiffTheme::GitHubDark
         );
         assert_eq!(
             from_toml("diff_theme = \"github-light\"")

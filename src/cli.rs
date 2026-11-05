@@ -6,22 +6,18 @@ use crate::autodiff::DiffSource;
 use crate::diff::FileDiff;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "riffnav",
-    version,
-    about = "A git diff pager with a file tree, powered by delta"
-)]
+#[command(name = "riffnav", version, about = "A git diff pager with a file tree")]
 pub struct Cli {
     /// What to review, and the CLI tools alongside it. Absent when a diff is
     /// piped in, which keeps `riffnav` usable as git's pager exactly as before.
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Start in side-by-side view (default follows your delta config).
+    /// Start in side-by-side view.
     #[arg(short = 's', long, global = true, conflicts_with = "unified")]
     pub side_by_side: bool,
 
-    /// Start in unified view (default follows your delta config).
+    /// Start in unified view.
     #[arg(short = 'u', long, global = true)]
     pub unified: bool,
 
