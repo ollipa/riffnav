@@ -525,10 +525,9 @@ fn code_spans(
         RowKind::Removed => palette.minus_emph(),
         _ => palette.context(),
     };
-    // Only new text can introduce a whitespace error: flagging a removed line's
-    // would be pointing at something the change just fixed, and a moved line's
-    // at something it only carried along.
-    let trailing = (row.kind == RowKind::Added && !moved)
+    // Only the added side can introduce a whitespace error: flagging a removed
+    // line's would be pointing at something the change just fixed.
+    let trailing = (row.kind == RowKind::Added)
         .then(|| row.text.trim_end().len())
         .filter(|&end| end < row.text.len());
 
@@ -1124,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn a_trailing_blank_on_a_moved_line_isnt_flagged() {
+    fn a_trailing_blank_on_a_moved_line_is_still_flagged() {
         let files = parse(&file_with(
             "@@ -1,3 +1,3 @@\n-fn alpha_value() {\n-    first_call(1);  \n keep\n\
              +fn alpha_value() {\n+    first_call(1);  \n",
@@ -1137,6 +1136,6 @@ mod tests {
             .iter()
             .flat_map(|l| &l.spans)
             .any(|s| s.style == flagged);
-        assert!(!any);
+        assert!(any);
     }
 }

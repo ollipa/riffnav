@@ -28,6 +28,9 @@ const MIN_ANCHOR_ALNUM: usize = 5;
 const MAX_COPIES: usize = 32;
 /// Changed lines in the whole diff past which detection is skipped.
 const MAX_CHANGED_LINES: u64 = 100_000;
+/// The hint on a block that never left its place: re-indented, realigned, or
+/// given new line endings.
+const WHITESPACE_ONLY: &str = "whitespace only";
 
 /// What a moved row needs the renderer to know.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,9 +78,16 @@ impl MoveIndex {
         let (removed, added) = changed_lines(&rows);
         let blocks = claim(matches(&removed, &added), &removed, &added);
 
+        let reordered = reordered_runs(&blocks, &removed, &added);
         let mut marks: Vec<Vec<Option<Mark>>> = rows.iter().map(|r| vec![None; r.len()]).collect();
         for block in blocks {
-            let (to, from) = hints(&block, &removed, &added, &rows, files);
+            let (old, new) = (&removed[block.old], &added[block.new]);
+            let stayed = old.run == new.run && !reordered.contains(&old.run);
+            let (to, from) = if stayed {
+                (WHITESPACE_ONLY.to_string(), WHITESPACE_ONLY.to_string())
+            } else {
+                hints(old, new, &rows, files)
+            };
             for at in 0..block.len {
                 let (old, new) = (&removed[block.old + at], &added[block.new + at]);
                 marks[old.file][old.row] = Some(Mark {
@@ -262,22 +272,25 @@ fn qualified(block: Block, removed: &[Line]) -> Option<Block> {
     })
 }
 
-/// What to say above a block's removed and added halves.
-fn hints(
-    block: &Block,
-    removed: &[Line],
-    added: &[Line],
-    rows: &[Vec<Row>],
-    files: &[FileDiff],
-) -> (String, String) {
-    let (old, new) = (&removed[block.old], &added[block.new]);
-    let text = |line: &Line| rows[line.file][line.row].text.as_str();
-    let reindented = old.run == new.run
-        && (0..block.len).any(|at| text(&removed[block.old + at]) != text(&added[block.new + at]));
-    if reindented {
-        return ("re-indented".to_string(), "re-indented".to_string());
-    }
+/// The changes whose blocks came back in a different order. A block that stayed
+/// in its own change only had its whitespace touched, unless it swapped places
+/// with another there, which is a real move.
+fn reordered_runs(blocks: &[Block], removed: &[Line], added: &[Line]) -> HashSet<usize> {
+    let mut local: Vec<&Block> = blocks
+        .iter()
+        .filter(|b| removed[b.old].run == added[b.new].run)
+        .collect();
+    local.sort_by_key(|b| b.old);
+    local
+        .windows(2)
+        .filter(|pair| removed[pair[0].old].run == removed[pair[1].old].run)
+        .filter(|pair| pair[0].new > pair[1].new)
+        .map(|pair| removed[pair[0].old].run)
+        .collect()
+}
 
+/// What to say above a block's removed and added halves, given their first lines.
+fn hints(old: &Line, new: &Line, rows: &[Vec<Row>], files: &[FileDiff]) -> (String, String) {
     let there = |verb: &str, line: &Line, number: Option<u32>| {
         let number = number.unwrap_or_default();
         if old.file == new.file {
@@ -377,13 +390,48 @@ mod tests {
     }
 
     #[test]
-    fn code_reindented_in_place_is_called_that() {
+    fn code_reindented_in_place_is_a_whitespace_change() {
         let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n\
                    -first_call(1);\n-second_call(2);\n\
                    +    first_call(1);\n+    second_call(2);\n";
         let got = moved(raw);
-        assert_eq!(hint_of(&got[0], '-'), Some("re-indented"));
-        assert_eq!(hint_of(&got[0], '+'), Some("re-indented"));
+        assert_eq!(hint_of(&got[0], '-'), Some(WHITESPACE_ONLY));
+        assert_eq!(hint_of(&got[0], '+'), Some(WHITESPACE_ONLY));
+    }
+
+    #[test]
+    fn realigned_comments_are_a_whitespace_change() {
+        let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n\
+                   -first_call(1);  // one\n-second_call(2); // two\n\
+                   +first_call(1);      // one\n+second_call(2);     // two\n";
+        assert_eq!(hint_of(&moved(raw)[0], '-'), Some(WHITESPACE_ONLY));
+    }
+
+    #[test]
+    fn new_line_endings_are_a_whitespace_change_not_a_move() {
+        let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n\
+                   -first_call(1);\n-second_call(2);\n\
+                   +first_call(1);\r\n+second_call(2);\r\n";
+        assert_eq!(hint_of(&moved(raw)[0], '-'), Some(WHITESPACE_ONLY));
+    }
+
+    #[test]
+    fn blocks_swapped_within_a_change_are_moves_even_when_reindented() {
+        let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,4 +1,4 @@\n\
+                   -first_call(1);\n-second_call(2);\n-third_call(3);\n-fourth_call(4);\n\
+                   +    third_call(3);\n+    fourth_call(4);\n\
+                   +    first_call(1);\n+    second_call(2);\n";
+        let got = moved(raw);
+        let hints: Vec<&str> = got[0].iter().filter_map(|r| r.2.as_deref()).collect();
+        assert_eq!(
+            hints,
+            [
+                "moved to line 3",
+                "moved to line 1",
+                "moved from line 3",
+                "moved from line 1"
+            ]
+        );
     }
 
     #[test]
