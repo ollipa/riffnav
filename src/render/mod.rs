@@ -14,7 +14,8 @@ use std::collections::hash_map::Entry as Slot;
 use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Wrap};
 
-use self::layout::Content;
+use self::layout::{Content, MOVE_MARK, WRAP_MARK};
+pub use self::moves::Target;
 use self::moves::{FileMoves, MoveIndex};
 use crate::comment::render::CommentBlock;
 use crate::comment::store::{Anchor, Comment};
@@ -96,6 +97,28 @@ impl Rendered {
     /// The number of lines in the render (not screen rows; see [`Self::row_of`]).
     pub fn lines(&self) -> usize {
         self.text.lines.len()
+    }
+
+    /// The numbered line behind `line`, which may be `line` itself: the note above
+    /// a moved block stands for the block's first line, and a wrapped side-by-side
+    /// row for the row it continues. Anything else unnumbered is left as it is.
+    pub fn code_line(&self, line: usize) -> usize {
+        let numbered = |at: usize| self.line_map.get(at).anchor().is_some();
+        let has = |at: usize, wanted: &dyn Fn(&str) -> bool| {
+            let line = self.text.lines.get(at);
+            line.is_some_and(|l| l.spans.iter().any(|s| wanted(&s.content)))
+        };
+        if numbered(line) {
+            return line;
+        }
+        if has(line, &|text| text.starts_with(MOVE_MARK)) {
+            return line + 1;
+        }
+        let mut at = line;
+        while at > 0 && !numbered(at) && has(at - 1, &|text| text.chars().eq([WRAP_MARK])) {
+            at -= 1;
+        }
+        at
     }
 
     /// The first screen row of line `line`, for scrolling a cursor into view.
@@ -301,6 +324,11 @@ impl RenderCache {
         self.entries
             .retain(|key, _| old.file(key.file) == moves.file(key.file));
         self.moves = moves;
+    }
+
+    /// The other end of the move `anchor` in `file` is part of, if it moved.
+    pub fn move_target(&self, file: usize, anchor: Anchor) -> Option<Target> {
+        self.moves.file(file).target(anchor)
     }
 
     /// Render `diff` for the given key if not already cached, and make sure the

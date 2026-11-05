@@ -10,9 +10,10 @@
 //! and add a two-line minimum: a lone line coming back is usually a coincidence.
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::words::change_runs;
+use crate::comment::store::{Anchor, Side};
 use crate::diff::{self, FileDiff, Row};
 
 /// Substantial lines a block needs. See [`Line::is_anchor`].
@@ -42,20 +43,36 @@ pub struct Mark {
     pub twin: Option<usize>,
 }
 
+/// The line at the other end of a move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target {
+    pub file: usize,
+    pub anchor: Anchor,
+}
+
 /// One file's moved rows.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct FileMoves {
     /// Index-aligned with the file's rows, or empty when nothing in it moved.
     marks: Vec<Option<Mark>>,
+    /// Where each moved line's other end is.
+    targets: BTreeMap<Anchor, Target>,
 }
 
 impl FileMoves {
     pub fn at(&self, row: usize) -> Option<&Mark> {
         self.marks.get(row)?.as_ref()
     }
+
+    pub fn target(&self, anchor: Anchor) -> Option<Target> {
+        self.targets.get(&anchor).copied()
+    }
 }
 
-static NO_MOVES: FileMoves = FileMoves { marks: Vec::new() };
+static NO_MOVES: FileMoves = FileMoves {
+    marks: Vec::new(),
+    targets: BTreeMap::new(),
+};
 
 /// Every moved row in a diff. A block can span two files, so this is built from
 /// the whole file set rather than file by file.
@@ -80,13 +97,14 @@ impl MoveIndex {
 
         let reordered = reordered_runs(&blocks, &removed, &added);
         let mut marks: Vec<Vec<Option<Mark>>> = rows.iter().map(|r| vec![None; r.len()]).collect();
+        let mut targets = vec![BTreeMap::new(); rows.len()];
         for block in blocks {
             let (old, new) = (&removed[block.old], &added[block.new]);
             let stayed = old.run == new.run && !reordered.contains(&old.run);
             let (to, from) = if stayed {
                 (WHITESPACE_ONLY.to_string(), WHITESPACE_ONLY.to_string())
             } else {
-                hints(old, new, &rows, files)
+                hints(old, new, files)
             };
             for at in 0..block.len {
                 let (old, new) = (&removed[block.old + at], &added[block.new + at]);
@@ -98,15 +116,21 @@ impl MoveIndex {
                     hint: (at == 0).then(|| from.clone()),
                     twin: None,
                 });
+                let (old_end, new_end) = (old.target(Side::Old), new.target(Side::New));
+                targets[old.file].insert(old_end.anchor, new_end);
+                targets[new.file].insert(new_end.anchor, old_end);
             }
         }
         let files = marks
             .into_iter()
-            .map(|marks| {
-                let any = marks.iter().any(Option::is_some);
-                FileMoves {
-                    marks: if any { marks } else { Vec::new() },
-                }
+            .zip(targets)
+            .map(|(marks, targets)| FileMoves {
+                marks: if targets.is_empty() {
+                    Vec::new()
+                } else {
+                    marks
+                },
+                targets,
             })
             .collect();
         Self { files }
@@ -121,6 +145,8 @@ impl MoveIndex {
 struct Line {
     file: usize,
     row: usize,
+    /// Its line number on the side it's on.
+    number: u32,
     /// Which change it's in, unique across files. Lines of one side sharing a run
     /// are consecutive.
     run: usize,
@@ -133,19 +159,30 @@ impl Line {
     fn is_anchor(&self) -> bool {
         self.alnum >= MIN_ANCHOR_ALNUM
     }
+
+    fn target(&self, side: Side) -> Target {
+        Target {
+            file: self.file,
+            anchor: Anchor {
+                side,
+                line: self.number,
+            },
+        }
+    }
 }
 
 /// Every removed and added line in the diff, in order.
 fn changed_lines(files: &[Vec<Row>]) -> (Vec<Line>, Vec<Line>) {
     let mut keys: HashMap<String, u32> = HashMap::new();
     let mut line = |file: usize, row: usize, run: usize| {
-        let text = &files[file][row].text;
+        let Row { text, old, new, .. } = &files[file][row];
         let bare: String = text.chars().filter(|c| !c.is_whitespace()).collect();
         let alnum = bare.chars().filter(|c| c.is_alphanumeric()).count();
         let next = keys.len() as u32;
         Line {
             file,
             row,
+            number: old.or(*new).unwrap_or_default(),
             run,
             key: *keys.entry(bare).or_insert(next),
             alnum,
@@ -290,19 +327,16 @@ fn reordered_runs(blocks: &[Block], removed: &[Line], added: &[Line]) -> HashSet
 }
 
 /// What to say above a block's removed and added halves, given their first lines.
-fn hints(old: &Line, new: &Line, rows: &[Vec<Row>], files: &[FileDiff]) -> (String, String) {
-    let there = |verb: &str, line: &Line, number: Option<u32>| {
-        let number = number.unwrap_or_default();
+fn hints(old: &Line, new: &Line, files: &[FileDiff]) -> (String, String) {
+    let there = |verb: &str, line: &Line| {
         if old.file == new.file {
-            format!("moved {verb} line {number}")
+            format!("moved {verb} line {}", line.number)
         } else {
-            format!("moved {verb} {}:{number}", files[line.file].path())
+            let path = files[line.file].path();
+            format!("moved {verb} {path}:{}", line.number)
         }
     };
-    (
-        there("to", new, rows[new.file][new.row].new),
-        there("from", old, rows[old.file][old.row].old),
-    )
+    (there("to", new), there("from", old))
 }
 
 #[cfg(test)]
@@ -443,6 +477,28 @@ mod tests {
         let index = MoveIndex::build(&files);
         assert_eq!(index.file(0).at(1).unwrap().twin, Some(3));
         assert_eq!(index.file(0).at(3).unwrap().twin, None);
+    }
+
+    #[test]
+    fn each_moved_line_points_at_the_matching_line_at_the_other_end() {
+        let raw = file("a.rs", &FN_A, &[]) + &file("b.rs", &[], &FN_A);
+        let files = parse(&raw);
+        let index = MoveIndex::build(&files);
+        let at = |side, line| Anchor { side, line };
+        let target = index.file(0).target(at(Side::Old, 2)).unwrap();
+        assert_eq!((target.file, target.anchor), (1, at(Side::New, 3)));
+        let back = index.file(1).target(target.anchor).unwrap();
+        assert_eq!((back.file, back.anchor), (0, at(Side::Old, 2)));
+    }
+
+    #[test]
+    fn an_unmoved_line_has_no_target() {
+        let files = parse(&file("f", &FN_A, &FN_A));
+        let kept = Anchor {
+            side: Side::New,
+            line: 1,
+        };
+        assert_eq!(MoveIndex::build(&files).file(0).target(kept), None);
     }
 
     #[test]

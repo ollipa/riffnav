@@ -24,9 +24,9 @@ const PANEL_GUTTER: usize = NUMBER + 1;
 const LEFT_DELIM: char = '⋮';
 const RIGHT_DELIM: char = '│';
 /// Ends a side-by-side row that continues on the next.
-const WRAP_MARK: char = '↵';
+pub const WRAP_MARK: char = '↵';
 /// Starts the row saying where a moved block went.
-const MOVE_MARK: char = '⇄';
+pub const MOVE_MARK: char = '⇄';
 
 /// What the render passes worked out about a file, index-aligned with `rows`.
 pub struct Content<'a> {

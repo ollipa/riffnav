@@ -15,13 +15,13 @@ use ratatui::widgets::ListState;
 use serde::Deserialize;
 
 use crate::autodiff::{DiffSource, GitDiff};
-use crate::comment::{Anchor, Comment, CommentStore, CommentWatch, Composer, PendingComment};
+use crate::comment::{Anchor, Comment, CommentStore, CommentWatch, Composer, PendingComment, Side};
 use crate::config::Config;
 use crate::diff::{FileDiff, FileStatus};
 use crate::forge::{Forge, ReviewSync};
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
-use crate::render::{CommentLayer, RenderCache};
+use crate::render::{CommentLayer, RenderCache, Target};
 use crate::review::ReviewStore;
 use crate::session::Session;
 use crate::theme::DiffTheme;
@@ -239,6 +239,9 @@ pub struct App {
     /// rendered before the cursor can be put on the comment it was aimed at:
     /// `true` for its first comment, `false` for its last.
     comment_landing: Option<bool>,
+    /// A diff line an `m` jump is heading for, waiting on the event loop to render
+    /// the file it's in, the same way `comment_landing` does.
+    move_landing: Option<Anchor>,
     /// The id `x` has asked about deleting, waiting on the y/N answer. Holds the
     /// next keypress hostage, which is the whole point of it.
     confirm_delete: Option<String>,
@@ -330,6 +333,7 @@ impl App {
             cursor_token: None,
             cursor_screen_row: None,
             comment_landing: None,
+            move_landing: None,
             confirm_delete: None,
             composer: None,
             pending_comment: None,
@@ -951,6 +955,7 @@ impl App {
             self.restore_cursor_screen_row();
             // A `]`/`[` jump into this file has been waiting for that render.
             self.land_on_comment();
+            self.land_on_move();
 
             terminal.draw(|frame| crate::ui::draw(frame, self, diff_width))?;
             let last_draw = Instant::now();
@@ -1491,6 +1496,76 @@ impl App {
         };
         if let Some(start) = block.map(|b| b.start) {
             self.set_cursor_on_block(start);
+        }
+    }
+
+    /// The other end of the move `m` should follow: the line under the cursor,
+    /// or the first moved line on screen when there's no cursor to aim with. On a
+    /// side-by-side row with a move on both sides, the new side wins, as it does
+    /// for comments.
+    fn move_target(&self) -> Option<Target> {
+        let file = self.selected_file()?;
+        let render = self.current_render()?;
+        let rows = if self.comments_on {
+            self.diff_cursor..self.diff_cursor + 1
+        } else {
+            let bottom = self.diff_scroll.saturating_add(self.diff_height);
+            render.line_at(self.diff_scroll)..render.line_at(bottom) + 1
+        };
+        rows.into_iter().find_map(|row| {
+            let numbers = render.line_map.get(render.code_line(row));
+            let new = numbers.new.map(|line| Anchor {
+                side: Side::New,
+                line,
+            });
+            let old = numbers.old.map(|line| Anchor {
+                side: Side::Old,
+                line,
+            });
+            [new, old]
+                .into_iter()
+                .flatten()
+                .find_map(|anchor| self.cache.move_target(file, anchor))
+        })
+    }
+
+    /// Jump to the other end of a moved line. Both ends point at each other, so
+    /// pressing `m` again comes straight back.
+    fn jump_move(&mut self) {
+        if self.move_landing.is_some() {
+            return; // Still on the way: the render this would read is out of date.
+        }
+        let Some(target) = self.move_target() else {
+            return self.set_status("Not on a moved line");
+        };
+        if self.selected_file() != Some(target.file) {
+            self.reveal_file(target.file);
+        }
+        self.move_landing = Some(target.anchor);
+    }
+
+    /// Finish an `m` jump once its file is rendered. A target that was off screen
+    /// lands a third of the way down, so the block below it can be read and the
+    /// note above it stays in view.
+    fn land_on_move(&mut self) {
+        let Some(anchor) = self.move_landing.take() else {
+            return;
+        };
+        let Some((line, top)) = self.current_render().and_then(|render| {
+            let line = render.line_map.row_for(anchor)?;
+            Some((line, render.row_of(line)))
+        }) else {
+            return;
+        };
+        let here = self.current_render().map(|r| r.code_line(self.diff_cursor));
+        if here == Some(line) {
+            return self.set_status("Both ends are on this line");
+        }
+        let height = self.diff_height;
+        let on_screen = (self.diff_scroll..self.diff_scroll.saturating_add(height)).contains(&top);
+        self.set_cursor(line);
+        if !on_screen {
+            self.diff_scroll = top.saturating_sub(height / 3);
         }
     }
 
@@ -2169,6 +2244,7 @@ impl App {
             // they're inert rather than misleading when the feature is off.
             KeyCode::Char('c') if self.comments_on => self.start_comment(),
             KeyCode::Char('x') if self.comments_on => self.delete_comment(),
+            KeyCode::Char('m') if self.focus == Focus::Diff => self.jump_move(),
             KeyCode::Char(']') if self.comments_on => self.jump_comment(true),
             KeyCode::Char('[') if self.comments_on => self.jump_comment(false),
             KeyCode::Char('?') => self.show_help = true,
@@ -3090,6 +3166,238 @@ mod tests {
         app.seed_render_for_test(60, seed_text());
         app.resync_cursor();
         app
+    }
+
+    /// A block moved from a.rs to line 12 of src/deep/b.rs, with an unmoved line
+    /// around each end.
+    const MOVED_BETWEEN_FILES: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n\
+         @@ -1,4 +1,2 @@\n keep\n-fn alpha_value() {\n-    first_call(1);\n other\n\
+         diff --git a/src/deep/b.rs b/src/deep/b.rs\n--- a/src/deep/b.rs\n+++ b/src/deep/b.rs\n\
+         @@ -11,2 +11,4 @@\n keep\n+fn alpha_value() {\n+    first_call(1);\n other\n";
+
+    fn app_with_a_move() -> App {
+        let mut app = app_with(crate::diff::parse(MOVED_BETWEEN_FILES));
+        app.comments_on = true;
+        app.focus = Focus::Diff;
+        app.diff_height = 20;
+        app.reveal_file(0); // The tree lists folders first, so it opened on b.rs.
+        draw_for_move(&mut app);
+        app
+    }
+
+    /// What the event loop does between keypresses, rendering for real because
+    /// the rows a jump lands on have to come from a real render.
+    fn draw_for_move(app: &mut App) {
+        let idx = app.selected_file().unwrap();
+        let side_by_side = app.side_by_side_for(idx);
+        app.last_width = 60;
+        app.cache.ensure(
+            idx,
+            &app.files[idx],
+            60,
+            side_by_side,
+            app.diff_theme,
+            &crate::render::CommentLayer::none(),
+        );
+        app.resync_cursor();
+        app.land_on_move();
+    }
+
+    fn put_cursor_on(app: &mut App, side: Side, line: u32) {
+        let render = app.current_render().unwrap();
+        let row = render.line_map.row_for(Anchor { side, line }).unwrap();
+        app.set_cursor(row);
+    }
+
+    fn cursor_line(app: &App) -> (Option<u32>, Option<u32>) {
+        let numbers = app.current_render().unwrap().line_map.get(app.diff_cursor);
+        (numbers.old, numbers.new)
+    }
+
+    #[test]
+    fn m_crosses_to_the_matching_line_and_back() {
+        let mut app = app_with_a_move();
+        put_cursor_on(&mut app, Side::Old, 3);
+
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(
+            app.files[app.selected_file().unwrap()].path(),
+            "src/deep/b.rs"
+        );
+        assert_eq!(cursor_line(&app), (None, Some(13)));
+
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(app.files[app.selected_file().unwrap()].path(), "a.rs");
+        assert_eq!(cursor_line(&app), (Some(3), None));
+    }
+
+    #[test]
+    fn m_on_the_note_above_a_block_goes_to_the_blocks_first_line() {
+        let mut app = app_with_a_move();
+        put_cursor_on(&mut app, Side::Old, 2);
+        let note = app.diff_cursor - 1;
+        app.set_cursor(note);
+
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(cursor_line(&app), (None, Some(12)));
+    }
+
+    #[test]
+    fn m_off_a_moved_line_says_so_and_stays_put() {
+        let mut app = app_with_a_move();
+        put_cursor_on(&mut app, Side::New, 1);
+        let row = app.diff_cursor;
+
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(app.selected_file(), Some(0));
+        assert_eq!(app.diff_cursor, row);
+        assert_eq!(app.status.as_deref(), Some("Not on a moved line"));
+    }
+
+    #[test]
+    fn m_opens_a_folded_folder_on_the_way_in() {
+        let mut app = app_with_a_move();
+        put_cursor_on(&mut app, Side::Old, 2);
+        app.collapsed.insert("src".to_string());
+        app.rows = tree::flatten(&app.nodes, &app.collapsed);
+        let at = app
+            .rows
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::File { diff_index: 0 }));
+        app.tree_state.select(at);
+        assert!(
+            app.rows
+                .iter()
+                .all(|r| !matches!(r.kind, RowKind::File { diff_index: 1 }))
+        );
+
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(app.selected_file(), Some(1));
+        assert_eq!(cursor_line(&app), (None, Some(12)));
+    }
+
+    #[test]
+    fn m_with_no_cursor_follows_the_first_moved_line_on_screen() {
+        let mut app = app_with_a_move();
+        app.comments_on = false;
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(app.selected_file(), Some(1));
+        assert_eq!(cursor_line(&app), (None, Some(12)));
+    }
+
+    #[test]
+    fn m_works_side_by_side() {
+        let mut app = app_with_a_move();
+        app.side_by_side = true;
+        app.cursor_token = None;
+        draw_for_move(&mut app);
+        put_cursor_on(&mut app, Side::Old, 2);
+
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        let (_, new) = cursor_line(&app);
+        assert_eq!(new, Some(12));
+    }
+
+    #[test]
+    fn m_works_from_a_wrapped_side_by_side_row() {
+        let long = "first_call(an_argument_long_enough_to_wrap_in_a_narrow_panel, 1);";
+        let raw = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n\
+             -fn alpha_value() {{\n-{long}\n keep\n+fn alpha_value() {{\n+{long}\n"
+        );
+        let mut app = app_with(crate::diff::parse(&raw));
+        app.comments_on = true;
+        app.side_by_side = true;
+        app.focus = Focus::Diff;
+        app.diff_height = 20;
+        draw_for_move(&mut app);
+        put_cursor_on(&mut app, Side::Old, 2);
+        let wrapped = app.diff_cursor + 1;
+        app.set_cursor(wrapped);
+        assert_eq!(cursor_line(&app), (None, None), "this row has no number");
+
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(cursor_line(&app), (None, Some(3)));
+    }
+
+    #[test]
+    fn m_says_so_when_both_ends_share_a_side_by_side_row() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n\
+                   -first_call(1);\n-second_call(2);\n\
+                   +    first_call(1);\n+    second_call(2);\n";
+        let mut app = app_with(crate::diff::parse(raw));
+        app.comments_on = true;
+        app.side_by_side = true;
+        app.focus = Focus::Diff;
+        app.diff_height = 20;
+        draw_for_move(&mut app);
+        put_cursor_on(&mut app, Side::Old, 2);
+        let row = app.diff_cursor;
+
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(app.diff_cursor, row);
+        assert_eq!(app.status.as_deref(), Some("Both ends are on this line"));
+    }
+
+    #[test]
+    fn m_on_a_hunk_header_above_a_moved_block_does_nothing() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n\
+                   -fn alpha_value() {\n-    first_call(1);\n keep\n\
+                   +fn alpha_value() {\n+    first_call(1);\n";
+        let mut app = app_with(crate::diff::parse(raw));
+        app.comments_on = true;
+        app.focus = Focus::Diff;
+        app.diff_height = 20;
+        draw_for_move(&mut app);
+        put_cursor_on(&mut app, Side::Old, 1);
+        let header = app.diff_cursor - 2; // Past the note, onto the box's lower edge.
+        app.set_cursor(header);
+
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(app.diff_cursor, header);
+        assert_eq!(app.status.as_deref(), Some("Not on a moved line"));
+    }
+
+    #[test]
+    fn m_leaves_a_target_off_screen_a_third_of_the_way_down() {
+        let filler: String = (0..200).map(|i| format!(" line {i}\n")).collect();
+        let raw = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,202 +1,202 @@\n\
+             -fn alpha_value() {{\n-    first_call(1);\n{filler}\
+             +fn alpha_value() {{\n+    first_call(1);\n"
+        );
+        let mut app = app_with(crate::diff::parse(&raw));
+        app.comments_on = true;
+        app.focus = Focus::Diff;
+        app.diff_height = 30;
+        draw_for_move(&mut app);
+        put_cursor_on(&mut app, Side::Old, 1);
+
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(cursor_line(&app), (None, Some(201)));
+        let top = app.current_render().unwrap().row_of(app.diff_cursor);
+        assert_eq!(top - app.diff_scroll, 10);
+    }
+
+    #[test]
+    fn m_is_for_the_diff_pane() {
+        let mut app = app_with_a_move();
+        put_cursor_on(&mut app, Side::Old, 2);
+        app.focus = Focus::Tree;
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(app.selected_file(), Some(0));
     }
 
     /// One pass through the event loop: render, resync, then land a pending
