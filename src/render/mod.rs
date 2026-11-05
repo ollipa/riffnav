@@ -5,6 +5,7 @@
 
 mod highlight;
 mod layout;
+mod moves;
 mod words;
 
 use std::collections::HashMap;
@@ -13,6 +14,8 @@ use std::collections::hash_map::Entry as Slot;
 use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Wrap};
 
+use self::layout::Content;
+use self::moves::{FileMoves, MoveIndex};
 use crate::comment::render::CommentBlock;
 use crate::comment::store::{Anchor, Comment};
 use crate::comment::{LineMap, render as comment_render};
@@ -27,35 +30,41 @@ const WRAP: Wrap = Wrap { trim: false };
 /// Render one file as a unified diff, `width` columns wide.
 pub fn unified(
     file: &FileDiff,
+    moves: &FileMoves,
     width: u16,
     theme: DiffTheme,
     tab_width: u8,
 ) -> (Text<'static>, LineMap) {
     let rows = diff::rows(file);
     let syntax = highlight::highlight(file, &rows, theme);
-    let changes = words::changes(&rows);
-    layout::unified(
-        file,
-        &rows,
-        &syntax,
-        &changes.emphasis,
-        width,
-        theme,
-        tab_width,
-    )
+    let changes = words::changes(&rows, moves);
+    let content = Content {
+        rows: &rows,
+        syntax: &syntax,
+        changes: &changes,
+        moves,
+    };
+    layout::unified(file, &content, width, theme, tab_width)
 }
 
 /// Render one file side by side, `width` columns wide.
 pub fn side_by_side(
     file: &FileDiff,
+    moves: &FileMoves,
     width: u16,
     theme: DiffTheme,
     tab_width: u8,
 ) -> (Text<'static>, LineMap) {
     let rows = diff::rows(file);
     let syntax = highlight::highlight(file, &rows, theme);
-    let changes = words::changes(&rows);
-    layout::side_by_side(file, &rows, &syntax, &changes, width, theme, tab_width)
+    let changes = words::changes(&rows, moves);
+    let content = Content {
+        rows: &rows,
+        syntax: &syntax,
+        changes: &changes,
+        moves,
+    };
+    layout::side_by_side(file, &content, width, theme, tab_width)
 }
 
 /// A rendered file, ready to drop into the diff viewport.
@@ -266,14 +275,32 @@ struct Entry {
 pub struct RenderCache {
     entries: HashMap<Key, Entry>,
     tab_width: u8,
+    detect_moves: bool,
+    moves: MoveIndex,
 }
 
 impl RenderCache {
-    pub fn new(tab_width: u8) -> Self {
+    pub fn new(tab_width: u8, detect_moves: bool) -> Self {
         Self {
             entries: HashMap::new(),
             tab_width,
+            detect_moves,
+            moves: MoveIndex::default(),
         }
+    }
+
+    /// Work out what moved across `files`, and drop the render of any file that
+    /// shows it differently now. That can be a file other than the one that
+    /// changed: a block moved out of it may no longer have anywhere to have gone.
+    pub fn index_moves(&mut self, files: &[FileDiff]) {
+        if !self.detect_moves {
+            return;
+        }
+        let moves = MoveIndex::build(files);
+        let old = &self.moves;
+        self.entries
+            .retain(|key, _| old.file(key.file) == moves.file(key.file));
+        self.moves = moves;
     }
 
     /// Render `diff` for the given key if not already cached, and make sure the
@@ -288,6 +315,7 @@ impl RenderCache {
         comments: &CommentLayer<'_>,
     ) {
         let tab_width = self.tab_width;
+        let moves = self.moves.file(file);
         let key = Key {
             file,
             width,
@@ -296,9 +324,9 @@ impl RenderCache {
         };
         if let Slot::Vacant(slot) = self.entries.entry(key.clone()) {
             let (base, base_map) = if side_by_side {
-                self::side_by_side(diff, width, theme, tab_width)
+                self::side_by_side(diff, moves, width, theme, tab_width)
             } else {
-                unified(diff, width, theme, tab_width)
+                unified(diff, moves, width, theme, tab_width)
             };
             let rendered = splice_and_measure(
                 base.clone(),
@@ -426,6 +454,78 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::text::Line;
+
+    use crate::diff::parse;
+    use crate::theme::DiffTheme::GitHubDark;
+
+    const WIDTH: u16 = 60;
+
+    fn removal() -> FileDiff {
+        parse(
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,2 +0,0 @@\n\
+             -fn alpha_value() {\n-    first_call(1);\n",
+        )
+        .remove(0)
+    }
+
+    fn addition(line: u32) -> FileDiff {
+        let raw = format!(
+            "diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -0,0 +{line},2 @@\n\
+             +fn alpha_value() {{\n+    first_call(1);\n"
+        );
+        parse(&raw).remove(0)
+    }
+
+    fn unrelated() -> FileDiff {
+        parse("diff --git a/c b/c\n--- a/c\n+++ b/c\n@@ -1 +1 @@\n-old\n+new\n").remove(0)
+    }
+
+    fn rendered(cache: &mut RenderCache, files: &[FileDiff]) {
+        for (at, file) in files.iter().enumerate() {
+            cache.ensure(at, file, WIDTH, false, GitHubDark, &CommentLayer::none());
+        }
+    }
+
+    fn cached(cache: &RenderCache, file: usize) -> bool {
+        cache.get(file, WIDTH, false, GitHubDark).is_some()
+    }
+
+    fn says(cache: &RenderCache, file: usize, text: &str) -> bool {
+        let rendered = cache.get(file, WIDTH, false, GitHubDark).unwrap();
+        rendered
+            .text
+            .lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .any(|s| s.content.contains(text))
+    }
+
+    #[test]
+    fn a_change_in_one_file_redraws_the_other_end_of_its_moves() {
+        let mut files = [removal(), addition(1), unrelated()];
+        let mut cache = RenderCache::new(4, true);
+        cache.index_moves(&files);
+        rendered(&mut cache, &files);
+        assert!(says(&cache, 0, "moved to b:1"));
+
+        files[1] = addition(7);
+        cache.invalidate(1);
+        cache.index_moves(&files);
+        assert!(!cached(&cache, 0), "its hint points at the old line");
+        assert!(cached(&cache, 2), "nothing about this file changed");
+
+        rendered(&mut cache, &files);
+        assert!(says(&cache, 0, "moved to b:7"));
+    }
+
+    #[test]
+    fn moves_can_be_turned_off() {
+        let files = [removal(), addition(1)];
+        let mut cache = RenderCache::new(4, false);
+        cache.index_moves(&files);
+        rendered(&mut cache, &files);
+        assert!(!says(&cache, 0, "moved to"));
+    }
 
     /// The windowed render (`Rendered::visible`) must be pixel-for-pixel identical
     /// to the naive "wrap the whole text, then scroll" it replaces — at every

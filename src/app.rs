@@ -286,6 +286,8 @@ impl App {
             .unwrap_or(0);
         let mut tree_state = ListState::default();
         tree_state.select(Some(first_file));
+        let mut cache = RenderCache::new(cfg.tab_width, cfg.detect_moves);
+        cache.index_moves(&files);
 
         Self {
             files,
@@ -314,7 +316,7 @@ impl App {
             icon_style: cfg.icon_style,
             diff_theme: cfg.diff_theme,
             finder: None,
-            cache: RenderCache::new(cfg.tab_width),
+            cache,
             review: ReviewStore::disabled(),
             file_hashes,
             review_auto_advance: cfg.review_auto_advance,
@@ -1040,6 +1042,7 @@ impl App {
         self.nodes = tree::build(&self.files);
         self.rows = tree::flatten(&self.nodes, &self.collapsed);
         self.cache.clear();
+        self.cache.index_moves(&self.files);
         self.last_width = 0; // force a re-render at the next draw
         self.finder = None; // indices changed; a stale finder would mislead
 
@@ -1115,6 +1118,7 @@ impl App {
         self.file_hashes[i] = crate::review::file_hash(&file.raw);
         self.files[i] = file;
         self.cache.invalidate(i);
+        self.cache.index_moves(&self.files);
         self.last_width = 0; // force a re-render at the next draw
         self.cursor_token = None; // and let the cursor re-resolve from its anchor
         self.publish_session();

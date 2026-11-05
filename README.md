@@ -111,6 +111,7 @@ side_by_side = false     # start in side-by-side view
 icon_style   = "nerd"    # nerd | unicode | ascii
 diff_theme   = "github-dark" # github-dark | github-light
 tab_width    = 4         # columns between tab stops in the diff
+detect_moves = true      # mute code that moved and say where it went
 tree_width   = 32        # columns for the file-tree pane
 show_tree    = true
 start_focus  = "diff"    # "diff": open in the first file (n/p between files) | "tree"
@@ -290,7 +291,8 @@ or help.
 A unified diff — from `git diff`/`git show` run by riffnav, or piped in on stdin
 — is split per file (`diff --git`) into a tree. On selection the file's hunks
 become rows, highlighted with [syntect][syntect] and marked word by word where a
-line was edited, then drawn with [ratatui][ratatui] and cached per
+line was edited. Removed and added lines are matched across the whole diff to find
+blocks that moved, then everything is drawn with [ratatui][ratatui] and cached per
 file/width/layout/theme. Because stdin may itself be the diff, key input is read
 from `/dev/tty`.
 

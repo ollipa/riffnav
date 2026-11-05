@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span, Text};
 use unicode_width::UnicodeWidthChar;
 
 use super::highlight::Run;
+use super::moves::FileMoves;
 use super::words::{Changes, change_runs};
 use crate::comment::LineMap;
 use crate::comment::anchor::LineNumbers;
@@ -24,12 +25,20 @@ const LEFT_DELIM: char = '⋮';
 const RIGHT_DELIM: char = '│';
 /// Ends a side-by-side row that continues on the next.
 const WRAP_MARK: char = '↵';
+/// Starts the row saying where a moved block went.
+const MOVE_MARK: char = '⇄';
+
+/// What the render passes worked out about a file, index-aligned with `rows`.
+pub struct Content<'a> {
+    pub rows: &'a [Row],
+    pub syntax: &'a [Vec<Run>],
+    pub changes: &'a Changes,
+    pub moves: &'a FileMoves,
+}
 
 pub fn unified(
     file: &FileDiff,
-    rows: &[Row],
-    syntax: &[Vec<Run>],
-    emphasis: &[Vec<Range<usize>>],
+    content: &Content<'_>,
     width: u16,
     theme: DiffTheme,
     tab_width: u8,
@@ -40,7 +49,8 @@ pub fn unified(
 
     let mut lines = file_header(file, width, &palette);
     let mut numbers = vec![LineNumbers::none(); lines.len()];
-    for (i, row) in rows.iter().enumerate() {
+    for (i, row) in content.rows.iter().enumerate() {
+        let mark = content.moves.at(i);
         let line = match row.kind {
             RowKind::HunkHeader { new_start } => {
                 let header = hunk_header(new_start, &row.text, width, tab, &palette);
@@ -50,7 +60,12 @@ pub fn unified(
             }
             RowKind::NoNewline => no_newline(&row.text, &palette),
             RowKind::Context | RowKind::Added | RowKind::Removed => {
-                code_line(row, &syntax[i], &emphasis[i], width, tab, &palette)
+                if let Some(hint) = mark.and_then(|m| m.hint.as_deref()) {
+                    lines.push(move_hint(hint, width, &palette));
+                    numbers.push(LineNumbers::none());
+                }
+                let (syntax, emphasis) = (&content.syntax[i], &content.changes.emphasis[i]);
+                code_line(row, syntax, emphasis, mark.is_some(), width, tab, &palette)
             }
         };
         lines.push(line);
@@ -66,6 +81,7 @@ pub fn unified(
 struct Cell {
     number: Option<u32>,
     kind: RowKind,
+    moved: bool,
     /// The text, already wrapped to the panel.
     rows: Vec<Vec<Span<'static>>>,
 }
@@ -76,16 +92,12 @@ struct Panels<'a> {
     right: usize,
     tab: usize,
     palette: &'a DiffPalette,
-    syntax: &'a [Vec<Run>],
-    emphasis: &'a [Vec<Range<usize>>],
-    rows: &'a [Row],
+    content: &'a Content<'a>,
 }
 
 pub fn side_by_side(
     file: &FileDiff,
-    rows: &[Row],
-    syntax: &[Vec<Run>],
-    changes: &Changes,
+    content: &Content<'_>,
     width: u16,
     theme: DiffTheme,
     tab_width: u8,
@@ -98,10 +110,9 @@ pub fn side_by_side(
         right: width - left,
         tab: usize::from(tab_width.max(1)),
         palette: &palette,
-        syntax,
-        emphasis: &changes.emphasis,
-        rows,
+        content,
     };
+    let rows = content.rows;
 
     let mut lines = file_header(file, width, &palette);
     let mut numbers = vec![LineNumbers::none(); lines.len()];
@@ -113,7 +124,7 @@ pub fn side_by_side(
             runs.next_if(|(removed, added)| removed.first().or(added.first()) == Some(&i))
         {
             let last = removed.iter().chain(&added).max().copied().unwrap_or(i);
-            for (old, new) in aligned(&removed, &added, &changes.partner) {
+            for (old, new) in aligned(&removed, &added, &content.changes.partner) {
                 panels.emit(old, new, &mut lines, &mut numbers);
             }
             i = last + 1;
@@ -143,7 +154,8 @@ pub fn side_by_side(
 
 /// The rows of one change, laid out opposite each other. A removed row and its
 /// partner share a row; what's left between partners is zipped together in order,
-/// so a rewrite takes as few rows as it can.
+/// so a rewrite takes as few rows as it can. Rows only read downwards, so a partner
+/// above one already placed, as lines swapped by a move can be, is zipped instead.
 fn aligned(
     removed: &[usize],
     added: &[usize],
@@ -153,9 +165,10 @@ fn aligned(
     let (mut old_from, mut new_from) = (0, 0);
     for (at, &old) in removed.iter().enumerate() {
         let Some(new) = partner[old] else { continue };
-        let Some(new_at) = added.iter().position(|&a| a == new) else {
+        let Some(skipped) = added[new_from..].iter().position(|&a| a == new) else {
             continue;
         };
+        let new_at = new_from + skipped;
         zip_into(&mut out, &removed[old_from..at], &added[new_from..new_at]);
         out.push((Some(old), Some(new)));
         (old_from, new_from) = (at + 1, new_at + 1);
@@ -180,8 +193,15 @@ impl Panels<'_> {
         lines: &mut Vec<Line<'static>>,
         numbers: &mut Vec<LineNumbers>,
     ) {
-        let left = old.map(|i| self.cell(i, self.rows[i].old, self.left));
-        let right = new.map(|i| self.cell(i, self.rows[i].new, self.right));
+        let rows = self.content.rows;
+        let hint = |at: Option<usize>| {
+            let hint = self.content.moves.at(at?)?.hint.as_deref()?;
+            Some(format!("{MOVE_MARK} {hint}"))
+        };
+        self.notes(hint(old), hint(new), lines, numbers);
+
+        let left = old.map(|i| self.cell(i, rows[i].old, self.left));
+        let right = new.map(|i| self.cell(i, rows[i].new, self.right));
         let height = [&left, &right]
             .iter()
             .filter_map(|cell| cell.as_ref().map(|c| c.rows.len()))
@@ -202,29 +222,42 @@ impl Panels<'_> {
         }
 
         let marker = |at: Option<usize>| {
-            let next = self.rows.get(at? + 1)?;
-            (next.kind == RowKind::NoNewline).then_some(next.text.as_str())
+            let next = rows.get(at? + 1)?;
+            (next.kind == RowKind::NoNewline).then(|| format!("⌀ {}", next.text))
         };
-        let (old_marker, new_marker) = (marker(old), marker(new));
-        if old_marker.is_some() || new_marker.is_some() {
-            let mut spans = self.marker_side(old_marker, self.left, LEFT_DELIM);
-            spans.extend(self.marker_side(new_marker, self.right, RIGHT_DELIM));
+        self.notes(marker(old), marker(new), lines, numbers);
+    }
+
+    /// A row of unnumbered remarks, if either side has one.
+    fn notes(
+        &self,
+        old: Option<String>,
+        new: Option<String>,
+        lines: &mut Vec<Line<'static>>,
+        numbers: &mut Vec<LineNumbers>,
+    ) {
+        if old.is_some() || new.is_some() {
+            let mut spans = self.note_side(old, self.left, LEFT_DELIM);
+            spans.extend(self.note_side(new, self.right, RIGHT_DELIM));
             lines.push(Line::from(spans));
             numbers.push(LineNumbers::none());
         }
     }
 
     fn cell(&self, row: usize, number: Option<u32>, panel: usize) -> Cell {
+        let moved = self.content.moves.at(row).is_some();
         let (spans, _) = code_spans(
-            &self.rows[row],
-            &self.syntax[row],
-            &self.emphasis[row],
+            &self.content.rows[row],
+            &self.content.syntax[row],
+            &self.content.changes.emphasis[row],
+            moved,
             self.tab,
             self.palette,
         );
         Cell {
             number,
-            kind: self.rows[row].kind,
+            kind: self.content.rows[row].kind,
+            moved,
             rows: wrap(spans, panel.saturating_sub(PANEL_GUTTER), self.palette),
         }
     }
@@ -247,20 +280,17 @@ impl Panels<'_> {
         let fill = panel.saturating_sub(PANEL_GUTTER + used);
         // An empty panel keeps the terminal's background: tinting it would read
         // as a change on a side where nothing happened.
-        let style = if cell.is_some() {
-            line_style(kind, self.palette)
-        } else {
-            self.palette.context()
-        };
+        let style = cell.map_or(self.palette.context(), |c| {
+            line_style(c.kind, c.moved, self.palette)
+        });
         spans.push(Span::styled(" ".repeat(fill), style));
         spans
     }
 
-    fn marker_side(&self, text: Option<&str>, panel: usize, delim: char) -> Vec<Span<'static>> {
+    fn note_side(&self, text: Option<String>, panel: usize, delim: char) -> Vec<Span<'static>> {
         let mut spans = vec![panel_gutter(None, RowKind::Context, delim, self.palette)];
-        let shown = text.map_or_else(String::new, |t| format!("⌀ {t}"));
         let room = panel.saturating_sub(PANEL_GUTTER);
-        let shown: String = shown.chars().take(room).collect();
+        let shown = truncate(&text.unwrap_or_default(), room);
         let fill = room.saturating_sub(display_width(&shown));
         spans.push(Span::styled(shown, self.palette.marker()));
         spans.push(Span::styled(" ".repeat(fill), self.palette.context()));
@@ -423,6 +453,18 @@ fn no_newline(text: &str, palette: &DiffPalette) -> Line<'static> {
     ])
 }
 
+/// The unnumbered row above a moved block, saying where the block went.
+fn move_hint(hint: &str, width: usize, palette: &DiffPalette) -> Line<'static> {
+    let room = width.saturating_sub(GUTTER);
+    let shown = truncate(&format!("{MOVE_MARK} {hint}"), room);
+    let fill = room.saturating_sub(display_width(&shown));
+    Line::from(vec![
+        gutter(None, None, RowKind::Context, palette),
+        Span::styled(shown, palette.marker()),
+        Span::styled(" ".repeat(fill), palette.context()),
+    ])
+}
+
 fn gutter(
     old: Option<u32>,
     new: Option<u32>,
@@ -440,26 +482,28 @@ fn code_line(
     row: &Row,
     runs: &[Run],
     emphasis: &[Range<usize>],
+    moved: bool,
     width: usize,
     tab: usize,
     palette: &DiffPalette,
 ) -> Line<'static> {
-    let (code, column) = code_spans(row, runs, emphasis, tab, palette);
+    let (code, column) = code_spans(row, runs, emphasis, moved, tab, palette);
     let mut spans = vec![gutter(row.old, row.new, row.kind, palette)];
     spans.extend(code);
     let fill = width.saturating_sub(GUTTER + column);
     if fill > 0 {
         spans.push(Span::styled(
             " ".repeat(fill),
-            line_style(row.kind, palette),
+            line_style(row.kind, moved, palette),
         ));
     }
     Line::from(spans)
 }
 
 /// The background a row's unemphasized text and padding sit on.
-fn line_style(kind: RowKind, palette: &DiffPalette) -> Style {
+fn line_style(kind: RowKind, moved: bool, palette: &DiffPalette) -> Style {
     match kind {
+        RowKind::Added | RowKind::Removed if moved => palette.moved(),
         RowKind::Added => palette.plus(),
         RowKind::Removed => palette.minus(),
         _ => palette.context(),
@@ -471,18 +515,20 @@ fn code_spans(
     row: &Row,
     runs: &[Run],
     emphasis: &[Range<usize>],
+    moved: bool,
     tab: usize,
     palette: &DiffPalette,
 ) -> (Vec<Span<'static>>, usize) {
-    let line = line_style(row.kind, palette);
+    let line = line_style(row.kind, moved, palette);
     let emph = match row.kind {
         RowKind::Added => palette.plus_emph(),
         RowKind::Removed => palette.minus_emph(),
         _ => palette.context(),
     };
-    // Only the added side can introduce a whitespace error: flagging a removed
-    // line's would be pointing at something the change just fixed.
-    let trailing = (row.kind == RowKind::Added)
+    // Only new text can introduce a whitespace error: flagging a removed line's
+    // would be pointing at something the change just fixed, and a moved line's
+    // at something it only carried along.
+    let trailing = (row.kind == RowKind::Added && !moved)
         .then(|| row.text.trim_end().len())
         .filter(|&end| end < row.text.len());
 
@@ -563,12 +609,19 @@ mod tests {
     use crate::comment::store::{Anchor, Side};
     use crate::diff::parse;
     use crate::render;
+    use crate::render::moves::MoveIndex;
 
     const WIDTH: u16 = 40;
 
     fn render(raw: &str) -> (Text<'static>, LineMap) {
         let file = parse(raw).remove(0);
-        render::unified(&file, WIDTH, DiffTheme::GitHubDark, 4)
+        render::unified(
+            &file,
+            &FileMoves::default(),
+            WIDTH,
+            DiffTheme::GitHubDark,
+            4,
+        )
     }
 
     fn file_with(hunk: &str) -> String {
@@ -745,7 +798,13 @@ mod tests {
 
     fn sbs(raw: &str) -> (Text<'static>, LineMap) {
         let file = parse(raw).remove(0);
-        render::side_by_side(&file, WIDTH, DiffTheme::GitHubDark, 4)
+        render::side_by_side(
+            &file,
+            &FileMoves::default(),
+            WIDTH,
+            DiffTheme::GitHubDark,
+            4,
+        )
     }
 
     #[test]
@@ -904,7 +963,8 @@ mod tests {
     #[test]
     fn a_pane_too_narrow_for_the_gutter_still_terminates() {
         let file = parse(&file_with("@@ -1 +1 @@\n-abcdef\n+ghijkl\n")).remove(0);
-        let (text, map) = render::side_by_side(&file, 8, DiffTheme::GitHubDark, 4);
+        let (text, map) =
+            render::side_by_side(&file, &FileMoves::default(), 8, DiffTheme::GitHubDark, 4);
         assert_eq!(text.lines.len(), map.len());
     }
 
@@ -925,5 +985,158 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect();
         assert_eq!(strong, ["2"]);
+    }
+
+    /// A function moved from line 1 to line 4, around a line that stayed.
+    const MOVED: &str = "@@ -1,3 +1,3 @@\n-fn alpha_value() {\n-    first_call(1);\n keep\n\
+                         +fn alpha_value() {\n+    first_call(1);\n";
+
+    fn moved(side_by_side: bool) -> (Text<'static>, LineMap) {
+        let files = parse(&file_with(MOVED));
+        let index = MoveIndex::build(&files);
+        let draw = if side_by_side {
+            render::side_by_side
+        } else {
+            render::unified
+        };
+        draw(&files[0], index.file(0), WIDTH, DiffTheme::GitHubDark, 4)
+    }
+
+    fn background(text: &Text<'_>, row: usize, column_text: &str) -> Option<Color> {
+        let spans = &text.lines[row].spans;
+        spans
+            .iter()
+            .find(|s| s.content.contains(column_text))
+            .and_then(|s| s.style.bg)
+    }
+
+    #[test]
+    fn a_moved_row_is_tinted_rather_than_red_or_green() {
+        let (text, map) = moved(false);
+        let tint = DiffTheme::GitHubDark.palette().moved().bg;
+        for (side, line) in [(Side::Old, 1), (Side::New, 2)] {
+            let row = map.row_for(Anchor { side, line }).unwrap();
+            assert_eq!(background(&text, row, "fn"), tint);
+        }
+    }
+
+    #[test]
+    fn a_hint_row_sits_above_a_moved_block_with_no_line_number() {
+        let (text, map) = moved(false);
+        let row = map
+            .row_for(Anchor {
+                side: Side::Old,
+                line: 1,
+            })
+            .unwrap();
+        assert_eq!(map.get(row - 1), LineNumbers::none());
+        assert_eq!(
+            plain(&text.lines[row - 1]).trim_end(),
+            "     ⋮     │⇄ moved to line 2"
+        );
+        assert_eq!(text.lines.len(), map.len());
+    }
+
+    #[test]
+    fn side_by_side_puts_a_hint_on_the_side_it_describes() {
+        let (text, map) = moved(true);
+        assert_eq!(text.lines.len(), map.len());
+        let row = map
+            .row_for(Anchor {
+                side: Side::Old,
+                line: 1,
+            })
+            .unwrap();
+        assert_eq!(map.get(row - 1), LineNumbers::none());
+        let hint = plain(&text.lines[row - 1]);
+        assert_eq!(line_width(&text.lines[row - 1]), usize::from(WIDTH));
+        let split = hint.chars().position(|c| c == RIGHT_DELIM).unwrap();
+        let left: String = hint.chars().take(split).collect();
+        assert!(left.contains("moved to"), "{hint}");
+    }
+
+    #[test]
+    fn a_hint_wider_than_the_pane_is_cut_short() {
+        let long = format!("{}.rs", "x".repeat(60));
+        let moved = |file: &str, raw: &str| {
+            format!("diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n{raw}")
+        };
+        let raw = moved(
+            "a.rs",
+            "@@ -1,2 +0,0 @@\n-fn alpha_value() {\n-    first_call(1);\n",
+        ) + &moved(
+            &long,
+            "@@ -0,0 +1,2 @@\n+fn alpha_value() {\n+    first_call(1);\n",
+        );
+        let files = parse(&raw);
+        let index = MoveIndex::build(&files);
+        let (text, _) = render::unified(&files[0], index.file(0), WIDTH, DiffTheme::GitHubDark, 4);
+        assert_eq!(line_width(&text.lines[6]), usize::from(WIDTH));
+        assert!(plain(&text.lines[6]).ends_with('…'));
+    }
+
+    #[test]
+    fn code_reindented_in_place_sits_opposite_itself_with_no_emphasis() {
+        let files = parse(&file_with(
+            "@@ -1,2 +1,2 @@\n-first_call(1);\n-second_call(2);\n\
+             +    first_call(1);\n+    second_call(2);\n",
+        ));
+        let index = MoveIndex::build(&files);
+        let (text, map) =
+            render::side_by_side(&files[0], index.file(0), WIDTH, DiffTheme::GitHubDark, 4);
+        let row = map
+            .row_for(Anchor {
+                side: Side::Old,
+                line: 2,
+            })
+            .unwrap();
+        assert_eq!(map.get(row).new, Some(2));
+        let palette = DiffTheme::GitHubDark.palette();
+        let emphasized = text.lines[row]
+            .spans
+            .iter()
+            .filter(|s| [palette.plus_emph().bg, palette.minus_emph().bg].contains(&s.style.bg));
+        assert_eq!(emphasized.count(), 0);
+    }
+
+    #[test]
+    fn lines_swapped_in_one_change_still_draw_side_by_side() {
+        let first = "    first_statement(1);\n    second_statement(2);\n";
+        let second = "    third_statement(3);\n    fourth_statement(4);\n";
+        let minus = |t: &str| t.lines().map(|l| format!("-{l}\n")).collect::<String>();
+        let plus = |t: &str| t.lines().map(|l| format!("+{l}\n")).collect::<String>();
+        let raw = file_with(&format!(
+            "@@ -1,4 +1,4 @@\n{}{}{}{}",
+            minus(first),
+            minus(second),
+            plus(second),
+            plus(first),
+        ));
+        let files = parse(&raw);
+        let index = MoveIndex::build(&files);
+        let (_, map) =
+            render::side_by_side(&files[0], index.file(0), WIDTH, DiffTheme::GitHubDark, 4);
+        for line in 1..=4 {
+            for side in [Side::Old, Side::New] {
+                assert!(map.row_for(Anchor { side, line }).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn a_trailing_blank_on_a_moved_line_isnt_flagged() {
+        let files = parse(&file_with(
+            "@@ -1,3 +1,3 @@\n-fn alpha_value() {\n-    first_call(1);  \n keep\n\
+             +fn alpha_value() {\n+    first_call(1);  \n",
+        ));
+        let index = MoveIndex::build(&files);
+        let (text, _) = render::unified(&files[0], index.file(0), WIDTH, DiffTheme::GitHubDark, 4);
+        let flagged = DiffTheme::GitHubDark.palette().whitespace_error();
+        let any = text
+            .lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .any(|s| s.style == flagged);
+        assert!(!any);
     }
 }

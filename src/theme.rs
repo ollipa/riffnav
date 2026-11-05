@@ -19,6 +19,8 @@ pub struct DiffPalette {
     plus_emph_bg: Color,
     minus_bg: Color,
     minus_emph_bg: Color,
+    /// Background of lines that moved rather than changed.
+    moved_bg: Color,
     /// Background of unchanged lines. `None` leaves the terminal's own.
     context_bg: Option<Color>,
     /// Text with no syntax color: plain text and overlong lines.
@@ -45,6 +47,10 @@ impl DiffPalette {
 
     pub fn minus_emph(&self) -> Style {
         Style::new().fg(self.plain).bg(self.minus_emph_bg)
+    }
+
+    pub fn moved(&self) -> Style {
+        Style::new().fg(self.plain).bg(self.moved_bg)
     }
 
     pub fn context(&self) -> Style {
@@ -113,6 +119,7 @@ impl DiffTheme {
                 plus_emph_bg: rgb(0xabf2bc),
                 minus_bg: rgb(0xffebe9),
                 minus_emph_bg: rgb(0xfdb8c0),
+                moved_bg: rgb(0xf2edfc),
                 context_bg: Some(rgb(0xffffff)),
                 plain: rgb(0x1f2328),
                 plus_number: rgb(0x1a7f37),
@@ -126,6 +133,7 @@ impl DiffTheme {
                 plus_emph_bg: rgb(0x1a4a28),
                 minus_bg: rgb(0x301a1e),
                 minus_emph_bg: rgb(0x6b2a2b),
+                moved_bg: rgb(0x231f39),
                 context_bg: None,
                 plain: rgb(0xe6edf3),
                 plus_number: rgb(0x3fb950),

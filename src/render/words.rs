@@ -9,6 +9,7 @@ use std::ops::Range;
 use similar::{Algorithm, DiffOp, capture_diff_slices};
 
 use super::highlight::MAX_LINE_BYTES;
+use super::moves::FileMoves;
 use crate::diff::{Row, RowKind};
 
 /// How much of two lines' non-blank text must match to call them one edited line.
@@ -22,17 +23,23 @@ const PARTNER_WINDOW: usize = 8;
 pub struct Changes {
     /// Byte ranges to emphasize in each row, index-aligned with the rows.
     pub emphasis: Vec<Vec<Range<usize>>>,
-    /// For a removed row, the added row it's an edit of, index-aligned.
+    /// For a removed row, the added row to set opposite it, index-aligned: the
+    /// row it's an edit of, or the one it moved to within the same change.
     pub partner: Vec<Option<usize>>,
 }
 
-/// Pair up the edited lines in `rows` and mark what changed in each.
-pub fn changes(rows: &[Row]) -> Changes {
+/// Pair up the edited lines in `rows` and mark what changed in each. A moved row
+/// isn't an edit of anything, so it stays out of the pairing.
+pub fn changes(rows: &[Row], moves: &FileMoves) -> Changes {
     let mut out = Changes {
         emphasis: vec![Vec::new(); rows.len()],
-        partner: vec![None; rows.len()],
+        partner: (0..rows.len())
+            .map(|row| moves.at(row).and_then(|mark| mark.twin))
+            .collect(),
     };
-    for (removed, added) in change_runs(rows) {
+    for (mut removed, mut added) in change_runs(rows) {
+        removed.retain(|&row| moves.at(row).is_none());
+        added.retain(|&row| moves.at(row).is_none());
         let mut next = 0;
         for &old_row in &removed {
             let window = added.iter().enumerate().skip(next).take(PARTNER_WINDOW);
@@ -188,7 +195,7 @@ mod tests {
     fn emphasized(hunk: &str) -> Vec<Vec<String>> {
         let raw = format!("diff --git a/f b/f\n--- a/f\n+++ b/f\n{hunk}");
         let rows = rows(&parse(&raw).remove(0));
-        changes(&rows)
+        changes(&rows, &FileMoves::default())
             .emphasis
             .iter()
             .zip(&rows)
@@ -262,7 +269,10 @@ mod tests {
         let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n\
                    @@ -1,2 +1,2 @@\n-let a = 1;\n-gone\n+let a = 2;\n+other\n";
         let rows = rows(&parse(raw).remove(0));
-        assert_eq!(changes(&rows).partner, [None, Some(3), None, None, None]);
+        assert_eq!(
+            changes(&rows, &FileMoves::default()).partner,
+            [None, Some(3), None, None, None]
+        );
     }
 
     #[test]

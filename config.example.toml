@@ -17,6 +17,10 @@
 # Columns between tab stops in the diff.
 # tab_width = 4
 
+# Show code that moved, within a file or between files, in a muted color with a
+# note saying where it went, rather than as a removal and an unrelated addition.
+# detect_moves = true
+
 # Columns reserved for the file-tree pane, including its right border.
 # tree_width = 32
 

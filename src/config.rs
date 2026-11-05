@@ -27,6 +27,10 @@ pub struct Config {
     pub diff_theme: DiffTheme,
     /// Columns between tab stops in the diff.
     pub tab_width: u8,
+    /// Show code that moved, within a file or between files, in its own muted
+    /// color with a note saying where it went, rather than as a removal and an
+    /// unrelated addition.
+    pub detect_moves: bool,
     /// Columns reserved for the file-tree pane, including its right border.
     pub tree_width: u16,
     /// Show the file tree on launch.
@@ -79,6 +83,7 @@ impl Default for Config {
             icon_style: IconStyle::Nerd,
             diff_theme: DiffTheme::GitHubDark,
             tab_width: 4,
+            detect_moves: true,
             tree_width: 32,
             show_tree: true,
             start_focus: Focus::Diff,
@@ -178,6 +183,12 @@ mod tests {
     fn side_by_side_can_be_set() {
         assert!(from_toml("side_by_side = true").unwrap().side_by_side);
         assert!(!from_toml("side_by_side = false").unwrap().side_by_side);
+    }
+
+    #[test]
+    fn detect_moves_defaults_on_and_can_be_turned_off() {
+        assert!(from_toml("").unwrap().detect_moves);
+        assert!(!from_toml("detect_moves = false").unwrap().detect_moves);
     }
 
     #[test]
