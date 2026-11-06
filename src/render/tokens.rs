@@ -180,7 +180,7 @@ mod tests {
         );
         let file = parse(&raw).remove(0);
         let rows = rows(&file);
-        let tokens = highlight(&file, &rows, DiffTheme::GitHubDark)
+        let tokens = highlight(&file, &rows, DiffTheme::GitHubDark, &[])
             .tokens
             .remove(1);
         let text =

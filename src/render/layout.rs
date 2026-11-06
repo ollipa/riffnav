@@ -620,6 +620,7 @@ mod tests {
             WIDTH,
             DiffTheme::GitHubDark,
             4,
+            &[],
         )
     }
 
@@ -803,6 +804,7 @@ mod tests {
             WIDTH,
             DiffTheme::GitHubDark,
             4,
+            &[],
         )
     }
 
@@ -962,8 +964,14 @@ mod tests {
     #[test]
     fn a_pane_too_narrow_for_the_gutter_still_terminates() {
         let file = parse(&file_with("@@ -1 +1 @@\n-abcdef\n+ghijkl\n")).remove(0);
-        let (text, map) =
-            render::side_by_side(&file, &FileMoves::default(), 8, DiffTheme::GitHubDark, 4);
+        let (text, map) = render::side_by_side(
+            &file,
+            &FileMoves::default(),
+            8,
+            DiffTheme::GitHubDark,
+            4,
+            &[],
+        );
         assert_eq!(text.lines.len(), map.len());
     }
 
@@ -998,7 +1006,14 @@ mod tests {
         } else {
             render::unified
         };
-        draw(&files[0], index.file(0), WIDTH, DiffTheme::GitHubDark, 4)
+        draw(
+            &files[0],
+            index.file(0),
+            WIDTH,
+            DiffTheme::GitHubDark,
+            4,
+            &[],
+        )
     }
 
     fn background(text: &Text<'_>, row: usize, column_text: &str) -> Option<Color> {
@@ -1069,7 +1084,14 @@ mod tests {
         );
         let files = parse(&raw);
         let index = MoveIndex::build(&files);
-        let (text, _) = render::unified(&files[0], index.file(0), WIDTH, DiffTheme::GitHubDark, 4);
+        let (text, _) = render::unified(
+            &files[0],
+            index.file(0),
+            WIDTH,
+            DiffTheme::GitHubDark,
+            4,
+            &[],
+        );
         assert_eq!(line_width(&text.lines[6]), usize::from(WIDTH));
         assert!(plain(&text.lines[6]).ends_with('…'));
     }
@@ -1081,8 +1103,14 @@ mod tests {
              +    first_call(1);\n+    second_call(2);\n",
         ));
         let index = MoveIndex::build(&files);
-        let (text, map) =
-            render::side_by_side(&files[0], index.file(0), WIDTH, DiffTheme::GitHubDark, 4);
+        let (text, map) = render::side_by_side(
+            &files[0],
+            index.file(0),
+            WIDTH,
+            DiffTheme::GitHubDark,
+            4,
+            &[],
+        );
         let row = map
             .row_for(Anchor {
                 side: Side::Old,
@@ -1113,8 +1141,14 @@ mod tests {
         ));
         let files = parse(&raw);
         let index = MoveIndex::build(&files);
-        let (_, map) =
-            render::side_by_side(&files[0], index.file(0), WIDTH, DiffTheme::GitHubDark, 4);
+        let (_, map) = render::side_by_side(
+            &files[0],
+            index.file(0),
+            WIDTH,
+            DiffTheme::GitHubDark,
+            4,
+            &[],
+        );
         for line in 1..=4 {
             for side in [Side::Old, Side::New] {
                 assert!(map.row_for(Anchor { side, line }).is_some());
@@ -1129,7 +1163,14 @@ mod tests {
              +fn alpha_value() {\n+    first_call(1);  \n",
         ));
         let index = MoveIndex::build(&files);
-        let (text, _) = render::unified(&files[0], index.file(0), WIDTH, DiffTheme::GitHubDark, 4);
+        let (text, _) = render::unified(
+            &files[0],
+            index.file(0),
+            WIDTH,
+            DiffTheme::GitHubDark,
+            4,
+            &[],
+        );
         let flagged = DiffTheme::GitHubDark.palette().whitespace_error();
         let any = text
             .lines

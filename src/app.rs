@@ -64,6 +64,9 @@ const CONTEXT_STEP: u32 = 1;
 /// While watching for comments written elsewhere, cap the input wait so an
 /// agent's note appears without needing a keypress.
 const COMMENT_POLL: Duration = Duration::from_millis(250);
+/// While a file's hunk starts are being worked out, cap the input wait so they
+/// reach the screen without needing a keypress.
+const STARTS_POLL: Duration = Duration::from_millis(50);
 
 /// Best-effort terminal mouse reporting, toggled around screen ownership: on
 /// while the TUI runs so clicks and the wheel reach us, off whenever we hand the
@@ -357,6 +360,7 @@ impl App {
     /// text itself was already loaded and parsed into `files`.
     pub fn enable_git_diff(&mut self, git: GitDiff) {
         self.git = Some(git);
+        self.cache.read_starts();
     }
 
     /// The view's label (e.g. "all uncommitted", or `git diff HEAD~3`), or `None`
@@ -1001,6 +1005,7 @@ impl App {
         }
         self.expire_status();
         self.drain_review_sync();
+        self.cache.drain_starts();
         self.poll_comments();
         Ok(())
     }
@@ -1023,6 +1028,11 @@ impl App {
             (true, _) => Some(SYNC_POLL),
             (false, true) => Some(COMMENT_POLL),
             (false, false) => None,
+        };
+        let bound = match (self.cache.reading_starts(), bound) {
+            (true, Some(bound)) => Some(bound.min(STARTS_POLL)),
+            (true, None) => Some(STARTS_POLL),
+            (false, bound) => bound,
         };
         match (status, bound) {
             (Some(s), Some(b)) => Some(s.min(b)),

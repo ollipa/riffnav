@@ -6,18 +6,21 @@
 mod highlight;
 mod layout;
 mod moves;
+mod starts;
 mod tokens;
 mod words;
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry as Slot;
 
 use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Wrap};
+use twox_hash::XxHash3_128;
 
+use self::highlight::HunkStart;
 use self::layout::{Content, MOVE_MARK, WRAP_MARK};
 pub use self::moves::Target;
 use self::moves::{FileMoves, MoveIndex};
+use self::starts::StartReader;
 use crate::comment::render::CommentBlock;
 use crate::comment::store::{Anchor, Comment};
 use crate::comment::{LineMap, render as comment_render};
@@ -36,9 +39,10 @@ pub fn unified(
     width: u16,
     theme: DiffTheme,
     tab_width: u8,
+    starts: &[HunkStart],
 ) -> (Text<'static>, LineMap) {
     let rows = diff::rows(file);
-    let syntax = highlight::highlight(file, &rows, theme);
+    let syntax = highlight::highlight(file, &rows, theme, starts);
     let changes = words::changes(&rows, &syntax.tokens, moves);
     let content = Content {
         rows: &rows,
@@ -56,9 +60,10 @@ pub fn side_by_side(
     width: u16,
     theme: DiffTheme,
     tab_width: u8,
+    starts: &[HunkStart],
 ) -> (Text<'static>, LineMap) {
     let rows = diff::rows(file);
-    let syntax = highlight::highlight(file, &rows, theme);
+    let syntax = highlight::highlight(file, &rows, theme, starts);
     let changes = words::changes(&rows, &syntax.tokens, moves);
     let content = Content {
         rows: &rows,
@@ -290,6 +295,12 @@ struct Entry {
     rendered: Rendered,
     /// The comment revision `rendered` was spliced at.
     rev: u64,
+    /// Hash of the diff text this was made from, which is what [`StartReader`]
+    /// knows it by. Only set when there is a reader.
+    source: u128,
+    /// Made before the reader had answered, so its hunks started afresh and it's
+    /// rendered again if the answer changes that.
+    provisional: bool,
 }
 
 /// Caches renders keyed by `(file, width, side_by_side, theme)` so revisiting a
@@ -301,6 +312,9 @@ pub struct RenderCache {
     tab_width: u8,
     detect_moves: bool,
     moves: MoveIndex,
+    /// Set when riffnav ran git itself, so there's a file behind the diff to read.
+    /// Outlives [`Self::clear`]: a new width has the same hunks.
+    starts: Option<StartReader>,
 }
 
 impl RenderCache {
@@ -310,6 +324,32 @@ impl RenderCache {
             tab_width,
             detect_moves,
             moves: MoveIndex::default(),
+            starts: None,
+        }
+    }
+
+    /// Start each hunk's parser from the real file. Only for a diff from git run
+    /// here: one piped in could be of anything.
+    pub fn read_starts(&mut self) {
+        self.starts.get_or_insert_with(|| StartReader::new("."));
+    }
+
+    #[cfg(test)]
+    fn read_starts_in(&mut self, repo: &std::path::Path) {
+        self.starts = Some(StartReader::new(repo));
+    }
+
+    /// Whether a file's hunk starts are being worked out, so the event loop has
+    /// to keep waking up to pick them up.
+    pub fn reading_starts(&self) -> bool {
+        self.starts.as_ref().is_some_and(StartReader::busy)
+    }
+
+    /// Collect hunk starts that have finished. The next [`Self::ensure`] redraws
+    /// the file if they change it.
+    pub fn drain_starts(&mut self) {
+        if let Some(reader) = &mut self.starts {
+            reader.drain();
         }
     }
 
@@ -343,20 +383,29 @@ impl RenderCache {
         theme: DiffTheme,
         comments: &CommentLayer<'_>,
     ) {
-        let tab_width = self.tab_width;
-        let moves = self.moves.file(file);
         let key = Key {
             file,
             width,
             side_by_side,
             theme,
         };
-        if let Slot::Vacant(slot) = self.entries.entry(key.clone()) {
-            let (base, base_map) = if side_by_side {
-                self::side_by_side(diff, moves, width, theme, tab_width)
+        self.settle(&key, diff);
+        if !self.entries.contains_key(&key) {
+            let source = self
+                .starts
+                .as_ref()
+                .map_or(0, |_| XxHash3_128::oneshot(diff.raw.as_bytes()));
+            let starts = self.starts.as_mut().map(|r| r.wait_for(source, diff));
+            let provisional = matches!(starts, Some(None));
+            let starts = starts.flatten();
+            let hunks = starts.as_ref().map_or(&[][..], |s| s.as_slice());
+            let moves = self.moves.file(file);
+            let render = if side_by_side {
+                self::side_by_side
             } else {
-                unified(diff, moves, width, theme, tab_width)
+                unified
             };
+            let (base, base_map) = render(diff, moves, width, theme, self.tab_width, hunks);
             let rendered = splice_and_measure(
                 base.clone(),
                 base_map.clone(),
@@ -365,12 +414,17 @@ impl RenderCache {
                 side_by_side,
                 theme,
             );
-            slot.insert(Entry {
-                base,
-                base_map,
-                rendered,
-                rev: comments.rev,
-            });
+            self.entries.insert(
+                key,
+                Entry {
+                    base,
+                    base_map,
+                    rendered,
+                    rev: comments.rev,
+                    source,
+                    provisional,
+                },
+            );
             return;
         }
 
@@ -387,6 +441,24 @@ impl RenderCache {
                 theme,
             );
             entry.rev = comments.rev;
+        }
+    }
+
+    /// Check on the hunk starts a provisional render is missing, and drop the
+    /// render once they've arrived, so it's made again with them.
+    fn settle(&mut self, key: &Key, diff: &FileDiff) {
+        let (Some(reader), Some(entry)) = (&mut self.starts, self.entries.get_mut(key)) else {
+            return;
+        };
+        if !entry.provisional {
+            return;
+        }
+        match reader.ask(entry.source, diff) {
+            Some(starts) if starts.is_empty() => entry.provisional = false,
+            Some(_) => {
+                self.entries.remove(key);
+            }
+            None => {}
         }
     }
 
@@ -471,6 +543,8 @@ impl RenderCache {
                 base_map,
                 rendered,
                 rev: comments.rev,
+                source: 0,
+                provisional: false,
             },
         );
     }
@@ -554,6 +628,85 @@ mod tests {
         cache.index_moves(&files);
         rendered(&mut cache, &files);
         assert!(!says(&cache, 0, "moved to"));
+    }
+
+    /// A repository whose last commit changes a line inside a block comment, and
+    /// that commit's diff.
+    fn edit_in_a_comment(dir: &std::path::Path) -> FileDiff {
+        let git = |args: &[&str]| {
+            let mut git = std::process::Command::new("git");
+            git.args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(dir);
+            git.output().unwrap()
+        };
+        std::fs::create_dir_all(dir).unwrap();
+        git(&["init", "-q"]);
+        let text = format!("/*\n{}*/\n", "prose\n".repeat(40));
+        std::fs::write(dir.join("a.rs"), &text).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "x"]);
+        std::fs::write(dir.join("a.rs"), text.replacen("prose", "let x = 1;", 1)).unwrap();
+        git(&["commit", "-qam", "x"]);
+        let out = git(&["show", "HEAD"]);
+        parse(&String::from_utf8_lossy(&out.stdout)).remove(0)
+    }
+
+    /// The colors of the `let x = 1;` row, which are all one if it's a comment.
+    fn colors_of_the_edit(cache: &RenderCache, width: u16, theme: DiffTheme) -> usize {
+        let rendered = cache.get(0, width, false, theme).unwrap();
+        let line = rendered.text.lines.iter().find(|line| {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.contains("let x")
+        });
+        let mut colors: Vec<_> = line.unwrap().spans.iter().map(|s| s.style.fg).collect();
+        colors.retain(|fg| fg.is_some());
+        colors.dedup();
+        colors.len()
+    }
+
+    #[test]
+    fn hunk_starts_reach_the_render_and_outlive_a_resize_and_a_theme_change() {
+        let dir = std::env::temp_dir().join(format!("riffnav-render-{}", std::process::id()));
+        let file = edit_in_a_comment(&dir);
+        let mut cache = RenderCache::new(4, false);
+        cache.read_starts_in(&dir);
+        let draw = |cache: &mut RenderCache, width, theme| {
+            cache.ensure(0, &file, width, false, theme, &CommentLayer::none());
+        };
+
+        // The first render may go without, but the file comes right unprompted.
+        draw(&mut cache, WIDTH, GitHubDark);
+        while cache.reading_starts() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            cache.drain_starts();
+        }
+        draw(&mut cache, WIDTH, GitHubDark);
+        let right = colors_of_the_edit(&cache, WIDTH, GitHubDark);
+
+        // With the repository gone, the only way to stay right is the cache.
+        std::fs::remove_dir_all(&dir).unwrap();
+        cache.clear();
+        draw(&mut cache, WIDTH + 10, GitHubDark);
+        assert_eq!(colors_of_the_edit(&cache, WIDTH + 10, GitHubDark), right);
+        draw(&mut cache, WIDTH, DiffTheme::GitHubLight);
+        assert_eq!(
+            colors_of_the_edit(&cache, WIDTH, DiffTheme::GitHubLight),
+            right
+        );
+        assert!(!cache.reading_starts());
+    }
+
+    #[test]
+    fn a_cache_without_a_reader_leaves_hunks_starting_afresh() {
+        let dir = std::env::temp_dir().join(format!("riffnav-piped-{}", std::process::id()));
+        let file = edit_in_a_comment(&dir);
+        let mut cache = RenderCache::new(4, false);
+        cache.ensure(0, &file, WIDTH, false, GitHubDark, &CommentLayer::none());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!cache.reading_starts());
+        assert!(colors_of_the_edit(&cache, WIDTH, GitHubDark) > 1);
     }
 
     /// The windowed render (`Rendered::visible`) must be pixel-for-pixel identical

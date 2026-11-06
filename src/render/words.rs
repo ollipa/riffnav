@@ -383,7 +383,7 @@ mod tests {
         let raw = format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n{hunk}");
         let file = parse(&raw).remove(0);
         let rows = rows(&file);
-        let syntax = highlight(&file, &rows, DiffTheme::GitHubDark);
+        let syntax = highlight(&file, &rows, DiffTheme::GitHubDark, &[]);
         let changes = changes(&rows, &syntax.tokens, &FileMoves::default());
         (rows, changes)
     }

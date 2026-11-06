@@ -2,11 +2,15 @@
 //!
 //! The two sides of a diff are different programs, so each gets its own parser
 //! state: feeding removed and added lines through one parser would let a string
-//! opened on a removed line swallow the added lines after it. Each hunk starts
-//! afresh, since the lines between hunks aren't in the diff.
+//! opened on a removed line swallow the added lines after it.
+//!
+//! The lines between hunks aren't in the diff, so a hunk starts afresh unless it
+//! is handed a [`HunkStart`], which [`super::starts`] works out from the file
+//! itself when it can get at it.
 
 use std::path::Path;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::style::{Color, Modifier, Style};
 use two_face::re_exports::syntect::highlighting::{
@@ -25,7 +29,7 @@ pub const MAX_LINE_BYTES: usize = 2_000;
 /// Diffs bigger than this skip highlighting altogether, for the same reason: a
 /// generated file or lockfile would otherwise freeze the UI on selection. Word
 /// emphasis still applies, and it's what matters most on a file that big.
-const MAX_FILE_BYTES: usize = 500_000;
+pub const MAX_FILE_BYTES: usize = 500_000;
 
 /// A stretch of a row's text in one style, up to byte offset `end`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +63,21 @@ pub struct Syntax {
     pub tokens: Vec<Tokens>,
 }
 
+/// The parser as it stands partway through a file. It holds scopes rather than
+/// styles, so a theme change can start from the same place.
+#[derive(Debug, Clone)]
+pub struct Seed {
+    parser: ParseState,
+    stack: ScopeStack,
+}
+
+/// Where one hunk's two sides start. `None` starts a side afresh.
+#[derive(Debug, Clone, Default)]
+pub struct HunkStart {
+    pub old: Option<Seed>,
+    pub new: Option<Seed>,
+}
+
 /// One side of the diff's parser state.
 struct Side<'a> {
     parser: ParseState,
@@ -67,10 +86,18 @@ struct Side<'a> {
 }
 
 impl<'a> Side<'a> {
-    fn new(syntax: &SyntaxReference, highlighter: &'a Highlighter<'a>) -> Self {
+    fn new(
+        syntax: &SyntaxReference,
+        seed: Option<&Seed>,
+        highlighter: &'a Highlighter<'a>,
+    ) -> Self {
+        let (parser, stack) = match seed {
+            Some(seed) => (seed.parser.clone(), seed.stack.clone()),
+            None => (ParseState::new(syntax), ScopeStack::new()),
+        };
         Self {
-            parser: ParseState::new(syntax),
-            state: HighlightState::new(highlighter, ScopeStack::new()),
+            parser,
+            state: HighlightState::new(highlighter, stack),
             highlighter,
         }
     }
@@ -95,34 +122,34 @@ impl<'a> Side<'a> {
     }
 }
 
-/// Parse `rows`, each side of the diff on its own.
-pub fn highlight(file: &FileDiff, rows: &[Row], theme: DiffTheme) -> Syntax {
+/// Parse `rows`, each side of the diff on its own. `starts` lines up with the
+/// file's hunks, and a hunk past the end of it starts afresh.
+pub fn highlight(file: &FileDiff, rows: &[Row], theme: DiffTheme, starts: &[HunkStart]) -> Syntax {
     let mut out = Syntax {
         runs: vec![Vec::new(); rows.len()],
         tokens: vec![Tokens::default(); rows.len()],
     };
-    if file.raw.len() > MAX_FILE_BYTES {
-        return out;
-    }
-    let assets = assets();
-    let Some(syntax) = find_syntax(&assets.syntaxes, file.path(), rows) else {
+    let Some(syntax) = language(file, rows) else {
         return out;
     };
+    let assets = assets();
     let set = &assets.syntaxes;
     let highlighter = Highlighter::new(assets.themes.get(syntax_theme(theme)));
 
-    let mut old = Side::new(syntax, &highlighter);
-    let mut new = Side::new(syntax, &highlighter);
+    let mut old = Side::new(syntax, None, &highlighter);
+    let mut new = Side::new(syntax, None, &highlighter);
+    let mut hunks = starts.iter();
     for (at, row) in rows.iter().enumerate() {
+        if let RowKind::HunkHeader { .. } = row.kind {
+            let start = hunks.next();
+            old = Side::new(syntax, start.and_then(|s| s.old.as_ref()), &highlighter);
+            new = Side::new(syntax, start.and_then(|s| s.new.as_ref()), &highlighter);
+            continue;
+        }
         if row.text.len() > MAX_LINE_BYTES {
             continue;
         }
         let parsed = match row.kind {
-            RowKind::HunkHeader { .. } => {
-                old = Side::new(syntax, &highlighter);
-                new = Side::new(syntax, &highlighter);
-                None
-            }
             RowKind::Removed => old.line(set, &row.text),
             RowKind::Added => new.line(set, &row.text),
             // Context is on both sides, so both parsers have to see it. The two
@@ -132,7 +159,7 @@ pub fn highlight(file: &FileDiff, rows: &[Row], theme: DiffTheme) -> Syntax {
                 old.line(set, &row.text);
                 new.line(set, &row.text)
             }
-            RowKind::NoNewline => None,
+            RowKind::HunkHeader { .. } | RowKind::NoNewline => None,
         };
         if let Some((runs, tokens)) = parsed {
             out.runs[at] = runs;
@@ -140,6 +167,58 @@ pub fn highlight(file: &FileDiff, rows: &[Row], theme: DiffTheme) -> Syntax {
                 out.tokens[at] = tokens;
             }
         }
+    }
+    out
+}
+
+/// The syntax `file` is parsed with, or `None` for a file that gets no color:
+/// too big, or of no known language.
+pub fn language(file: &FileDiff, rows: &[Row]) -> Option<&'static SyntaxReference> {
+    if file.raw.len() > MAX_FILE_BYTES {
+        return None;
+    }
+    find_syntax(&assets().syntaxes, file.path(), rows)
+}
+
+/// The parser's state after each count of `lines` in `stops`, which ascend and
+/// stay within them, for handing to [`highlight`]. Nothing past the last stop is
+/// parsed. A stop of 0 needs no state. Comes back short once `cancelled` is set.
+///
+/// Lines are treated as in [`highlight`], so a hunk continues from exactly where
+/// parsing the whole file would have got to.
+pub fn seeds(
+    syntax: &SyntaxReference,
+    lines: &[&str],
+    stops: &[usize],
+    cancelled: &AtomicBool,
+) -> Vec<Option<Seed>> {
+    let set = &assets().syntaxes;
+    let mut parser = ParseState::new(syntax);
+    let mut stack = ScopeStack::new();
+    let mut parsed = lines.iter();
+    let mut at = 0;
+    let mut out = Vec::with_capacity(stops.len());
+    for &stop in stops {
+        for text in parsed.by_ref().take(stop.saturating_sub(at)) {
+            if cancelled.load(Ordering::Relaxed) {
+                return out;
+            }
+            if text.len() > MAX_LINE_BYTES {
+                continue;
+            }
+            let Ok(ops) = parser.parse_line(&format!("{text}\n"), set) else {
+                continue;
+            };
+            for (_, op) in &ops {
+                // The highlighter shrugs off an op it can't apply, too.
+                let _ = stack.apply(op);
+            }
+        }
+        at = at.max(stop);
+        out.push((stop > 0).then(|| Seed {
+            parser: parser.clone(),
+            stack: stack.clone(),
+        }));
     }
     out
 }
@@ -197,7 +276,7 @@ mod tests {
     fn highlighted(path: &str, hunk: &str) -> (Vec<Row>, Vec<Vec<Run>>) {
         let file = file(path, hunk);
         let rows = rows(&file);
-        let runs = highlight(&file, &rows, DiffTheme::GitHubDark).runs;
+        let runs = highlight(&file, &rows, DiffTheme::GitHubDark, &[]).runs;
         (rows, runs)
     }
 

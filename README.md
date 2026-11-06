@@ -298,6 +298,14 @@ blocks that moved, then everything is drawn with [ratatui][ratatui] and cached p
 file/width/layout/theme. Because stdin may itself be the diff, key input is read
 from `/dev/tty`.
 
+The lines between hunks aren't in a diff, so a hunk that opens inside a block
+comment or a multi-line string can't be colored from the diff alone. When riffnav
+ran git itself it reads the file's old blob and applies the hunks to it, parsing
+each side down to each hunk off the UI thread. A big file is drawn straight away
+and its colors correct themselves a moment later. A diff piped in, or a blob
+that's missing, over the size limit or isn't the text shown (a `textconv` diff),
+starts each hunk afresh.
+
 Comments anchor to a *diff line*, never a screen row, so they stay put across a
 resize, a theme switch, or a unified/side-by-side toggle. Each rendered row keeps
 the line numbers it came from, so a comment always finds its place.
