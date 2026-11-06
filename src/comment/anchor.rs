@@ -15,6 +15,8 @@ pub struct LineMap {
     rows: Vec<LineNumbers>,
     /// Per rendered line, the code on each side of it: unified uses the first.
     sources: Vec<[Option<Source>; 2]>,
+    /// Per row of [`crate::diff::rows`], the change it's in.
+    changes: Vec<Option<u32>>,
 }
 
 /// Where a rendered line's code came from, for painting search matches onto it.
@@ -63,7 +65,11 @@ impl LineMap {
     /// A map for a render that already knows each row's numbers.
     pub fn from_numbers(rows: Vec<LineNumbers>) -> Self {
         let sources = vec![[None; 2]; rows.len()];
-        Self { rows, sources }
+        Self {
+            rows,
+            sources,
+            changes: Vec::new(),
+        }
     }
 
     /// Say where the code of the listed lines came from.
@@ -71,6 +77,12 @@ impl LineMap {
         for (line, source) in sources {
             self.sources[line] = source;
         }
+        self
+    }
+
+    /// Say which change each row of the diff is in.
+    pub fn with_changes(mut self, changes: Vec<Option<u32>>) -> Self {
+        self.changes = changes;
         self
     }
 
@@ -104,6 +116,15 @@ impl LineMap {
     /// Every line's sources, in order.
     pub fn all_sources(&self) -> &[[Option<Source>; 2]] {
         &self.sources
+    }
+
+    /// The change the code on `line` is part of. Both sides of a side-by-side line
+    /// are in the same one, if either is in one at all.
+    pub fn change_on(&self, line: usize) -> Option<u32> {
+        let sources = self.sources.get(line)?.iter().flatten();
+        sources
+            .filter_map(|s| self.changes.get(s.row as usize).copied().flatten())
+            .next()
     }
 
     /// Rows in the map. Splicing must keep this equal to the text's line count —

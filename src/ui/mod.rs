@@ -218,10 +218,16 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 ""
             };
-            (
+            let keys = |changes: &str| {
                 format!(
-                    " j/k · n/p file · v: viewed · {note}{refresh}{src}/: search · t: find · T: theme · {web}{zoom}Tab focus · ?: help · q: quit "
-                ),
+                    " j/k · n/p file · {changes}v: viewed · {note}{refresh}{src}/: search · t: find · T: theme · {web}{zoom}Tab focus · ?: help · q: quit "
+                )
+            };
+            // Only if it costs nothing: on a narrow screen `?` is worth more.
+            let full = keys("J/K change · ");
+            let fits = full.chars().count() <= usize::from(area.width);
+            (
+                if fits { full } else { keys("") },
                 Style::new().add_modifier(Modifier::DIM),
             )
         }
@@ -241,6 +247,7 @@ fn render_help(
     let mut entries = vec![
         ("j / k", "move selection / scroll diff (per focus)"),
         ("n / p", "next / previous file"),
+        ("J / K", "next / previous change"),
         ("/", "search the text of the whole diff"),
         ("n / N", "next / previous search match"),
         ("Ctrl-d / Ctrl-u", "scroll diff half page"),

@@ -1,3 +1,4 @@
+mod changes;
 mod search;
 
 use std::collections::HashSet;
@@ -209,6 +210,8 @@ pub struct App {
     pub finder: Option<Finder>,
     /// Text search across the diff: `/`, `n` and `N`.
     find: search::Find,
+    /// Moving between changes: `J` and `K`.
+    change_jumps: changes::ChangeJumps,
     pub cache: RenderCache,
     /// Persistent "viewed" review state, keyed per repo+branch. Session-only
     /// (no persistence) until [`App::enable_review`] runs, or when not in a repo.
@@ -331,6 +334,7 @@ impl App {
             diff_theme: cfg.diff_theme,
             finder: None,
             find: search::Find::default(),
+            change_jumps: changes::ChangeJumps::default(),
             cache,
             review: ReviewStore::disabled(),
             file_hashes,
@@ -977,6 +981,16 @@ impl App {
 
         // Before the render, as it can select the file a match is in.
         self.advance_search();
+        self.settle_view(diff_width);
+        // A jump that went on into another file needs that file rendered too, and
+        // no keypress may be coming to wake the event loop up for it.
+        while self.change_jumps_waiting() {
+            self.settle_view(diff_width);
+        }
+    }
+
+    /// Render the selected file, and put the cursor and any jump in progress on it.
+    fn settle_view(&mut self, diff_width: u16) {
         if let Some(idx) = self.selected_file() {
             let side_by_side = self.side_by_side_for(idx);
             let diff_hash = self.file_hashes.get(idx).copied().unwrap_or(0);
@@ -1002,10 +1016,12 @@ impl App {
         // width), so put the cursor back on the line it was on.
         self.resync_cursor();
         self.restore_cursor_screen_row();
+        self.follow_change();
         // A `]`/`[` jump into this file has been waiting for that render.
         self.land_on_comment();
         self.land_on_move();
         self.land_on_match();
+        self.run_change_jumps();
     }
 
     /// Input wait. Normally blocks for the next event, but bounds the wait when something needs servicing without a keypress: a
@@ -1083,6 +1099,7 @@ impl App {
         self.last_width = 0; // force a re-render at the next draw
         self.finder = None; // indices changed; a stale finder would mislead
         self.restart_search(resume);
+        self.abandon_change_landing(); // So did the file it's heading for.
 
         let target = prev_path
             .as_deref()
@@ -1255,6 +1272,17 @@ impl App {
         )
     }
 
+    /// What file `idx`'s render looks like now, to hold a cursor's index against.
+    fn render_token(&self, idx: usize) -> CursorToken {
+        (
+            idx,
+            self.last_width,
+            self.side_by_side_for(idx),
+            self.diff_theme,
+            self.comment_rev,
+        )
+    }
+
     /// Re-resolve the cursor's line index after the render it pointed into was
     /// rebuilt — a comment spliced in above it, a theme or width change, a switch
     /// between unified and side-by-side. Anchoring to a diff line rather than a
@@ -1263,13 +1291,7 @@ impl App {
         let Some(idx) = self.selected_file() else {
             return;
         };
-        let token = (
-            idx,
-            self.last_width,
-            self.side_by_side_for(idx),
-            self.diff_theme,
-            self.comment_rev,
-        );
+        let token = self.render_token(idx);
         if self.cursor_token == Some(token) {
             return;
         }
@@ -1587,27 +1609,36 @@ impl App {
         self.move_landing = Some(target.anchor);
     }
 
-    /// Finish an `m` jump once its file is rendered. A target that was off screen
-    /// lands a third of the way down, so the block below it can be read and the
-    /// note above it stays in view.
+    /// Finish an `m` jump once its file is rendered.
     fn land_on_move(&mut self) {
         let Some(anchor) = self.move_landing.take() else {
             return;
         };
-        let Some((line, top)) = self.current_render().and_then(|render| {
-            let line = render.line_map.row_for(anchor)?;
-            Some((line, render.row_of(line)))
-        }) else {
+        let Some(line) = self
+            .current_render()
+            .and_then(|render| render.line_map.row_for(anchor))
+        else {
             return;
         };
         let here = self.current_render().map(|r| r.code_line(self.diff_cursor));
         if here == Some(line) {
             return self.set_status("Both ends are on this line");
         }
+        self.land_cursor(line);
+    }
+
+    /// Put the cursor on the line a jump was after. One that was off screen lands
+    /// a third of the way down, so the block below it can be read and the note
+    /// above it stays in view. So does a line wrapped too tall to fit below where
+    /// it was: bringing its foot into view would scroll away where it starts.
+    fn land_cursor(&mut self, line: usize) {
+        let Some(top) = self.current_render().map(|r| r.row_of(line)) else {
+            return;
+        };
         let height = self.diff_height;
         let on_screen = (self.diff_scroll..self.diff_scroll.saturating_add(height)).contains(&top);
         self.set_cursor(line);
-        if !on_screen {
+        if !on_screen || top < self.diff_scroll {
             self.diff_scroll = top.saturating_sub(height / 3);
         }
     }
@@ -2223,6 +2254,8 @@ impl App {
             KeyCode::Char('N') if self.searching() => self.step_match(false),
             KeyCode::Char('n') => self.jump_file(true),
             KeyCode::Char('p') | KeyCode::Char('N') => self.jump_file(false),
+            KeyCode::Char('J') => self.jump_change(true),
+            KeyCode::Char('K') => self.jump_change(false),
             KeyCode::Char('d') if ctrl => self.scroll_diff(HALF_PAGE),
             KeyCode::Char('u') if ctrl => self.scroll_diff(-HALF_PAGE),
             KeyCode::PageDown => self.page_move(true),

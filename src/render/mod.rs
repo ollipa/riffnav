@@ -54,7 +54,8 @@ pub fn unified(
         changes: &changes,
         moves,
     };
-    layout::unified(file, &content, width, theme, tab_width)
+    let (text, map) = layout::unified(file, &content, width, theme, tab_width);
+    (text, map.with_changes(diff::change_ids(&rows)))
 }
 
 /// Render one file side by side, `width` columns wide.
@@ -75,7 +76,8 @@ pub fn side_by_side(
         changes: &changes,
         moves,
     };
-    layout::side_by_side(file, &content, width, theme, tab_width)
+    let (text, map) = layout::side_by_side(file, &content, width, theme, tab_width);
+    (text, map.with_changes(diff::change_ids(&rows)))
 }
 
 /// A rendered file, ready to drop into the diff viewport.
@@ -105,6 +107,10 @@ pub struct Rendered {
     /// `None` for a row with no code. The way back from a search match to the line
     /// it's on, which is the other way round from `line_map`.
     row_starts: Vec<Option<RowStart>>,
+    /// The first line of each change, in order: what `J` and `K` stop on. Worked
+    /// out from the final lines, so comments, move notes and wrapping can't throw
+    /// it off, and every new render has its own.
+    pub changes: Vec<usize>,
 }
 
 /// Where a row's code starts in a render.
@@ -126,6 +132,21 @@ fn row_starts(map: &LineMap) -> Vec<Option<RowStart>> {
                 starts.resize(row + 1, None);
             }
             starts[row].get_or_insert(RowStart { line, side });
+        }
+    }
+    starts
+}
+
+/// The first line of each change. Side by side, a change's first line can show
+/// any of its rows, so it's found by walking the lines rather than from its rows.
+fn change_starts(map: &LineMap) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut last = None;
+    for line in 0..map.all_sources().len() {
+        let change = map.change_on(line);
+        if change.is_some() && change != last {
+            starts.push(line);
+            last = change;
         }
     }
     starts
@@ -327,6 +348,7 @@ fn splice_and_measure(
     );
     let (height, row_offsets) = measure(&text, width, side_by_side);
     let row_starts = row_starts(&map);
+    let changes = change_starts(&map);
     Rendered {
         text,
         height,
@@ -334,6 +356,7 @@ fn splice_and_measure(
         line_map: map,
         comment_rows,
         row_starts,
+        changes,
     }
 }
 
@@ -834,6 +857,7 @@ mod tests {
             line_map: LineMap::default(),
             comment_rows: Vec::new(),
             row_starts: Vec::new(),
+            changes: Vec::new(),
         };
         let draw = |paragraph: Paragraph| -> Buffer {
             let mut term = Terminal::new(TestBackend::new(width, view_h)).unwrap();

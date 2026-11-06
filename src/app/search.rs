@@ -172,6 +172,16 @@ impl App {
         };
     }
 
+    /// Whether the cursor is still on the line it reached the current match on.
+    pub(super) fn holding_match(&self) -> bool {
+        self.find.held.is_some() && self.find.held == self.cursor_anchor
+    }
+
+    /// Whether `n` or `N` is waiting on the event loop to render its file.
+    pub(super) fn landing_on_match(&self) -> bool {
+        self.find.landing.is_some()
+    }
+
     /// Where in tree order the view is: the selected file, or the first file
     /// inside a selected folder.
     fn start_rank(&self) -> usize {
@@ -189,6 +199,34 @@ impl App {
             .iter()
             .position(|&f| self.files[f].path().starts_with(&inside))
             .unwrap_or(0)
+    }
+
+    /// The `count` places in tree order to try next in the direction of travel,
+    /// ending back at the selected file the long way round, each with whether
+    /// getting there goes past an end of the diff.
+    pub(super) fn ranks_onward(
+        &self,
+        forward: bool,
+        count: usize,
+    ) -> impl Iterator<Item = (usize, bool)> + use<> {
+        let here = self.selected_file().is_some();
+        let from = self.start_rank();
+        // With a folder selected, the file at `from` hasn't been visited yet.
+        let skip = usize::from(here || !forward);
+        (0..count).map(move |step| {
+            let step = step + skip;
+            let rank = if forward {
+                (from + step) % count
+            } else {
+                (from + count - step % count) % count
+            };
+            let wrapped = match (forward, here) {
+                (true, true) => rank <= from,
+                (true, false) => rank < from,
+                (false, _) => rank >= from,
+            };
+            (rank, wrapped)
+        })
     }
 
     /// A keypress while the prompt is open. It owns all input, like the finder.
@@ -445,7 +483,7 @@ impl App {
         if self.selected_file() != Some(hit.file as usize) {
             return;
         }
-        if self.find.held.is_some() && self.find.held == self.cursor_anchor {
+        if self.holding_match() {
             self.show_match(index);
         } else if let Some(place) = self.place_of(hit)
             && let Some(search) = self.find.search.as_mut()
@@ -558,35 +596,18 @@ impl App {
         let Some(search) = &self.find.search else {
             return;
         };
-        let count = search.file_count();
-        let here = self.selected_file();
-        let from = self.start_rank();
-        // With a folder selected, the file at `from` hasn't been visited yet.
-        let skip = usize::from(here.is_some() || !forward);
-        let ranks = (0..count).map(|step| {
-            let step = step + skip;
-            if forward {
-                (from + step) % count
-            } else {
-                (from + count - step % count) % count
-            }
-        });
-        let target = ranks
-            .filter_map(|rank| Some((rank, search.file_at(rank)?)))
-            .find(|&(_, file)| !search.in_file(file).is_empty());
-        let Some((rank, file)) = target else {
+        let target = self
+            .ranks_onward(forward, search.file_count())
+            .filter_map(|(rank, wrapped)| Some((search.file_at(rank)?, wrapped)))
+            .find(|&(file, _)| !search.in_file(file).is_empty());
+        let Some((file, wrapped)) = target else {
             return;
-        };
-        let wrapped = match (forward, here) {
-            (true, Some(_)) => rank <= from,
-            (true, None) => rank < from,
-            (false, _) => rank >= from,
         };
         // A match past the end of what's been scanned would come before the wrap.
         if wrapped && !search.done() {
             return self.set_status("Still searching…");
         }
-        if here != Some(file) {
+        if self.selected_file() != Some(file) {
             self.reveal_file(file);
         }
         self.find.landing = Some(if forward {

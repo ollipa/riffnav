@@ -75,6 +75,7 @@ layout for one run with `-s` (side-by-side) or `-u` (unified).
 |-----|--------|
 | `j` / `k` (or `↑` / `↓`) | Move selection (tree) / move the line cursor (diff), per focus |
 | `n` / `p` (or `N`) | Next / previous file; during a [search](#searching-the-diff), `n` / `N` step through matches and `p` stays previous file |
+| `J` / `K` | Next / previous [change](#moving-between-changes), across files |
 | `Ctrl-d` / `Ctrl-u` | Scroll diff half a page |
 | `PgDn` / `PgUp` | Page down / up (scroll diff or move tree, per focus) |
 | `g` / `G` | Top / bottom of the diff |
@@ -100,6 +101,20 @@ layout for one run with `-s` (side-by-side) or `-u` (unified).
 | `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
 | `?` | Toggle the help overlay |
 | `q` / `Esc` / `Ctrl-c` | Quit (`Esc` clears a search first) |
+
+## Moving between changes
+
+`J` and `K` step through the changes in the diff, so reading a long file doesn't
+mean paging through context. A change is one unbroken run of added, removed or
+moved lines, so a hunk can hold several. `J` goes to the first line of the next
+one and `K` to the first line of the one before; inside a change, `K` goes to the
+start of that change first. The line cursor goes with them, so `c` and `m` act on
+that line.
+
+Past the last change in a file they carry on into the next file with one, opening
+its folder if it's collapsed, and at the ends of the diff they wrap and say so.
+Files with no text changes are skipped. In the tree they act on the diff and move
+focus there.
 
 ## Searching the diff
 

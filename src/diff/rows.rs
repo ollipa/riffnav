@@ -153,6 +153,41 @@ pub fn rows(file: &FileDiff) -> Vec<Row> {
     rows
 }
 
+/// Which change each row is in, counting down the file. A change is an unbroken
+/// run of added and removed rows, moved ones included. A `\\ No newline` marker can
+/// sit inside one, but a hunk header ends it, even with no context either side.
+pub fn change_ids(rows: &[Row]) -> Vec<Option<u32>> {
+    let mut ids = Vec::with_capacity(rows.len());
+    let (mut next, mut inside) = (0, false);
+    for row in rows {
+        ids.push(match row.kind {
+            RowKind::Added | RowKind::Removed => {
+                next += u32::from(!inside);
+                inside = true;
+                Some(next - 1)
+            }
+            RowKind::NoNewline => None,
+            RowKind::HunkHeader { .. } | RowKind::Context => {
+                inside = false;
+                None
+            }
+        });
+    }
+    ids
+}
+
+/// Whether the file has any added or removed rows, which a binary file, a pure
+/// rename or a mode change doesn't.
+pub fn has_changes(file: &FileDiff) -> bool {
+    let mut walk = RowWalk::default();
+    while let Some(row) = walk.next(&file.raw) {
+        if matches!(row.kind, RowKind::Added | RowKind::Removed) {
+            return true;
+        }
+    }
+    false
+}
+
 /// What a file's diff says beyond its hunks, for the header: `binary file`,
 /// `mode +x`. Several of these changes have no hunks at all, so without a note
 /// the pane would be empty.
@@ -269,6 +304,39 @@ mod tests {
         let mode = file("diff --git a/s b/s\nold mode 100644\nnew mode 100755\n");
         assert!(rows(&mode).is_empty());
         assert_eq!(notes(&mode), ["mode +x"]);
+    }
+
+    #[test]
+    fn a_change_runs_until_context_or_a_hunk_header() {
+        let ids = change_ids(&rows(&file(
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n-a\n+b\n-c\n x\n+d\n\
+             @@ -9 +9 @@\n-e\n",
+        )));
+        let (a, b) = (Some(0), Some(1));
+        assert_eq!(ids, [None, a, a, a, None, b, None, Some(2)]);
+    }
+
+    #[test]
+    fn a_missing_newline_marker_does_not_split_a_change() {
+        let ids = change_ids(&rows(&file(
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n\
+             \\ No newline at end of file\n+b\n\\ No newline at end of file\n",
+        )));
+        assert_eq!(ids, [None, Some(0), None, Some(0), None]);
+    }
+
+    #[test]
+    fn only_added_and_removed_rows_make_a_file_changed() {
+        assert!(has_changes(&file(
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n x\n+y\n",
+        )));
+        for raw in [
+            "diff --git a/i b/i\nindex 1..2 100644\nBinary files a/i and b/i differ\n",
+            "diff --git a/s b/s\nold mode 100644\nnew mode 100755\n",
+            "diff --git a/o b/n\nsimilarity index 100%\nrename from o\nrename to n\n",
+        ] {
+            assert!(!has_changes(&file(raw)), "{raw}");
+        }
     }
 
     #[test]
