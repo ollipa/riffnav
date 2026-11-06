@@ -6,6 +6,7 @@
 mod highlight;
 mod layout;
 mod moves;
+mod tokens;
 mod words;
 
 use std::collections::HashMap;
@@ -38,10 +39,10 @@ pub fn unified(
 ) -> (Text<'static>, LineMap) {
     let rows = diff::rows(file);
     let syntax = highlight::highlight(file, &rows, theme);
-    let changes = words::changes(&rows, moves);
+    let changes = words::changes(&rows, &syntax.tokens, moves);
     let content = Content {
         rows: &rows,
-        syntax: &syntax,
+        syntax: &syntax.runs,
         changes: &changes,
         moves,
     };
@@ -58,10 +59,10 @@ pub fn side_by_side(
 ) -> (Text<'static>, LineMap) {
     let rows = diff::rows(file);
     let syntax = highlight::highlight(file, &rows, theme);
-    let changes = words::changes(&rows, moves);
+    let changes = words::changes(&rows, &syntax.tokens, moves);
     let content = Content {
         rows: &rows,
-        syntax: &syntax,
+        syntax: &syntax.runs,
         changes: &changes,
         moves,
     };

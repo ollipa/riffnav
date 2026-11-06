@@ -9,11 +9,13 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
-use two_face::re_exports::syntect::easy::HighlightLines;
-use two_face::re_exports::syntect::highlighting::{self, FontStyle};
-use two_face::re_exports::syntect::parsing::{SyntaxReference, SyntaxSet};
+use two_face::re_exports::syntect::highlighting::{
+    self, FontStyle, HighlightIterator, HighlightState, Highlighter,
+};
+use two_face::re_exports::syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 
+use super::tokens::{self, Tokens};
 use crate::diff::{FileDiff, Row, RowKind};
 use crate::theme::DiffTheme;
 
@@ -47,10 +49,58 @@ fn assets() -> &'static Assets {
     })
 }
 
-/// Highlighted runs for each of `rows`, index-aligned. Empty for a row with no
-/// syntax color: not code, too long, or a file too big or of no known language.
-pub fn highlight(file: &FileDiff, rows: &[Row], theme: DiffTheme) -> Vec<Vec<Run>> {
-    let mut out = vec![Vec::new(); rows.len()];
+/// What parsing a file's rows found, index-aligned with them.
+#[derive(Debug)]
+pub struct Syntax {
+    /// Colored runs. Empty for a row with no syntax color: not code, too long,
+    /// or a file too big or of no known language.
+    pub runs: Vec<Vec<Run>>,
+    /// What the parser found in each changed row.
+    pub tokens: Vec<Tokens>,
+}
+
+/// One side of the diff's parser state.
+struct Side<'a> {
+    parser: ParseState,
+    state: HighlightState,
+    highlighter: &'a Highlighter<'a>,
+}
+
+impl<'a> Side<'a> {
+    fn new(syntax: &SyntaxReference, highlighter: &'a Highlighter<'a>) -> Self {
+        Self {
+            parser: ParseState::new(syntax),
+            state: HighlightState::new(highlighter, ScopeStack::new()),
+            highlighter,
+        }
+    }
+
+    fn line(&mut self, set: &SyntaxSet, text: &str) -> Option<(Vec<Run>, Tokens)> {
+        // The newline-aware syntaxes need each line terminated to match correctly.
+        let line = format!("{text}\n");
+        let ops = self.parser.parse_line(&line, set).ok()?;
+        let tokens = tokens::parsed(text, &line, self.state.path.clone(), &ops);
+        let regions = HighlightIterator::new(&mut self.state, &ops, &line, self.highlighter);
+        let mut end = 0;
+        let runs = regions
+            .map(|(style, piece)| {
+                end = (end + piece.len()).min(text.len());
+                Run {
+                    end,
+                    style: to_style(style),
+                }
+            })
+            .collect();
+        Some((runs, tokens))
+    }
+}
+
+/// Parse `rows`, each side of the diff on its own.
+pub fn highlight(file: &FileDiff, rows: &[Row], theme: DiffTheme) -> Syntax {
+    let mut out = Syntax {
+        runs: vec![Vec::new(); rows.len()],
+        tokens: vec![Tokens::default(); rows.len()],
+    };
     if file.raw.len() > MAX_FILE_BYTES {
         return out;
     }
@@ -58,29 +108,37 @@ pub fn highlight(file: &FileDiff, rows: &[Row], theme: DiffTheme) -> Vec<Vec<Run
     let Some(syntax) = find_syntax(&assets.syntaxes, file.path(), rows) else {
         return out;
     };
-    let theme = assets.themes.get(syntax_theme(theme));
+    let set = &assets.syntaxes;
+    let highlighter = Highlighter::new(assets.themes.get(syntax_theme(theme)));
 
-    let mut old = HighlightLines::new(syntax, theme);
-    let mut new = HighlightLines::new(syntax, theme);
-    for (row, runs) in rows.iter().zip(&mut out) {
+    let mut old = Side::new(syntax, &highlighter);
+    let mut new = Side::new(syntax, &highlighter);
+    for (at, row) in rows.iter().enumerate() {
         if row.text.len() > MAX_LINE_BYTES {
             continue;
         }
-        match row.kind {
+        let parsed = match row.kind {
             RowKind::HunkHeader { .. } => {
-                old = HighlightLines::new(syntax, theme);
-                new = HighlightLines::new(syntax, theme);
+                old = Side::new(syntax, &highlighter);
+                new = Side::new(syntax, &highlighter);
+                None
             }
-            RowKind::Removed => *runs = line_runs(&mut old, &assets.syntaxes, &row.text),
-            RowKind::Added => *runs = line_runs(&mut new, &assets.syntaxes, &row.text),
+            RowKind::Removed => old.line(set, &row.text),
+            RowKind::Added => new.line(set, &row.text),
             // Context is on both sides, so both parsers have to see it. The two
             // agree unless the change above altered how it parses, and then the
             // post-image is the one that's true of the code now.
             RowKind::Context => {
-                line_runs(&mut old, &assets.syntaxes, &row.text);
-                *runs = line_runs(&mut new, &assets.syntaxes, &row.text);
+                old.line(set, &row.text);
+                new.line(set, &row.text)
             }
-            RowKind::NoNewline => {}
+            RowKind::NoNewline => None,
+        };
+        if let Some((runs, tokens)) = parsed {
+            out.runs[at] = runs;
+            if matches!(row.kind, RowKind::Removed | RowKind::Added) {
+                out.tokens[at] = tokens;
+            }
         }
     }
     out
@@ -108,25 +166,6 @@ fn find_syntax<'a>(set: &'a SyntaxSet, path: &str, rows: &[Row]) -> Option<&'a S
             set.find_syntax_by_first_line(&first.text)
         })
         .filter(|syntax| syntax.name != "Plain Text")
-}
-
-fn line_runs(parser: &mut HighlightLines<'_>, set: &SyntaxSet, text: &str) -> Vec<Run> {
-    // The newline-aware syntaxes need each line terminated to match correctly.
-    let line = format!("{text}\n");
-    let Ok(regions) = parser.highlight_line(&line, set) else {
-        return Vec::new();
-    };
-    let mut end = 0;
-    regions
-        .into_iter()
-        .map(|(style, piece)| {
-            end = (end + piece.len()).min(text.len());
-            Run {
-                end,
-                style: to_style(style),
-            }
-        })
-        .collect()
 }
 
 fn to_style(style: highlighting::Style) -> Style {
@@ -158,7 +197,7 @@ mod tests {
     fn highlighted(path: &str, hunk: &str) -> (Vec<Row>, Vec<Vec<Run>>) {
         let file = file(path, hunk);
         let rows = rows(&file);
-        let runs = highlight(&file, &rows, DiffTheme::GitHubDark);
+        let runs = highlight(&file, &rows, DiffTheme::GitHubDark).runs;
         (rows, runs)
     }
 

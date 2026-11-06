@@ -291,8 +291,9 @@ or help.
 
 A unified diff — from `git diff`/`git show` run by riffnav, or piped in on stdin
 — is split per file (`diff --git`) into a tree. On selection the file's hunks
-become rows, highlighted with [syntect][syntect] and marked word by word where a
-line was edited. Removed and added lines are matched across the whole diff to find
+become rows, highlighted with [syntect][syntect] and marked token by token where a
+line was edited, so `==` becoming `!=` or `sum(a)` becoming `total(b)` reads as one
+change. Removed and added lines are matched across the whole diff to find
 blocks that moved, then everything is drawn with [ratatui][ratatui] and cached per
 file/width/layout/theme. Because stdin may itself be the diff, key input is read
 from `/dev/tty`.
