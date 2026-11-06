@@ -10,6 +10,7 @@ mod herdr;
 mod icons;
 mod render;
 mod review;
+mod search;
 mod session;
 mod state;
 mod theme;

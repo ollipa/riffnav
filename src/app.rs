@@ -1,3 +1,5 @@
+mod search;
+
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::process::{Command, Stdio};
@@ -164,6 +166,10 @@ pub enum Focus {
     Diff,
 }
 
+/// What a render looks like, as far as the line cursor's index into it goes. When
+/// this changes, the index is stale.
+type CursorToken = (usize, u16, bool, DiffTheme, u64);
+
 /// State of the fuzzy file-finder overlay.
 pub struct Finder {
     pub query: String,
@@ -201,6 +207,8 @@ pub struct App {
     pub icon_style: IconStyle,
     pub diff_theme: DiffTheme,
     pub finder: Option<Finder>,
+    /// Text search across the diff: `/`, `n` and `N`.
+    find: search::Find,
     pub cache: RenderCache,
     /// Persistent "viewed" review state, keyed per repo+branch. Session-only
     /// (no persistence) until [`App::enable_review`] runs, or when not in a repo.
@@ -233,7 +241,7 @@ pub struct App {
     cursor_anchor: Option<Anchor>,
     /// Identity of the render `diff_cursor` indexes into. When it changes, the
     /// index is stale and gets re-resolved from `cursor_anchor`.
-    cursor_token: Option<(usize, u16, bool, DiffTheme, u64)>,
+    cursor_token: Option<CursorToken>,
     /// The screen row the cursor sat on before `+`/`-` reloaded the diff, to put
     /// it back there once the new render exists. Widening the context pushes the
     /// cursor's line down the render; without this it would slide off screen.
@@ -322,6 +330,7 @@ impl App {
             icon_style: cfg.icon_style,
             diff_theme: cfg.diff_theme,
             finder: None,
+            find: search::Find::default(),
             cache,
             review: ReviewStore::disabled(),
             file_hashes,
@@ -924,42 +933,7 @@ impl App {
     fn event_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
             let diff_width = self.diff_pane_width(terminal.size()?.width);
-
-            // On resize, drop renders made at the old width so the cache stays
-            // bounded and the current file re-renders to the new width.
-            if diff_width != self.last_width {
-                self.cache.clear();
-                self.last_width = diff_width;
-            }
-
-            if let Some(idx) = self.selected_file() {
-                let side_by_side = self.side_by_side_for(idx);
-                let diff_hash = self.file_hashes.get(idx).copied().unwrap_or(0);
-                let layer = Self::comment_layer(
-                    &self.files,
-                    &self.comments,
-                    &self.comment_author,
-                    diff_hash,
-                    self.comment_rev,
-                    self.comments_on,
-                    idx,
-                );
-                self.cache.ensure(
-                    idx,
-                    &self.files[idx],
-                    diff_width,
-                    side_by_side,
-                    self.diff_theme,
-                    &layer,
-                );
-            }
-            // The render may have changed shape (new comments, new theme, new
-            // width), so put the cursor back on the line it was on.
-            self.resync_cursor();
-            self.restore_cursor_screen_row();
-            // A `]`/`[` jump into this file has been waiting for that render.
-            self.land_on_comment();
-            self.land_on_move();
+            self.prepare_frame(diff_width);
 
             terminal.draw(|frame| crate::ui::draw(frame, self, diff_width))?;
             let last_draw = Instant::now();
@@ -989,6 +963,49 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Everything a frame needs before it's drawn: the selected file's render, and
+    /// the cursor and any jump in progress settled onto it.
+    fn prepare_frame(&mut self, diff_width: u16) {
+        // On resize, drop renders made at the old width so the cache stays
+        // bounded and the current file re-renders to the new width.
+        if diff_width != self.last_width {
+            self.cache.clear();
+            self.last_width = diff_width;
+        }
+
+        // Before the render, as it can select the file a match is in.
+        self.advance_search();
+        if let Some(idx) = self.selected_file() {
+            let side_by_side = self.side_by_side_for(idx);
+            let diff_hash = self.file_hashes.get(idx).copied().unwrap_or(0);
+            let layer = Self::comment_layer(
+                &self.files,
+                &self.comments,
+                &self.comment_author,
+                diff_hash,
+                self.comment_rev,
+                self.comments_on,
+                idx,
+            );
+            self.cache.ensure(
+                idx,
+                &self.files[idx],
+                diff_width,
+                side_by_side,
+                self.diff_theme,
+                &layer,
+            );
+        }
+        // The render may have changed shape (new comments, new theme, new
+        // width), so put the cursor back on the line it was on.
+        self.resync_cursor();
+        self.restore_cursor_screen_row();
+        // A `]`/`[` jump into this file has been waiting for that render.
+        self.land_on_comment();
+        self.land_on_move();
+        self.land_on_match();
     }
 
     /// Input wait. Normally blocks for the next event, but bounds the wait when something needs servicing without a keypress: a
@@ -1034,6 +1051,10 @@ impl App {
             (true, None) => Some(STARTS_POLL),
             (false, bound) => bound,
         };
+        let bound = match (self.search_wait(), bound) {
+            (Some(search), Some(bound)) => Some(bound.min(search)),
+            (search, bound) => search.or(bound),
+        };
         match (status, bound) {
             (Some(s), Some(b)) => Some(s.min(b)),
             (Some(s), None) => Some(s),
@@ -1047,6 +1068,7 @@ impl App {
         let prev_path = self
             .selected_file()
             .map(|i| self.files[i].path().to_string());
+        let resume = self.search_resume();
 
         self.files = files;
         self.file_hashes = self
@@ -1060,6 +1082,7 @@ impl App {
         self.cache.index_moves(&self.files);
         self.last_width = 0; // force a re-render at the next draw
         self.finder = None; // indices changed; a stale finder would mislead
+        self.restart_search(resume);
 
         let target = prev_path
             .as_deref()
@@ -1130,10 +1153,12 @@ impl App {
     /// the cursor would keep an index into a render that no longer exists, leaving
     /// it on a different line (or past the end) of the new diff.
     fn swap_file_diff(&mut self, i: usize, file: FileDiff) {
+        let resume = self.search_resume();
         self.file_hashes[i] = crate::review::file_hash(&file.raw);
         self.files[i] = file;
         self.cache.invalidate(i);
         self.cache.index_moves(&self.files);
+        self.restart_search(resume);
         self.last_width = 0; // force a re-render at the next draw
         self.cursor_token = None; // and let the cursor re-resolve from its anchor
         self.publish_session();
@@ -1217,7 +1242,11 @@ impl App {
 
     /// The render backing the current view, if it's already cached.
     fn current_render(&self) -> Option<&crate::render::Rendered> {
-        let idx = self.selected_file()?;
+        self.render_of(self.selected_file()?)
+    }
+
+    /// File `idx`'s render as it would be shown now, if it's already cached.
+    fn render_of(&self, idx: usize) -> Option<&crate::render::Rendered> {
         self.cache.get(
             idx,
             self.last_width,
@@ -1458,15 +1487,7 @@ impl App {
     /// event loop renders whatever is selected, so the row a comment occupies is
     /// only known on the next pass through it.
     fn jump_commented_file(&mut self, forward: bool) -> bool {
-        // Tree order with nothing folded, so a note inside a collapsed folder is
-        // still reachable; `reveal_file` opens the folder on the way in.
-        let order: Vec<usize> = tree::flatten(&self.nodes, &HashSet::new())
-            .iter()
-            .filter_map(|row| match row.kind {
-                RowKind::File { diff_index } => Some(diff_index),
-                RowKind::Dir { .. } => None,
-            })
-            .collect();
+        let order = self.tree_order();
         let n = order.len();
         if n == 0 {
             return false;
@@ -1487,6 +1508,18 @@ impl App {
         self.reveal_file(idx);
         self.comment_landing = Some(forward);
         true
+    }
+
+    /// Diff indices in tree order with nothing folded, so a file inside a collapsed
+    /// folder is still reachable; `reveal_file` opens the folder on the way in.
+    fn tree_order(&self) -> Vec<usize> {
+        tree::flatten(&self.nodes, &HashSet::new())
+            .iter()
+            .filter_map(|row| match row.kind {
+                RowKind::File { diff_index } => Some(diff_index),
+                RowKind::Dir { .. } => None,
+            })
+            .collect()
     }
 
     /// Finish a `]`/`[` jump that crossed into another file, once the event loop
@@ -1961,7 +1994,8 @@ impl App {
     /// Route a mouse event to the pane under the cursor. Overlays own the whole
     /// screen, so clicks and scrolls beneath them are ignored.
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.finder.is_some() || self.show_help || self.composer.is_some() {
+        let prompt = self.search_prompt().is_some();
+        if self.finder.is_some() || self.show_help || self.composer.is_some() || prompt {
             return;
         }
         let pos = Position::new(mouse.column, mouse.row);
@@ -2141,6 +2175,12 @@ impl App {
             return Ok(());
         }
 
+        // So does the search prompt.
+        if self.search_prompt().is_some() {
+            self.prompt_key(key);
+            return Ok(());
+        }
+
         // The help overlay swallows all input until dismissed.
         if self.show_help {
             if matches!(
@@ -2162,6 +2202,8 @@ impl App {
 
         self.clear_status();
         match key.code {
+            // A search is the first thing Esc backs out of.
+            KeyCode::Esc if self.searching() => self.clear_search(),
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if ctrl => self.quit = true,
             // In the diff pane j/k move the line cursor (scrolling the pane once
@@ -2177,6 +2219,8 @@ impl App {
                 (Focus::Diff, true) => self.move_cursor(-1),
                 (Focus::Diff, false) => self.scroll_diff(-1),
             },
+            KeyCode::Char('n') if self.searching() => self.step_match(true),
+            KeyCode::Char('N') if self.searching() => self.step_match(false),
             KeyCode::Char('n') => self.jump_file(true),
             KeyCode::Char('p') | KeyCode::Char('N') => self.jump_file(false),
             KeyCode::Char('d') if ctrl => self.scroll_diff(HALF_PAGE),
@@ -2220,7 +2264,8 @@ impl App {
                     self.focus = Focus::Diff;
                 }
             }
-            KeyCode::Char('t') | KeyCode::Char('/') => self.open_finder(),
+            KeyCode::Char('t') => self.open_finder(),
+            KeyCode::Char('/') => self.open_search(),
             KeyCode::Char('i') => {
                 self.icon_style = self.icon_style.next();
                 self.status = Some(format!("Icons: {}", self.icon_style.name()));

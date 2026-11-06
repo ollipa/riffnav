@@ -74,13 +74,14 @@ layout for one run with `-s` (side-by-side) or `-u` (unified).
 | Key | Action |
 |-----|--------|
 | `j` / `k` (or `↑` / `↓`) | Move selection (tree) / move the line cursor (diff), per focus |
-| `n` / `p` (or `N`) | Next / previous file |
+| `n` / `p` (or `N`) | Next / previous file; during a [search](#searching-the-diff), `n` / `N` step through matches and `p` stays previous file |
 | `Ctrl-d` / `Ctrl-u` | Scroll diff half a page |
 | `PgDn` / `PgUp` | Page down / up (scroll diff or move tree, per focus) |
 | `g` / `G` | Top / bottom of the diff |
 | `Enter` / `Space` | Expand / collapse the selected folder |
 | `Tab` | Switch focus between tree and diff |
-| `t` / `/` | Fuzzy-find a file |
+| `/` | [Search](#searching-the-diff) the text of the whole diff |
+| `t` | Fuzzy-find a file |
 | `s` | Toggle side-by-side / unified |
 | `e` | Toggle the file tree |
 | `i` | Cycle icon style (nerd → unicode → ascii) |
@@ -98,7 +99,26 @@ layout for one run with `-s` (side-by-side) or `-u` (unified).
 | `m` | Jump to the other end of a moved line, across files; press again to come back |
 | `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
 | `?` | Toggle the help overlay |
-| `q` / `Esc` / `Ctrl-c` | Quit |
+| `q` / `Esc` / `Ctrl-c` | Quit (`Esc` clears a search first) |
+
+## Searching the diff
+
+Press `/` to search the code of every file in the diff, not just the one on
+screen. Matches show as you type, the view follows the first one at or after
+the cursor, and the footer counts them (`3/17`). `Enter` keeps the search; `Esc`
+cancels it and puts the view back.
+
+While a search is in force, `n` and `N` step to the next and previous match, like
+in `less` and vim, and the line cursor goes with them, so `c` and `m` act on that
+line. Past the last match in a file they carry on into the next file with one,
+opening its folder if it's collapsed, and at the ends of the diff they wrap and
+say so. `Esc` clears the search, and `n` goes back to meaning next file.
+
+The query is plain text, not a regular expression. A query in lower case ignores
+case, and any capital makes it exact. It's matched within a line against the code
+on both sides of the diff, tabs as tabs. File names (`t` finds those), hunk
+headers, comments and the notes riffnav adds aren't searched. Side by side, an
+unchanged line appears in both panels but counts as one match.
 
 ## Configuration
 

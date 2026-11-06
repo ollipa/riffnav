@@ -30,67 +30,125 @@ pub struct Row {
     pub text: String,
 }
 
-/// Split a file's verbatim diff text into rows.
+/// One row of a file's diff, borrowing its text from the file's `raw`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowRef<'a> {
+    pub kind: RowKind,
+    pub old: Option<u32>,
+    pub new: Option<u32>,
+    pub text: &'a str,
+}
+
+/// A place in a file's verbatim diff text, stepping through it a row at a time.
 ///
 /// Hunk lengths from the `@@` header decide where a hunk ends, not the look of
 /// the lines: a removed line reading `-- foo` is `--- foo` in the diff, which a
-/// marker check would take for a file header. `str::lines` also drops the `\r`
-/// of a CRLF file, so it never reaches the screen.
-pub fn rows(file: &FileDiff) -> Vec<Row> {
-    let mut rows = Vec::new();
-    let (mut old, mut new) = (0, 0);
-    let (mut old_left, mut new_left) = (0, 0);
+/// marker check would take for a file header. A CRLF line's `\r` is dropped here,
+/// as `str::lines` would, so it never reaches the screen.
+///
+/// It holds no borrow, so a long pass over a big file can stop and pick up again
+/// later, which is what lets a search share the UI thread.
+#[derive(Debug, Clone, Default)]
+pub struct RowWalk {
+    at: usize,
+    old: u32,
+    new: u32,
+    old_left: u32,
+    new_left: u32,
+    /// Rows handed out so far: the index of the next one in [`rows`].
+    pub index: usize,
+}
 
-    for line in file.raw.lines() {
-        if line.starts_with('\\') && !rows.is_empty() {
-            rows.push(Row {
-                kind: RowKind::NoNewline,
-                old: None,
-                new: None,
-                text: line.trim_start_matches("\\ ").to_string(),
-            });
-            continue;
-        }
-        if old_left == 0 && new_left == 0 {
-            if let Some(hunk) = parse_hunk_header(line) {
-                (old, new) = (hunk.old_start, hunk.new_start);
-                (old_left, new_left) = (hunk.old_len, hunk.new_len);
-                rows.push(Row {
+impl RowWalk {
+    /// The row after the last one, read from the same `raw` as every other call.
+    pub fn next<'a>(&mut self, raw: &'a str) -> Option<RowRef<'a>> {
+        loop {
+            let line = self.next_line(raw)?;
+            if line.starts_with('\\') && self.index > 0 {
+                return Some(self.row(RowRef {
+                    kind: RowKind::NoNewline,
+                    old: None,
+                    new: None,
+                    text: line.trim_start_matches("\\ "),
+                }));
+            }
+            if self.old_left == 0 && self.new_left == 0 {
+                let Some(hunk) = parse_hunk_header(line) else {
+                    continue;
+                };
+                (self.old, self.new) = (hunk.old_start, hunk.new_start);
+                (self.old_left, self.new_left) = (hunk.old_len, hunk.new_len);
+                return Some(self.row(RowRef {
                     kind: RowKind::HunkHeader {
                         new_start: hunk.new_start,
                     },
                     old: None,
                     new: None,
-                    text: hunk.context().to_string(),
-                });
+                    // The context is the end of the line, so it can be borrowed.
+                    text: &line[line.len() - hunk.context().len()..],
+                }));
             }
-            continue;
+            // `diff.suppressBlankEmpty` writes an empty context line with no marker,
+            // so a line with no first byte is context rather than the end of the hunk.
+            let (kind, text) = match line.as_bytes().first() {
+                Some(b'+') => (RowKind::Added, &line[1..]),
+                Some(b'-') => (RowKind::Removed, &line[1..]),
+                Some(b' ') => (RowKind::Context, &line[1..]),
+                None => (RowKind::Context, ""),
+                Some(_) => continue,
+            };
+            let on_old = kind != RowKind::Added;
+            let on_new = kind != RowKind::Removed;
+            let row = RowRef {
+                kind,
+                old: on_old.then_some(self.old),
+                new: on_new.then_some(self.new),
+                text,
+            };
+            if on_old {
+                self.old += 1;
+                self.old_left = self.old_left.saturating_sub(1);
+            }
+            if on_new {
+                self.new += 1;
+                self.new_left = self.new_left.saturating_sub(1);
+            }
+            return Some(self.row(row));
         }
-        // `diff.suppressBlankEmpty` writes an empty context line with no marker,
-        // so a line with no first byte is context rather than the end of the hunk.
-        let (kind, text) = match line.as_bytes().first() {
-            Some(b'+') => (RowKind::Added, &line[1..]),
-            Some(b'-') => (RowKind::Removed, &line[1..]),
-            Some(b' ') => (RowKind::Context, &line[1..]),
-            None => (RowKind::Context, ""),
-            Some(_) => continue,
+    }
+
+    fn row<'a>(&mut self, row: RowRef<'a>) -> RowRef<'a> {
+        self.index += 1;
+        row
+    }
+
+    /// The next line of `raw`, ended the way `str::lines` ends one.
+    fn next_line<'a>(&mut self, raw: &'a str) -> Option<&'a str> {
+        let rest = &raw[self.at..];
+        if rest.is_empty() {
+            return None;
+        }
+        let Some(end) = rest.find('\n') else {
+            self.at = raw.len();
+            return Some(rest);
         };
-        let on_old = kind != RowKind::Added;
-        let on_new = kind != RowKind::Removed;
+        self.at += end + 1;
+        let line = &rest[..end];
+        Some(line.strip_suffix('\r').unwrap_or(line))
+    }
+}
+
+/// Split a file's verbatim diff text into rows.
+pub fn rows(file: &FileDiff) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let mut walk = RowWalk::default();
+    while let Some(row) = walk.next(&file.raw) {
         rows.push(Row {
-            kind,
-            old: on_old.then_some(old),
-            new: on_new.then_some(new),
-            text: text.to_string(),
+            kind: row.kind,
+            old: row.old,
+            new: row.new,
+            text: row.text.to_string(),
         });
-        if on_old {
-            old += 1;
-            old_left = old_left.saturating_sub(1);
-        }
-        if on_new {
-            new += 1;
-            new_left = new_left.saturating_sub(1);
-        }
     }
     rows
 }

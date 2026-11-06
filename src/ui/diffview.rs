@@ -28,12 +28,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
     // not the whole prefix up to the scroll offset — so deep scrolling stays
     // cheap. The returned paragraph owns its lines, so the cache borrow ends here
     // and we can write the clamped scroll back below.
+    let marks = app.search_marks(idx, area.width);
     let built = app
         .cache
         .get(idx, diff_width, side_by_side, app.diff_theme)
         .map(|r| {
             let scroll = app.diff_scroll.min(r.height.saturating_sub(area.height));
-            (r.visible(scroll, area.height), scroll)
+            (r.visible(scroll, area.height, marks.as_ref()), scroll)
         });
 
     let Some((paragraph, scroll)) = built else {
@@ -53,7 +54,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
 }
 
 /// Tint the row(s) the line cursor occupies. Only the background is replaced, so
-/// syntax colors and the +/- foreground survive underneath it.
+/// syntax colors and the +/- foreground survive underneath it. Search matches
+/// keep theirs: the cursor follows the current match, which has to show on it.
 fn highlight_cursor(
     frame: &mut Frame,
     area: Rect,
@@ -72,6 +74,7 @@ fn highlight_cursor(
     let top = render.row_of(app.diff_cursor);
     let bottom = render.row_of(app.diff_cursor + 1).max(top + 1);
     let bg = app.diff_theme.cursor_line_bg();
+    let matches = [app.diff_theme.match_bg(), app.diff_theme.current_match_bg()];
     let buf = frame.buffer_mut();
     for row in top..bottom {
         // Rows above the viewport (or below it) simply have no cells to paint.
@@ -79,7 +82,10 @@ fn highlight_cursor(
             continue;
         };
         for x in area.left()..area.right() {
-            buf[(x, area.y + y)].set_bg(bg);
+            let cell = &mut buf[(x, area.y + y)];
+            if !matches.contains(&cell.bg) {
+                cell.set_bg(bg);
+            }
         }
     }
 }

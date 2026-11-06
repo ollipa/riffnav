@@ -5,6 +5,7 @@
 
 mod highlight;
 mod layout;
+mod marks;
 mod moves;
 mod starts;
 mod tokens;
@@ -12,19 +13,22 @@ mod words;
 
 use std::collections::HashMap;
 
-use ratatui::text::Text;
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use twox_hash::XxHash3_128;
 
 use self::highlight::HunkStart;
 use self::layout::{Content, MOVE_MARK, WRAP_MARK};
+pub use self::marks::Marks;
 pub use self::moves::Target;
 use self::moves::{FileMoves, MoveIndex};
 use self::starts::StartReader;
+use crate::comment::anchor::Source;
 use crate::comment::render::CommentBlock;
 use crate::comment::store::{Anchor, Comment};
 use crate::comment::{LineMap, render as comment_render};
 use crate::diff::{self, FileDiff};
+use crate::search::Hit;
 use crate::theme::DiffTheme;
 
 /// Word-wrap setting shared by the height measurement and the per-frame render,
@@ -97,6 +101,34 @@ pub struct Rendered {
     /// Where each spliced comment thread landed, in row order — what `]` and `[`
     /// step through, and how the cursor names the comment it's sitting on.
     pub comment_rows: Vec<CommentBlock>,
+    /// Per row of [`diff::rows`], the line it starts on and the side it's on, or
+    /// `None` for a row with no code. The way back from a search match to the line
+    /// it's on, which is the other way round from `line_map`.
+    row_starts: Vec<Option<RowStart>>,
+}
+
+/// Where a row's code starts in a render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RowStart {
+    pub line: usize,
+    /// 0 for the left panel or a unified line, 1 for the right panel.
+    pub side: usize,
+}
+
+/// Index each row's first line. Runs after splicing, so the lines are final.
+fn row_starts(map: &LineMap) -> Vec<Option<RowStart>> {
+    let mut starts = Vec::new();
+    for (line, sources) in map.all_sources().iter().enumerate() {
+        for (side, source) in sources.iter().enumerate() {
+            let Some(source) = source else { continue };
+            let row = source.row as usize;
+            if row >= starts.len() {
+                starts.resize(row + 1, None);
+            }
+            starts[row].get_or_insert(RowStart { line, side });
+        }
+    }
+    starts
 }
 
 impl Rendered {
@@ -151,20 +183,79 @@ impl Rendered {
         }
     }
 
+    /// Where `row` of [`diff::rows`] starts in this render.
+    pub fn row_start(&self, row: u32) -> Option<RowStart> {
+        self.row_starts.get(row as usize).copied().flatten()
+    }
+
+    /// The screen row `hit` starts on: lower than [`Self::row_of`] its line when
+    /// the line wraps, as a long one will. `width` is the width of the render.
+    pub fn row_of_hit(&self, hit: Hit, width: u16) -> Option<u16> {
+        let first = self.row_start(hit.row)?.line;
+        match &self.row_offsets {
+            // Side-by-side wrapped the row itself, onto lines of its own. Comments
+            // can land between them, so a line that isn't this row's is stepped
+            // over rather than taken for the end.
+            None => (first..self.lines())
+                .find(|&line| {
+                    let shows = |s: &Source| s.row == hit.row && hit.start < s.end_char;
+                    self.line_map.sources(line).iter().flatten().any(shows)
+                })
+                .map(|line| self.row_of(line)),
+            // Unified leaves wrapping to ratatui, so ask how many rows the line
+            // takes up to the match. That can be a row short, if the rest of the
+            // word would have pushed it down, which the padding around a landing
+            // absorbs. Laying out the whole line to find the cell would be exact,
+            // but a minified line would need a screen thousands of rows tall.
+            Some(_) => {
+                let source = self.line_map.sources(first)[0]?;
+                let line = &self.text.lines[first];
+                let mut spans = line.spans[..source.first_span].to_vec();
+                let mut left = hit.start as usize + 1;
+                for span in &line.spans[source.first_span..] {
+                    let chars = span.content.chars().count();
+                    if chars >= left {
+                        let end = span.content.char_indices().nth(left).map(|(i, _)| i);
+                        let text = &span.content[..end.unwrap_or(span.content.len())];
+                        spans.push(Span::styled(text.to_string(), span.style));
+                        break;
+                    }
+                    spans.push(span.clone());
+                    left -= chars;
+                }
+                let rows = Paragraph::new(Line::from(spans))
+                    .wrap(WRAP)
+                    .line_count(width)
+                    .max(1);
+                let below = (rows - 1).min(u16::MAX as usize) as u16;
+                Some(self.row_of(first).saturating_add(below))
+            }
+        }
+    }
+
     /// A `Paragraph` showing just the rows visible at `scroll` for a viewport
     /// `height` rows tall, so per-frame work is `O(height)` rather than
     /// `O(scroll)`. The returned widget owns its (cloned) slice of lines, so it
-    /// outlives the borrow of `self`.
+    /// outlives the borrow of `self`, and `marks` are painted on those copies.
     ///
     /// `scroll` must already be clamped to `self.height`.
-    pub fn visible(&self, scroll: u16, height: u16) -> Paragraph<'static> {
+    pub fn visible(&self, scroll: u16, height: u16, marks: Option<&Marks>) -> Paragraph<'static> {
         let lines = &self.text.lines;
+        let shown = |from: usize, to: usize, reach: u32| -> Vec<Line<'static>> {
+            let mut shown = lines[from..to].to_vec();
+            if let Some(marks) = marks {
+                for (at, line) in shown.iter_mut().enumerate() {
+                    marks.paint(line, &self.line_map.sources(from + at), reach);
+                }
+            }
+            shown
+        };
         match &self.row_offsets {
             // Side-by-side: one source line per row, slice it directly.
             None => {
                 let start = (scroll as usize).min(lines.len());
                 let end = start.saturating_add(height as usize).min(lines.len());
-                Paragraph::new(Text::from(lines[start..end].to_vec()))
+                Paragraph::new(Text::from(shown(start, end, u32::MAX)))
             }
             // Unified: find the source line holding wrapped row `scroll`, take it
             // plus enough following lines to fill the viewport (each contributes
@@ -178,7 +269,9 @@ impl Rendered {
                 // `offsets[start] <= scroll` by construction, so this can't wrap.
                 let sub = (u32::from(scroll) - offsets[start]) as u16;
                 let end = start.saturating_add(height as usize + 1).min(lines.len());
-                Paragraph::new(Text::from(lines[start..end].to_vec()))
+                let rows = sub.saturating_add(height).saturating_add(1);
+                let reach = marks.map_or(0, |marks| marks.reach(rows));
+                Paragraph::new(Text::from(shown(start, end, reach)))
                     .wrap(WRAP)
                     .scroll((sub, 0))
             }
@@ -233,12 +326,14 @@ fn splice_and_measure(
         theme,
     );
     let (height, row_offsets) = measure(&text, width, side_by_side);
+    let row_starts = row_starts(&map);
     Rendered {
         text,
         height,
         row_offsets,
         line_map: map,
         comment_rows,
+        row_starts,
     }
 }
 
@@ -318,6 +413,11 @@ pub struct RenderCache {
 }
 
 impl RenderCache {
+    /// Columns between tab stops, which is what search counts tabs in.
+    pub fn tab_width(&self) -> usize {
+        usize::from(self.tab_width)
+    }
+
     pub fn new(tab_width: u8, detect_moves: bool) -> Self {
         Self {
             entries: HashMap::new(),
@@ -556,7 +656,6 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::text::Line;
 
     use crate::diff::parse;
     use crate::theme::DiffTheme::GitHubDark;
@@ -734,6 +833,7 @@ mod tests {
             row_offsets,
             line_map: LineMap::default(),
             comment_rows: Vec::new(),
+            row_starts: Vec::new(),
         };
         let draw = |paragraph: Paragraph| -> Buffer {
             let mut term = Terminal::new(TestBackend::new(width, view_h)).unwrap();
@@ -742,7 +842,7 @@ mod tests {
         };
 
         for scroll in 0..=height {
-            let got = draw(rendered.visible(scroll, view_h));
+            let got = draw(rendered.visible(scroll, view_h, None));
             let want = draw(Paragraph::new(text.clone()).wrap(WRAP).scroll((scroll, 0)));
             assert_eq!(
                 got, want,

@@ -13,6 +13,21 @@ use super::store::{Anchor, Side};
 #[derive(Debug, Clone, Default)]
 pub struct LineMap {
     rows: Vec<LineNumbers>,
+    /// Per rendered line, the code on each side of it: unified uses the first.
+    sources: Vec<[Option<Source>; 2]>,
+}
+
+/// Where a rendered line's code came from, for painting search matches onto it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Source {
+    /// The row of [`crate::diff::rows`] behind the code.
+    pub row: u32,
+    /// The line's first span of that code.
+    pub first_span: usize,
+    /// Which of the row's characters this line shows, tabs expanded: not all of
+    /// them when the row was wrapped.
+    pub first_char: u32,
+    pub end_char: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -47,7 +62,16 @@ impl LineNumbers {
 impl LineMap {
     /// A map for a render that already knows each row's numbers.
     pub fn from_numbers(rows: Vec<LineNumbers>) -> Self {
-        Self { rows }
+        let sources = vec![[None; 2]; rows.len()];
+        Self { rows, sources }
+    }
+
+    /// Say where the code of the listed lines came from.
+    pub fn with_sources(mut self, sources: Vec<(usize, [Option<Source>; 2])>) -> Self {
+        for (line, source) in sources {
+            self.sources[line] = source;
+        }
+        self
     }
 
     /// Read the numbers out of rows written `"    1⋮    2│code"`, for tests that
@@ -65,13 +89,21 @@ impl LineMap {
                 new: new.trim().parse().ok(),
             }
         });
-        Self {
-            rows: rows.collect(),
-        }
+        Self::from_numbers(rows.collect())
     }
 
     pub fn get(&self, row: usize) -> LineNumbers {
         self.rows.get(row).copied().unwrap_or_default()
+    }
+
+    /// What the code on `line` came from.
+    pub fn sources(&self, line: usize) -> [Option<Source>; 2] {
+        self.sources.get(line).copied().unwrap_or_default()
+    }
+
+    /// Every line's sources, in order.
+    pub fn all_sources(&self) -> &[[Option<Source>; 2]] {
+        &self.sources
     }
 
     /// Rows in the map. Splicing must keep this equal to the text's line count —
@@ -106,6 +138,8 @@ impl LineMap {
         let at = at.min(self.rows.len());
         self.rows
             .splice(at..at, std::iter::repeat_n(LineNumbers::none(), count));
+        self.sources
+            .splice(at..at, std::iter::repeat_n([None; 2], count));
     }
 }
 

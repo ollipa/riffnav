@@ -111,6 +111,34 @@ impl DiffTheme {
         }
     }
 
+    /// Background of a search match. Like the cursor it replaces only the
+    /// background, so the code keeps its syntax colors: this has to read behind
+    /// them, and stand out from the tints of a changed line.
+    pub fn match_bg(self) -> Color {
+        match self {
+            DiffTheme::GitHubDark => rgb(0x3f3400),
+            DiffTheme::GitHubLight => rgb(0xfff2a8),
+        }
+    }
+
+    /// Background of the match `n` last landed on. Unlike the others this one has
+    /// its own foreground too, as vim's `IncSearch` does: it's the word the reader
+    /// just jumped to, and no one background reads behind every syntax color.
+    pub fn current_match_bg(self) -> Color {
+        match self {
+            DiffTheme::GitHubDark => rgb(0xffc640),
+            DiffTheme::GitHubLight => rgb(0x8f4a00),
+        }
+    }
+
+    /// Text of the match `n` last landed on.
+    pub fn current_match_fg(self) -> Color {
+        match self {
+            DiffTheme::GitHubDark => rgb(0x1a1200),
+            DiffTheme::GitHubLight => rgb(0xffffff),
+        }
+    }
+
     /// The colors this theme paints diffs with.
     pub fn palette(self) -> DiffPalette {
         match self {

@@ -10,7 +10,7 @@ use super::highlight::Run;
 use super::moves::FileMoves;
 use super::words::{Changes, change_runs};
 use crate::comment::LineMap;
-use crate::comment::anchor::LineNumbers;
+use crate::comment::anchor::{LineNumbers, Source};
 use crate::diff::{self, FileDiff, FileStatus, Row, RowKind};
 use crate::theme::{DiffPalette, DiffTheme};
 
@@ -27,6 +27,9 @@ const RIGHT_DELIM: char = '│';
 pub const WRAP_MARK: char = '↵';
 /// Starts the row saying where a moved block went.
 pub const MOVE_MARK: char = '⇄';
+
+/// The lines holding code, and what each one's sides came from.
+type Sources = Vec<(usize, [Option<Source>; 2])>;
 
 /// What the render passes worked out about a file, index-aligned with `rows`.
 pub struct Content<'a> {
@@ -49,6 +52,7 @@ pub fn unified(
 
     let mut lines = file_header(file, width, &palette);
     let mut numbers = vec![LineNumbers::none(); lines.len()];
+    let mut sources = Sources::new();
     for (i, row) in content.rows.iter().enumerate() {
         let mark = content.moves.at(i);
         let line = match row.kind {
@@ -64,6 +68,13 @@ pub fn unified(
                     lines.push(move_hint(hint, width, &palette));
                     numbers.push(LineNumbers::none());
                 }
+                let source = Source {
+                    row: i as u32,
+                    first_span: 1, // After the gutter.
+                    first_char: 0,
+                    end_char: u32::MAX,
+                };
+                sources.push((lines.len(), [Some(source), None]));
                 let (syntax, emphasis) = (&content.syntax[i], &content.changes.emphasis[i]);
                 code_line(row, syntax, emphasis, mark.is_some(), width, tab, &palette)
             }
@@ -74,16 +85,26 @@ pub fn unified(
             new: row.new,
         });
     }
-    (Text::from(lines), LineMap::from_numbers(numbers))
+    let map = LineMap::from_numbers(numbers).with_sources(sources);
+    (Text::from(lines), map)
 }
 
 /// One side of a side-by-side row.
 struct Cell {
+    /// The index of the row this shows.
+    row: usize,
     number: Option<u32>,
     kind: RowKind,
     moved: bool,
     /// The text, already wrapped to the panel.
-    rows: Vec<Vec<Span<'static>>>,
+    rows: Vec<Wrapped>,
+}
+
+/// A row of wrapped text.
+struct Wrapped {
+    spans: Vec<Span<'static>>,
+    /// The characters of the unwrapped text this holds.
+    chars: Range<u32>,
 }
 
 /// Geometry and styling shared by every side-by-side row.
@@ -116,6 +137,7 @@ pub fn side_by_side(
 
     let mut lines = file_header(file, width, &palette);
     let mut numbers = vec![LineNumbers::none(); lines.len()];
+    let mut sources = Sources::new();
     let mut runs = change_runs(rows).into_iter().peekable();
     let mut i = 0;
     while i < rows.len() {
@@ -125,7 +147,7 @@ pub fn side_by_side(
         {
             let last = removed.iter().chain(&added).max().copied().unwrap_or(i);
             for (old, new) in aligned(&removed, &added, &content.changes.partner) {
-                panels.emit(old, new, &mut lines, &mut numbers);
+                panels.emit(old, new, &mut lines, &mut numbers, &mut sources);
             }
             i = last + 1;
             // The marker after the run's last row was emitted with that row.
@@ -138,7 +160,9 @@ pub fn side_by_side(
                 numbers.resize(numbers.len() + header.len(), LineNumbers::none());
                 lines.extend(header);
             }
-            RowKind::Context => panels.emit(Some(i), Some(i), &mut lines, &mut numbers),
+            RowKind::Context => {
+                panels.emit(Some(i), Some(i), &mut lines, &mut numbers, &mut sources);
+            }
             // Only reached for a marker with no code row in front of it to carry
             // it, which git doesn't write.
             _ => {}
@@ -149,7 +173,8 @@ pub fn side_by_side(
             i += 1;
         }
     }
-    (Text::from(lines), LineMap::from_numbers(numbers))
+    let map = LineMap::from_numbers(numbers).with_sources(sources);
+    (Text::from(lines), map)
 }
 
 /// The rows of one change, laid out opposite each other. A removed row and its
@@ -192,6 +217,7 @@ impl Panels<'_> {
         new: Option<usize>,
         lines: &mut Vec<Line<'static>>,
         numbers: &mut Vec<LineNumbers>,
+        sources: &mut Sources,
     ) {
         let rows = self.content.rows;
         let hint = |at: Option<usize>| {
@@ -209,7 +235,23 @@ impl Panels<'_> {
             .unwrap_or(1);
         for at in 0..height {
             let mut spans = self.side(left.as_ref(), at, self.left, LEFT_DELIM);
+            let right_gutter = spans.len();
             spans.extend(self.side(right.as_ref(), at, self.right, RIGHT_DELIM));
+            let source = |cell: Option<&Cell>, gutter: usize| {
+                let cell = cell?;
+                let shown = cell.rows.get(at)?;
+                Some(Source {
+                    row: cell.row as u32,
+                    first_span: gutter + 1,
+                    first_char: shown.chars.start,
+                    end_char: shown.chars.end,
+                })
+            };
+            let line = [
+                source(left.as_ref(), 0),
+                source(right.as_ref(), right_gutter),
+            ];
+            sources.push((lines.len(), line));
             lines.push(Line::from(spans));
             numbers.push(if at == 0 {
                 LineNumbers {
@@ -255,6 +297,7 @@ impl Panels<'_> {
             self.palette,
         );
         Cell {
+            row,
             number,
             kind: self.content.rows[row].kind,
             moved,
@@ -275,8 +318,9 @@ impl Panels<'_> {
         let number = cell.and_then(|c| c.number).filter(|_| at == 0);
         let mut spans = vec![panel_gutter(number, kind, delim, self.palette)];
         let text = cell.and_then(|c| c.rows.get(at));
-        let used: usize = text.map_or(0, |t| t.iter().map(|s| display_width(&s.content)).sum());
-        spans.extend(text.into_iter().flatten().cloned());
+        let shown = text.map_or(&[][..], |t| &t.spans);
+        let used: usize = shown.iter().map(|s| display_width(&s.content)).sum();
+        spans.extend(shown.iter().cloned());
         let fill = panel.saturating_sub(PANEL_GUTTER + used);
         // An empty panel keeps the terminal's background: tinting it would read
         // as a change on a side where nothing happened.
@@ -323,10 +367,14 @@ fn number_color(kind: RowKind, palette: &DiffPalette) -> Color {
 /// the last with a [`WRAP_MARK`]. Breaks fall between characters: code has no
 /// word boundaries worth keeping, and a wide character that won't fit moves down
 /// whole rather than being split.
-fn wrap(spans: Vec<Span<'static>>, cols: usize, palette: &DiffPalette) -> Vec<Vec<Span<'static>>> {
+fn wrap(spans: Vec<Span<'static>>, cols: usize, palette: &DiffPalette) -> Vec<Wrapped> {
     let total: usize = spans.iter().map(|s| display_width(&s.content)).sum();
     if total <= cols {
-        return vec![spans];
+        let chars = spans.iter().map(|s| s.content.chars().count() as u32).sum();
+        return vec![Wrapped {
+            spans,
+            chars: 0..chars,
+        }];
     }
     // One column stays free for the mark; at least one holds text, so a pane too
     // narrow to be useful still makes progress instead of looping.
@@ -336,6 +384,7 @@ fn wrap(spans: Vec<Span<'static>>, cols: usize, palette: &DiffPalette) -> Vec<Ve
     let mut rows = Vec::new();
     let mut row: Vec<Span<'static>> = Vec::new();
     let mut used = 0;
+    let (mut row_start, mut chars) = (0, 0);
     for span in spans {
         let mut piece = String::new();
         for c in span.content.chars() {
@@ -350,17 +399,25 @@ fn wrap(spans: Vec<Span<'static>>, cols: usize, palette: &DiffPalette) -> Vec<Ve
                     row.push(Span::styled(" ".repeat(room - used), span.style));
                 }
                 row.push(mark.clone());
-                rows.push(std::mem::take(&mut row));
+                rows.push(Wrapped {
+                    spans: std::mem::take(&mut row),
+                    chars: row_start..chars,
+                });
+                row_start = chars;
                 used = 0;
             }
             piece.push(c);
             used += width;
+            chars += 1;
         }
         if !piece.is_empty() {
             row.push(Span::styled(piece, span.style));
         }
     }
-    rows.push(row);
+    rows.push(Wrapped {
+        spans: row,
+        chars: row_start..chars,
+    });
     rows
 }
 

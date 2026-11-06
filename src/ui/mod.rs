@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Focus};
 
@@ -20,7 +21,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
 
     // The header and footer collapse to zero rows when disabled in config.
     let header_h = if app.show_header { 1 } else { 0 };
-    let footer_h = if app.show_footer { 1 } else { 0 };
+    // A search needs somewhere to say what it's doing, config or no config.
+    let searching = app.search_prompt().is_some() || app.search_query().is_some();
+    let footer_h = if app.show_footer || searching { 1 } else { 0 };
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(header_h),
         Constraint::Min(0),
@@ -52,7 +55,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
     }
     render_diff_title(frame, diff_title, app, diff_focused);
     diffview::render(frame, diff_body, app, diff_width);
-    if app.show_footer {
+    if let Some(query) = app.search_prompt() {
+        render_search_prompt(frame, footer, query, app.search_count());
+    } else if app.show_footer || searching {
         render_footer(frame, footer, app);
     }
     // Drawn inside the diff pane rather than as a screen overlay: the note is
@@ -143,7 +148,56 @@ fn render_diff_title(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
     frame.render_widget(Paragraph::new(Line::from(title)).style(style), area);
 }
 
+/// The prompt: the query on the left, as much of its end as will fit, and how
+/// it's getting on at the right. The terminal's own cursor marks where typing goes.
+fn render_search_prompt(frame: &mut Frame, area: Rect, query: &str, count: Option<String>) {
+    let count = count.map_or_else(String::new, |count| format!("  {count} "));
+    let count_width = count.width() as u16;
+    let [left, right] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(count_width)]).areas(area);
+
+    // Room for the leading ` /` and for the cursor after the query.
+    let room = usize::from(left.width).saturating_sub(3);
+    let mut shown = query;
+    while shown.width() > room {
+        let mut chars = shown.chars();
+        chars.next();
+        shown = chars.as_str();
+    }
+    frame.render_widget(Paragraph::new(format!(" /{shown}")), left);
+    frame.render_widget(
+        Paragraph::new(count).style(Style::new().add_modifier(Modifier::DIM)),
+        right,
+    );
+    if left.width > 0 && left.height > 0 {
+        let x = left.x + 2 + shown.width() as u16;
+        frame.set_cursor_position((x.min(left.right().saturating_sub(1)), left.y));
+    }
+}
+
+/// What the footer says about a search in force, ahead of its usual text.
+fn search_summary(app: &App) -> Option<String> {
+    let query = app.search_query()?;
+    let count = app.search_count().unwrap_or_default();
+    Some(format!(" /{query}  {count} "))
+}
+
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
+    if let Some(summary) = search_summary(app) {
+        let (text, style) = match &app.status {
+            Some(status) => (format!("· {status} "), Style::new().fg(Color::Yellow)),
+            None => (
+                "· n/N: next/previous match · Esc: clear search ".to_string(),
+                Style::new().add_modifier(Modifier::DIM),
+            ),
+        };
+        let line = Line::from(vec![
+            Span::styled(summary, Style::new().fg(Color::Yellow)),
+            Span::styled(text, style),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
     let (text, style) = match &app.status {
         Some(status) => (format!(" {status} "), Style::new().fg(Color::Yellow)),
         None => {
@@ -166,7 +220,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             };
             (
                 format!(
-                    " j/k · n/p file · v: viewed · {note}{refresh}{src}t: find · T: theme · {web}{zoom}Tab focus · ?: help · q: quit "
+                    " j/k · n/p file · v: viewed · {note}{refresh}{src}/: search · t: find · T: theme · {web}{zoom}Tab focus · ?: help · q: quit "
                 ),
                 Style::new().add_modifier(Modifier::DIM),
             )
@@ -187,13 +241,15 @@ fn render_help(
     let mut entries = vec![
         ("j / k", "move selection / scroll diff (per focus)"),
         ("n / p", "next / previous file"),
+        ("/", "search the text of the whole diff"),
+        ("n / N", "next / previous search match"),
         ("Ctrl-d / Ctrl-u", "scroll diff half page"),
         ("Space / b", "page diff down / up"),
         ("PgDn / PgUp", "page down / up (focused pane)"),
         ("g / G", "top / bottom of diff"),
         ("Enter", "expand / collapse folder"),
         ("Tab / ← / →", "switch focus tree <-> diff"),
-        ("t / /", "fuzzy find a file"),
+        ("t", "fuzzy find a file"),
         ("s", "toggle side-by-side / unified"),
         ("e", "toggle file tree"),
         ("i", "cycle icon style (nerd/unicode/ascii)"),
@@ -226,7 +282,7 @@ fn render_help(
         entries.push(("z", "toggle herdr zoom"));
     }
     entries.push(("?", "toggle this help"));
-    entries.push(("q / Esc", "quit"));
+    entries.push(("q / Esc", "quit (Esc clears a search first)"));
     let lines: Vec<Line> = entries
         .iter()
         .map(|(key, desc)| {
