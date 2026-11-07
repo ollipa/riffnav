@@ -9,7 +9,7 @@ readme = "README.md"
 repository = "https://github.com/ollipa/riffnav"
 keywords = ["git", "diff", "review", "tui", "pager"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["/.local", "/.github", "/demo.tape", "/demo.gif"]
+include = ["/src", "/LICENSE", "/README.md", "/config.example.toml"]
 
 [dependencies]
 anyhow = "1.0.102"
