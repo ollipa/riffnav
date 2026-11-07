@@ -186,11 +186,24 @@ fn block(
             format!("  #{}", c.id),
             Style::new().fg(palette.meta).add_modifier(Modifier::DIM),
         ));
-        if c.is_stale(diff_hash) {
-            header.push(Span::styled(
-                "  (code changed since)",
-                Style::new().fg(palette.stale),
-            ));
+        // A reply sits where its thread does, so only a thread's first note
+        // speaks for the code under it.
+        let starts_thread = c
+            .reply_to
+            .as_ref()
+            .is_none_or(|p| !comments.iter().any(|o| &o.id == p));
+        let flag = if !starts_thread {
+            None
+        } else if c.outdated {
+            // The line itself was rewritten or deleted; this is where it went.
+            Some("  (outdated)")
+        } else if c.is_stale(diff_hash) {
+            Some("  (code changed since)")
+        } else {
+            None
+        };
+        if let Some(flag) = flag {
+            header.push(Span::styled(flag, Style::new().fg(palette.stale)));
         }
         if i == 0 && orphaned {
             header.push(Span::styled(
@@ -767,6 +780,38 @@ mod tests {
             },
         );
         assert!(text_of(&text.lines)[1].contains("code changed since"));
+    }
+
+    /// A note whose line was rewritten says so, and its replies don't repeat it.
+    #[test]
+    fn an_outdated_thread_is_marked_once() {
+        let (mut text, mut map) = render(DIFF);
+        let mut store = CommentStore::disabled();
+        let root = store.add(Comment {
+            outdated: true,
+            diff_hash: Some(format!("{:032x}", 7u128)),
+            ..note("f", 1, "old note")
+        });
+        let mut reply = note("f", 1, "reply");
+        reply.created = 5;
+        reply.reply_to = Some(root);
+        reply.outdated = true;
+        store.add(reply);
+        splice(
+            &mut text,
+            &mut map,
+            &store.threads("f"),
+            &Card {
+                file: "f",
+                me: "me",
+                width: 60,
+                diff_hash: 9,
+                theme: DiffTheme::GitHubDark,
+            },
+        );
+        let out = text_of(&text.lines).join("\n");
+        assert_eq!(out.matches("(outdated)").count(), 1, "{out}");
+        assert!(!out.contains("code changed since"), "{out}");
     }
 
     /// A file's name can hold control characters, which must not reach the

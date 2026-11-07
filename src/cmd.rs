@@ -14,6 +14,8 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::cli::{AddArgs, Command, CommentCmd};
+use crate::comment::content::BlobReader;
+use crate::comment::reanchor::Current;
 use crate::comment::{Comment, CommentStore, Side};
 use crate::diff::path::shown;
 use crate::session::Session;
@@ -80,20 +82,31 @@ struct Resolved {
     line: u32,
     /// `None` only when inherited from a parent that has none (hand-edited).
     diff_hash: Option<String>,
+    /// What a reply inherits so it moves with its thread (see
+    /// [`crate::comment::reanchor`]). A new thread is stamped when it's built.
+    snapshot: Option<String>,
+    code: Option<String>,
+    outdated: bool,
 }
 
 fn add(args: AddArgs) -> Result<()> {
     let body = read_body(&args.body)?;
     // A reply validates against nothing, so it doesn't need a diff — and by the
-    // time one is written there may not be one left to need.
+    // time one is written there may not be one left to need. When there is one,
+    // the thread is moved with its code first, so the reply lands where it is.
     let session = match args.reply_to {
-        Some(_) => None,
+        Some(_) => require_session().ok(),
         None => Some(require_session()?),
     };
     let mut store = CommentStore::load(CLI_RETENTION_DAYS);
+    let mut reader = BlobReader::here();
+    let current = following(session.as_ref(), &store, &mut reader);
     // Validated inside the update, against the store as it is when written: a
     // parent deleted since the load is caught rather than replied to.
     let (id, resolved) = write(&mut store, |store| {
+        if let Some(current) = &current {
+            current.apply(store);
+        }
         let resolved = anchor(
             session.as_ref(),
             store,
@@ -103,11 +116,48 @@ fn add(args: AddArgs) -> Result<()> {
             args.reply_to.as_deref(),
             "comment add",
         )?;
-        let id = store.add(build(&resolved, body, args.author, args.reply_to));
+        let comment = build(&resolved, body, args.author, args.reply_to);
+        let id = store.add(stamped(current.as_ref(), store, comment));
         Ok((id, resolved))
     })?;
     say!("#{id}  {}:{}", shown(&resolved.file), resolved.line)?;
     Ok(())
+}
+
+/// The current text of the files in `session`, to move comments in `store` with
+/// their code and stamp new ones (see [`crate::comment::reanchor`]). `None`
+/// without a session.
+fn following<'r>(
+    session: Option<&Session>,
+    store: &CommentStore,
+    reader: &'r mut BlobReader,
+) -> Option<Current<'r>> {
+    let current = Current::new(session?.files.iter().map(|f| f.blobs()), reader);
+    current.prefetch(store);
+    Some(current)
+}
+
+/// Move the comments in `store` whose code moved, writing only if one did, so
+/// what's printed is where they hang now, as the window shows them.
+fn follow(store: &mut CommentStore, session: Option<&Session>) -> Result<()> {
+    let mut reader = BlobReader::here();
+    if let Some(current) = following(session, store, &mut reader)
+        && current.needs(store)
+    {
+        write(store, |store| Ok(current.apply(store)))?;
+    }
+    Ok(())
+}
+
+/// `c` with what lets a new thread follow its code. A reply already carries its
+/// parent's.
+fn stamped(current: Option<&Current>, store: &CommentStore, mut c: Comment) -> Comment {
+    if c.reply_to.is_none()
+        && let Some(current) = current
+    {
+        current.stamp(store, &mut c);
+    }
+    c
 }
 
 /// [`CommentStore::update`] for a change that can be refused: `f`'s error is
@@ -143,14 +193,20 @@ fn apply(stdin: bool) -> Result<()> {
     }
 
     // Only an item that anchors itself needs the diff; a batch of pure replies
-    // applies whether or not one is still there.
+    // applies whether or not one is still there, though threads only follow
+    // their code when it is.
     let session = match batch.comments.iter().any(|i| i.reply_to.is_none()) {
         true => Some(require_session()?),
-        false => None,
+        false => require_session().ok(),
     };
     let mut store = CommentStore::load(CLI_RETENTION_DAYS);
+    let mut reader = BlobReader::here();
+    let current = following(session.as_ref(), &store, &mut reader);
 
     let added = write(&mut store, |store| {
+        if let Some(current) = &current {
+            current.apply(store);
+        }
         // Resolve everything first: a batch that half-applies would leave the
         // review in a state the agent didn't ask for and can't easily reason
         // about.
@@ -175,7 +231,8 @@ fn apply(stdin: bool) -> Result<()> {
             .into_iter()
             .zip(batch.comments)
             .map(|(r, item)| {
-                let id = store.add(build(&r, item.body, item.author, item.reply_to));
+                let comment = build(&r, item.body, item.author, item.reply_to);
+                let id = store.add(stamped(current.as_ref(), store, comment));
                 (id, r)
             })
             .collect::<Vec<_>>())
@@ -187,7 +244,8 @@ fn apply(stdin: bool) -> Result<()> {
 }
 
 fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> {
-    let store = CommentStore::load(CLI_RETENTION_DAYS);
+    let mut store = CommentStore::load(CLI_RETENTION_DAYS);
+    follow(&mut store, require_session().ok().as_ref())?;
     let selected: Vec<&Comment> = store
         .all()
         .iter()
@@ -217,8 +275,9 @@ fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> 
                 reply.push_str(&format!(" (stored at {}:{})", shown(&c.file), c.line));
             }
         }
+        let outdated = if root.outdated { " (outdated)" } else { "" };
         say!(
-            "#{}  {}:{} ({}){reply}  — {}",
+            "#{}  {}:{} ({}){outdated}{reply}  — {}",
             c.id,
             shown(&root.file),
             root.line,
@@ -259,6 +318,8 @@ fn clear(file: Option<String>, yes: bool) -> Result<()> {
 
 fn context(json: bool) -> Result<()> {
     let session = require_session()?;
+    let mut store = CommentStore::load(CLI_RETENTION_DAYS);
+    follow(&mut store, Some(&session))?;
     if json {
         say!("{}", serde_json::to_string_pretty(&session)?)?;
         return Ok(());
@@ -346,24 +407,29 @@ fn anchor(
     let Some(parent) = store.get(id) else {
         bail!("{where_}: no comment with id {id} to reply to (see `riffnav comment list`)");
     };
+    // The thread's anchor, which the parent's own may have drifted from.
+    let root = store.root_of(parent);
     if file.is_some() || old_line.is_some() || new_line.is_some() {
         bail!(
             "{where_}: a reply carries no anchor of its own — it inherits #{id}'s \
              ({}:{} on the {} side)\n  \
              drop the file and line: a reply always sits with the note it answers",
-            shown(&parent.file),
-            parent.line,
-            parent.side.as_str(),
+            shown(&root.file),
+            root.line,
+            root.side.as_str(),
         );
     }
     Ok(Resolved {
-        file: parent.file.clone(),
-        side: parent.side,
-        line: parent.line,
-        // The parent's hash, not the file's current one: a reply stamped with a
+        file: root.file.clone(),
+        side: root.side,
+        line: root.line,
+        // The thread's hash, not the file's current one: a reply stamped with a
         // fresher hash would render current under a parent marked stale, which
         // reads as though half the thread were about different code.
-        diff_hash: parent.diff_hash.clone(),
+        diff_hash: root.diff_hash.clone(),
+        snapshot: root.snapshot.clone(),
+        code: root.code.clone(),
+        outdated: root.outdated,
     })
 }
 
@@ -405,6 +471,9 @@ fn resolve(
         side,
         line,
         diff_hash: Some(entry.diff_hash.clone()),
+        snapshot: None,
+        code: None,
+        outdated: false,
     })
 }
 
@@ -443,6 +512,9 @@ fn build(r: &Resolved, body: String, author: Option<String>, reply_to: Option<St
         created: state::now_unix(),
         reply_to,
         diff_hash: r.diff_hash.clone(),
+        snapshot: r.snapshot.clone(),
+        code: r.code.clone(),
+        outdated: r.outdated,
     }
 }
 

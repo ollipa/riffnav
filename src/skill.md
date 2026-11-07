@@ -58,6 +58,10 @@ are stale, and the diff riffnav shows can switch on its own (a clean tree shows
 the branch against its base; the first edit widens it to everything since the
 fork). Re-run `riffnav comment context` before commenting again.
 
+Existing comments follow their code: `comment list` shows each at its line now.
+One whose line you rewrote or deleted moves to the replacement and is marked
+`outdated` (`"outdated": true` in `--json`).
+
 **If an anchor is rejected, stop and report it.** Never move the comment to a
 nearby line the CLI accepts: it would be filed against code it isn't about.
 

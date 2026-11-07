@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::diff::path::shown;
 
 use crate::comment::Side;
+use crate::comment::content::FileBlobs;
 use crate::diff::{FileDiff, Hunk};
 use crate::state;
 
@@ -37,6 +38,12 @@ pub struct SessionFile {
     /// `review::file_hash` of this file's diff, recorded on comments written
     /// against it so they can later be flagged as stale.
     pub diff_hash: String,
+    /// The blobs the diff's `index` line names on each side, for reading what the
+    /// file holds now so comments can follow their code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_blob: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_blob: Option<String>,
     pub hunks: Vec<Hunk>,
 }
 
@@ -47,6 +54,17 @@ impl SessionFile {
             Side::Old => h.contains_old(line),
             Side::New => h.contains_new(line),
         })
+    }
+
+    /// What finding this file's current text takes.
+    pub fn blobs(&self) -> FileBlobs {
+        FileBlobs {
+            path: self.path.clone(),
+            new_path: self.new_blob.as_ref().map(|_| self.path.clone()),
+            old_blob: self.old_blob.clone(),
+            new_blob: self.new_blob.clone(),
+            diff_hash: self.diff_hash.clone(),
+        }
     }
 
     /// Human-readable list of the line ranges a comment may target, for the error
@@ -142,13 +160,16 @@ impl Session {
 
 fn describe(f: &FileDiff) -> SessionFile {
     let path = f.path().to_string();
+    let blobs = FileBlobs::of(f);
     SessionFile {
         old_path: f.old_path.clone().filter(|p| *p != path),
         path,
         status: f.status.sigil().to_string(),
         additions: f.additions,
         deletions: f.deletions,
-        diff_hash: format!("{:032x}", crate::review::file_hash(&f.raw)),
+        diff_hash: blobs.diff_hash,
+        old_blob: blobs.old_blob,
+        new_blob: blobs.new_blob,
         hunks: crate::diff::hunks(&f.raw),
     }
 }

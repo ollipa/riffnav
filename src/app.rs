@@ -165,6 +165,9 @@ pub struct App {
     /// Watches the comment file so notes written by an agent in another terminal
     /// show up here. `None` when comments don't persist (no repo scope).
     comment_watch: Option<CommentWatch>,
+    /// Reads what the files hold now, so comments follow their code. Made on
+    /// first use, and kept: a blob's text never changes.
+    blobs: Option<crate::comment::content::BlobReader>,
     /// Name recorded as the author of comments written in this window.
     comment_author: String,
     /// Whether comments are shown and the `c`/`x`/`]`/`[` keys are live.
@@ -298,6 +301,7 @@ impl App {
             comments: CommentStore::disabled(),
             comment_rev: 0,
             comment_watch: None,
+            blobs: None,
             comment_author: String::new(),
             comments_on: false,
             diff_cursor: 0,

@@ -2,6 +2,8 @@
 
 use super::prefetch::By;
 use super::{App, Direction};
+use crate::comment::content::{BlobReader, FileBlobs};
+use crate::comment::reanchor::Current;
 use crate::comment::{CommentStore, CommentWatch};
 use crate::diff::FileDiff;
 use crate::render::CommentLayer;
@@ -14,6 +16,7 @@ impl App {
     pub(super) fn reload_comments(&mut self) -> Option<usize> {
         let before = self.comments.all().len();
         self.comments.reload();
+        self.follow_code();
         self.bump_comments();
         let new = self.comments.all().len().checked_sub(before)?;
         (new > 0).then_some(new)
@@ -35,7 +38,38 @@ impl App {
         self.comments = CommentStore::load(retention_days);
         self.comment_watch = self.comments.path().and_then(CommentWatch::new);
         self.publish_session();
+        self.follow_code();
         self.bump_comments();
+    }
+
+    /// What `files` hold now, to move comments with their code and stamp new
+    /// ones (see [`crate::comment::reanchor`]). Not a method, so the store can
+    /// be written while it's borrowed.
+    pub(super) fn current_code<'a>(
+        files: &[FileDiff],
+        blobs: &'a mut Option<BlobReader>,
+    ) -> Current<'a> {
+        let files = files.iter().map(FileBlobs::of);
+        Current::new(files, blobs.get_or_insert_with(BlobReader::here))
+    }
+
+    /// Move the comments whose code moved since they were written or last moved,
+    /// writing the store only when one did.
+    pub(super) fn follow_code(&mut self) {
+        if !self.comments_on {
+            return;
+        }
+        let current = Self::current_code(&self.files, &mut self.blobs);
+        current.prefetch(&self.comments);
+        let moved = match current.needs(&self.comments) {
+            true => self.comments.update(|store| current.apply(store)),
+            false => Ok(0),
+        };
+        match moved {
+            Ok(0) => {}
+            Ok(_) => self.bump_comments(),
+            Err(e) => self.set_status(format!("Couldn't move comments with their code: {e}")),
+        }
     }
 
     /// Publish what this window is showing, so `riffnav comment add` in another

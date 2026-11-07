@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::App;
-use crate::comment::{Comment, Composer, PendingComment};
+use crate::comment::{Comment, Composer, PendingComment, reanchor};
 
 impl App {
     /// The rows the composer must open clear of, inside the diff pane —
@@ -222,8 +222,20 @@ impl App {
             created: crate::state::now_unix(),
             reply_to: pending.reply_to.clone(),
             diff_hash: Some(format!("{:032x}", pending.diff_hash)),
+            snapshot: None,
+            code: None,
+            outdated: false,
         };
-        let saved = self.comments.update(|store| store.add(comment));
+        let current = Self::current_code(&self.files, &mut self.blobs);
+        let saved = self.comments.update(|store| {
+            let mut comment = comment;
+            // A reply moves with its thread; a new thread follows its own code.
+            match comment.reply_to.as_deref().and_then(|p| store.get(p)) {
+                Some(parent) => reanchor::inherit(store, parent, &mut comment),
+                None => current.stamp(store, &mut comment),
+            }
+            store.add(comment)
+        });
         self.bump_comments();
         match saved {
             Ok(id) => {

@@ -29,7 +29,9 @@ mod wrap;
 
 use std::time::Duration;
 
+pub(crate) use self::blobs::read_blobs;
 pub use self::cache::{Key, Prefetch, RenderCache, Request};
+pub(crate) use self::highlight::MAX_FILE_BYTES;
 pub use self::highlight::warm_up;
 pub use self::jump::{Jump, Target};
 pub use self::marks::Marks;

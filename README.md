@@ -102,7 +102,8 @@ to show.
 - **Viewed marks.** `v` marks a file viewed, like GitHub's checkbox. Marks are
   kept per repository and branch, and a file reverts to unviewed when it changes.
 - **Review comments.** `c` leaves a note on a line. `Ctrl-O` moves a long note
-  into `$EDITOR`.
+  into `$EDITOR`. When the file is edited, a note follows its code. If its line
+  was rewritten or deleted, it moves to what replaced it, marked outdated.
 - **Correct colors mid-file.** When riffnav runs git itself, it reads the full
   file, so a hunk inside a block comment or string is colored correctly.
 

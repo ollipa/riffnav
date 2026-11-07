@@ -239,6 +239,7 @@ impl App {
         self.diff_scroll = 0;
         self.reset_cursor();
         self.publish_session(); // the file set changed; keep the CLI's view current
+        self.follow_code();
         self.set_status(format!("↻ refreshed · {} files", self.files.len()));
     }
 
@@ -298,6 +299,7 @@ impl App {
         self.cursor_token = None; // and let the cursor re-resolve from its anchor
         self.forget_view_render();
         self.publish_session();
+        self.follow_code();
     }
 }
 

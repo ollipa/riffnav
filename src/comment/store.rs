@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use twox_hash::XxHash3_128;
 
+use super::snapshot::Snapshots;
 use crate::state::{self, DAY_SECS};
 
 /// Which side of the diff a comment hangs on. A comment on a removed line
@@ -71,6 +72,18 @@ pub struct Comment {
     /// sliding onto an unrelated line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_hash: Option<String>,
+    /// Key of the snapshot of this side of the file as it was when the comment
+    /// was written, or last moved (see [`super::reanchor`]). Diffing it against
+    /// the file as it is now tells where the commented line went.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
+    /// The commented line's text, to find it again should the snapshot be gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// The commented line was rewritten or deleted since, so the note now sits on
+    /// the code that replaced it, or the nearest line that survived.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outdated: bool,
 }
 
 impl Comment {
@@ -113,6 +126,8 @@ pub struct CommentStore {
     /// way [`Self::threads`] places them. Rebuilt on every change, since the
     /// tree asks for it per row per frame.
     counts: HashMap<String, usize>,
+    /// The file snapshots comments are anchored against.
+    snapshots: Snapshots,
     dirty: bool,
 }
 
@@ -127,6 +142,7 @@ impl CommentStore {
             branch: String::new(),
             comments: Vec::new(),
             counts: HashMap::new(),
+            snapshots: Snapshots::memory(),
             dirty: false,
         }
     }
@@ -140,12 +156,15 @@ impl CommentStore {
             return Self::disabled();
         };
         let path = state::scope_path(&dir, &repo, &branch);
+        let snapshots = state::dir("snapshots").map_or_else(Snapshots::memory, Snapshots::at);
 
         // Reap branch files untouched for `retention`, but never the one we're
         // about to use — opening a branch counts as keeping it alive. Under the
         // lock, so a file another process is rewriting isn't deleted under it.
+        // Then the snapshots no comment left anywhere refers to.
         if let Some(_lock) = state::lock(&dir) {
             state::sweep(&dir, retention, &path);
+            snapshots.sweep(&dir);
         }
 
         let mut store = Self {
@@ -155,6 +174,7 @@ impl CommentStore {
             branch,
             comments: Vec::new(),
             counts: HashMap::new(),
+            snapshots,
             dirty: false,
         };
         store.reload();
@@ -245,6 +265,21 @@ impl CommentStore {
 
     pub fn get(&self, id: &str) -> Option<&Comment> {
         self.comments.iter().find(|c| c.id == id)
+    }
+
+    pub fn snapshots(&self) -> &Snapshots {
+        &self.snapshots
+    }
+
+    /// Change the comment with `id` in place, saying whether there was one.
+    pub fn edit(&mut self, id: &str, f: impl FnOnce(&mut Comment)) -> bool {
+        let Some(c) = self.comments.iter_mut().find(|c| c.id == id) else {
+            return false;
+        };
+        f(c);
+        self.dirty = true;
+        self.recount();
+        true
     }
 
     /// How many comments render in `file`: the notes of every thread rooted
@@ -498,6 +533,7 @@ impl CommentStore {
     pub(crate) fn with_path(path: PathBuf) -> Self {
         Self {
             root: path.parent().expect("a file in a directory").to_path_buf(),
+            snapshots: Snapshots::at(path.with_extension("snapshots")),
             path: Some(path),
             repo: "repo".to_string(),
             branch: "branch".to_string(),

@@ -58,7 +58,7 @@ fn watch_git(git: &mut Child, cancelled: &AtomicBool, done: impl Fn() -> bool) {
 /// What each of `specs` names, in order, from one git. Each blob's size comes off
 /// `budget`, and once that's used up the rest come back as `None`, as does anything
 /// over the size limit, missing, or binary. `None` if `cancelled` was set first.
-pub(super) fn read_blobs(
+pub(crate) fn read_blobs(
     repo: &Path,
     specs: &[String],
     budget: &mut usize,

@@ -6,10 +6,15 @@
 //! - [`compose`] is the text field a note is typed into.
 //! - [`render`] turns a thread of comments into the rows drawn beside the code.
 //! - [`watch`] notices notes written by an agent in another terminal.
+//! - [`reanchor`] moves notes with their code when the file is edited, using
+//!   [`snapshot`]s of the file and its [`content`] now.
 
 pub mod anchor;
 pub mod compose;
+pub mod content;
+pub mod reanchor;
 pub mod render;
+pub mod snapshot;
 pub mod store;
 #[cfg(test)]
 pub mod testing;

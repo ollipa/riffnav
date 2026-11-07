@@ -14,5 +14,8 @@ pub fn note(file: &str, line: u32, body: &str) -> Comment {
         created: 0,
         reply_to: None,
         diff_hash: None,
+        snapshot: None,
+        code: None,
+        outdated: false,
     }
 }
