@@ -332,11 +332,11 @@ fn to_style(style: highlighting::Style) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::{parse, rows};
+    use crate::diff::rows;
+    use crate::diff::testing::{header, one};
 
     fn file(path: &str, hunk: &str) -> FileDiff {
-        let raw = format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{hunk}");
-        parse(&raw).remove(0)
+        one(&(header(path) + hunk))
     }
 
     /// The file's rows and their highlighting.

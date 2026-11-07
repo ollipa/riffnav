@@ -1,5 +1,6 @@
 //! Fixtures and hooks for the app's tests.
 
+use crate::diff::testing::bare;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::App;
@@ -56,14 +57,7 @@ impl App {
 }
 
 pub(super) fn file(path: &str) -> FileDiff {
-    FileDiff {
-        old_path: None,
-        new_path: Some(path.to_string()),
-        status: FileStatus::Modified,
-        additions: 0,
-        deletions: 0,
-        raw: String::new(),
-    }
+    bare(path, FileStatus::Modified)
 }
 
 pub(super) fn app_with(files: Vec<FileDiff>) -> App {

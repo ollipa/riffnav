@@ -708,18 +708,11 @@ mod tests {
     use crate::comment::CommentStore;
     use crate::config::Config;
     use crate::diff::parse;
+    use crate::diff::testing::hunk;
     use crate::theme::DiffTheme;
 
     const WIDTH: u16 = 80;
     const HEIGHT: u16 = 16;
-
-    fn hunk(path: &str, body: &str) -> String {
-        let old = body.lines().filter(|l| !l.starts_with('+')).count();
-        let new = body.lines().filter(|l| !l.starts_with('-')).count();
-        format!(
-            "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,{old} +1,{new} @@\n{body}"
-        )
-    }
 
     fn app_of(raw: &str, side_by_side: bool, cfg: &Config) -> App {
         let mut app = App::new(parse(raw), side_by_side, cfg);

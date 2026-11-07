@@ -169,16 +169,14 @@ pub fn split(text: &str) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::{parse, rows};
+    use crate::diff::rows;
+    use crate::diff::testing::{header, one};
     use crate::render::highlight::{Parsing, highlight};
     use crate::theme::DiffTheme;
 
     /// What the parser finds in `line`, added to a file named `name`.
     fn tokens_of(name: &str, line: &str) -> (Vec<String>, Vec<String>) {
-        let raw = format!(
-            "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -0,0 +1 @@\n+{line}\n"
-        );
-        let file = parse(&raw).remove(0);
+        let file = one(&format!("{}@@ -0,0 +1 @@\n+{line}\n", header(name)));
         let rows = rows(&file);
         let parsing = Parsing::of(&file, &rows);
         let tokens = highlight(&rows, DiffTheme::GitHubDark, &parsing, &Default::default())

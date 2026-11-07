@@ -2,6 +2,8 @@ mod model;
 mod parser;
 pub mod path;
 mod rows;
+#[cfg(test)]
+pub mod testing;
 
 pub use model::{FileDiff, FileStatus, Hunk};
 pub use parser::{hunks, parse};

@@ -94,6 +94,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::diff::testing::bare;
     use crate::diff::{FileDiff, FileStatus};
     use crate::icons::IconStyle;
     use ratatui::Terminal;
@@ -103,12 +104,9 @@ mod tests {
 
     fn file(path: &str, status: FileStatus, additions: u32, deletions: u32) -> FileDiff {
         FileDiff {
-            old_path: None,
-            new_path: Some(path.to_string()),
-            status,
             additions,
             deletions,
-            raw: String::new(),
+            ..bare(path, status)
         }
     }
 

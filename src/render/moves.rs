@@ -371,6 +371,7 @@ fn hints(old: &Line, new: &Line, files: &[FileDiff]) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::testing::header;
     use crate::diff::{RowKind, parse};
 
     const FN_A: [&str; 3] = ["fn alpha_value() {", "    first_call(1);", "}"];
@@ -380,7 +381,8 @@ mod tests {
     /// separated from each other by a kept line.
     fn file(name: &str, removed: &[&str], added: &[&str]) -> String {
         let mut raw = format!(
-            "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1,{} +1,{} @@\n",
+            "{}@@ -1,{} +1,{} @@\n",
+            header(name),
             removed.len() + 1,
             added.len() + 1,
         );

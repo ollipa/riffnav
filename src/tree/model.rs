@@ -87,16 +87,10 @@ fn name(node: &Node) -> &str {
 mod tests {
     use super::*;
     use crate::diff::FileStatus;
+    use crate::diff::testing::bare;
 
     fn file(path: &str) -> FileDiff {
-        FileDiff {
-            old_path: None,
-            new_path: Some(path.to_string()),
-            status: FileStatus::Added,
-            additions: 0,
-            deletions: 0,
-            raw: String::new(),
-        }
+        bare(path, FileStatus::Added)
     }
 
     #[test]

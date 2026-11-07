@@ -333,11 +333,7 @@ pub fn notes(file: &FileDiff) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::parse;
-
-    fn file(raw: &str) -> FileDiff {
-        parse(raw).remove(0)
-    }
+    use crate::diff::testing::one;
 
     fn numbers(rows: &[Row]) -> Vec<(Option<u32>, Option<u32>)> {
         rows.iter().map(|r| (r.old, r.new)).collect()
@@ -345,10 +341,8 @@ mod tests {
 
     #[test]
     fn numbers_each_side_independently() {
-        let rows = rows(&file(
-            "diff --git a/f b/f\n--- a/f\n+++ b/f\n\
-             @@ -10,3 +20,3 @@ fn outer()\n a\n-b\n+c\n d\n",
-        ));
+        let rows = rows(&one("diff --git a/f b/f\n--- a/f\n+++ b/f\n\
+             @@ -10,3 +20,3 @@ fn outer()\n a\n-b\n+c\n d\n"));
         assert_eq!(rows[0].kind, RowKind::HunkHeader { new_start: 20 });
         assert_eq!(rows[0].text, "fn outer()");
         assert_eq!(
@@ -364,7 +358,7 @@ mod tests {
 
     #[test]
     fn a_removed_line_shaped_like_a_file_header_stays_code() {
-        let rows = rows(&file(
+        let rows = rows(&one(
             "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n--- old\n+++ new\n x\n",
         ));
         assert_eq!(rows[1].kind, RowKind::Removed);
@@ -375,7 +369,7 @@ mod tests {
 
     #[test]
     fn the_missing_newline_marker_takes_no_line_number() {
-        let rows = rows(&file(
+        let rows = rows(&one(
             "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n\
              \\ No newline at end of file\n+b\n\\ No newline at end of file\n",
         ));
@@ -387,7 +381,7 @@ mod tests {
 
     #[test]
     fn a_blank_context_line_with_no_marker_still_counts() {
-        let rows = rows(&file(
+        let rows = rows(&one(
             "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n",
         ));
         assert_eq!(rows[2].kind, RowKind::Context);
@@ -397,7 +391,7 @@ mod tests {
 
     #[test]
     fn crlf_never_reaches_the_row_text() {
-        let rows = rows(&file(
+        let rows = rows(&one(
             "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\r\n+b\r\n",
         ));
         assert_eq!(rows[1].text, "a");
@@ -406,21 +400,19 @@ mod tests {
 
     #[test]
     fn a_file_without_hunks_has_no_rows_but_says_why() {
-        let binary = file(
-            "diff --git a/i.png b/i.png\nindex 1..2 100644\n\
-             Binary files a/i.png and b/i.png differ\n",
-        );
+        let binary = one("diff --git a/i.png b/i.png\nindex 1..2 100644\n\
+             Binary files a/i.png and b/i.png differ\n");
         assert!(rows(&binary).is_empty());
         assert_eq!(notes(&binary), ["binary file"]);
 
-        let mode = file("diff --git a/s b/s\nold mode 100644\nnew mode 100755\n");
+        let mode = one("diff --git a/s b/s\nold mode 100644\nnew mode 100755\n");
         assert!(rows(&mode).is_empty());
         assert_eq!(notes(&mode), ["mode +x"]);
     }
 
     #[test]
     fn a_change_runs_until_context_or_a_hunk_header() {
-        let ids = change_ids(&rows(&file(
+        let ids = change_ids(&rows(&one(
             "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n-a\n+b\n-c\n x\n+d\n\
              @@ -9 +9 @@\n-e\n",
         )));
@@ -430,7 +422,7 @@ mod tests {
 
     #[test]
     fn a_missing_newline_marker_does_not_split_a_change() {
-        let ids = change_ids(&rows(&file(
+        let ids = change_ids(&rows(&one(
             "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n\
              \\ No newline at end of file\n+b\n\\ No newline at end of file\n",
         )));
@@ -439,7 +431,7 @@ mod tests {
 
     #[test]
     fn only_added_and_removed_rows_make_a_file_changed() {
-        assert!(has_changes(&file(
+        assert!(has_changes(&one(
             "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n x\n+y\n",
         )));
         for raw in [
@@ -447,13 +439,13 @@ mod tests {
             "diff --git a/s b/s\nold mode 100644\nnew mode 100755\n",
             "diff --git a/o b/n\nsimilarity index 100%\nrename from o\nrename to n\n",
         ] {
-            assert!(!has_changes(&file(raw)), "{raw}");
+            assert!(!has_changes(&one(raw)), "{raw}");
         }
     }
 
     /// A two-parent combined diff of `body`, under a header that holds for it.
     fn merge(header: &str, body: &str) -> Vec<Row> {
-        rows(&file(&format!(
+        rows(&one(&format!(
             "diff --cc f\nindex 1,2..3\n--- a/f\n+++ b/f\n{header}\n{body}"
         )))
     }
@@ -498,7 +490,7 @@ mod tests {
 
     #[test]
     fn an_octopus_has_a_marker_for_each_parent() {
-        let rows = rows(&file(
+        let rows = rows(&one(
             "diff --cc f\n@@@@ -1,3 -1,3 -1,3 +1,3 @@@@\n   a\n-  b\n - c\n  -d\n +  e\n+++f\n   g\n",
         ));
         assert_eq!(rows[0].kind, RowKind::HunkHeader { new_start: 1 });
@@ -562,7 +554,7 @@ mod tests {
     #[test]
     fn a_plain_diff_never_reads_as_combined() {
         // Its body can't hold a `@@@` line, but what follows it can.
-        let f = file(
+        let f = one(
             "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n@@@ -1 -1 +1 @@@\n  c\n",
         );
         assert_eq!(rows(&f).len(), 3);
@@ -570,7 +562,7 @@ mod tests {
 
     #[test]
     fn a_combined_mode_change_says_so_with_no_hunks_to_show() {
-        let notes = |line: &str| notes(&file(&format!("diff --cc s\nindex 1,1..1\n{line}\n")));
+        let notes = |line: &str| notes(&one(&format!("diff --cc s\nindex 1,1..1\n{line}\n")));
         assert_eq!(notes("mode 100644,100644..100755"), ["mode +x"]);
         assert_eq!(notes("mode 100755,100755..100644"), ["mode -x"]);
         // The first parent agrees with the result, but the merge still took a side.
@@ -582,13 +574,13 @@ mod tests {
 
     #[test]
     fn a_mode_line_is_only_a_note_in_a_combined_diff() {
-        let f = file("diff --git a/s b/s\nmode 100644,100644..100755\n");
+        let f = one("diff --git a/s b/s\nmode 100644,100644..100755\n");
         assert!(notes(&f).is_empty());
     }
 
     #[test]
     fn a_mode_line_inside_a_hunk_is_code_not_a_note() {
-        let f = file("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n old mode 100644\n");
+        let f = one("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n old mode 100644\n");
         assert!(notes(&f).is_empty());
     }
 }

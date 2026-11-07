@@ -387,14 +387,14 @@ fn bridge_blanks(ranges: Vec<Range<usize>>, text: &str) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::testing::{header, one};
     use crate::diff::{parse, rows};
     use crate::render::highlight::{Parsing, highlight};
     use crate::theme::DiffTheme;
 
     /// The word pass over `hunk` in a file named `name`.
     fn run(name: &str, hunk: &str) -> (Vec<Row>, Changes) {
-        let raw = format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n{hunk}");
-        let file = parse(&raw).remove(0);
+        let file = one(&(header(name) + hunk));
         let rows = rows(&file);
         let cancelled = AtomicBool::new(false);
         let parsing = Parsing::of(&file, &rows);

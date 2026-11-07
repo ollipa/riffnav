@@ -305,6 +305,7 @@ impl Search {
 mod tests {
     use super::*;
     use crate::diff::parse;
+    use crate::diff::testing::{header, one};
 
     fn find(query: &str, text: &str) -> Vec<(usize, usize)> {
         let mut found = Vec::new();
@@ -314,8 +315,7 @@ mod tests {
 
     fn file(body: &str) -> FileDiff {
         let lines = body.lines().count();
-        let raw = format!("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -0,0 +1,{lines} @@\n{body}");
-        parse(&raw).remove(0)
+        one(&format!("{}@@ -0,0 +1,{lines} @@\n{body}", header("f")))
     }
 
     fn scan(files: &[FileDiff], query: &str) -> Search {

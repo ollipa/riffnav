@@ -938,6 +938,7 @@ impl RenderCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::testing::{hunk, one};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
@@ -1135,12 +1136,7 @@ mod tests {
     }
 
     fn rust(path: &str, body: &str) -> FileDiff {
-        let old = body.lines().filter(|l| !l.starts_with('+')).count();
-        let new = body.lines().filter(|l| !l.starts_with('-')).count();
-        parse(&format!(
-            "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,{old} +1,{new} @@\n{body}"
-        ))
-        .remove(0)
+        one(&hunk(path, body))
     }
 
     fn file(path: &str) -> FileDiff {

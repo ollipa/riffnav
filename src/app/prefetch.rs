@@ -159,19 +159,11 @@ mod tests {
     use crate::comment::{Anchor, Comment, CommentStore, Side};
     use crate::config::Config;
     use crate::diff::parse;
+    use crate::diff::testing::hunk;
     use crate::render::Target;
 
     const WIDTH: u16 = 80;
     const HEIGHT: u16 = 16;
-
-    /// One hunk from line 1.
-    fn hunk(path: &str, body: &str) -> String {
-        let old = body.lines().filter(|l| !l.starts_with('+')).count();
-        let new = body.lines().filter(|l| !l.starts_with('-')).count();
-        format!(
-            "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,{old} +1,{new} @@\n{body}"
-        )
-    }
 
     /// Files named by `names`, each with one change, which `matching` also have
     /// a line `zzz` in.

@@ -1,5 +1,6 @@
 use super::*;
 use crate::diff::parse;
+use crate::diff::testing::header;
 use crate::render::starts::tests::Repo;
 
 /// Real code, with nothing in common from line to line.
@@ -16,7 +17,8 @@ const FUNCTION: [&str; 6] = [
 /// numbered from 1.
 fn file(name: &str, context: &[&str], added: &[&str]) -> String {
     let mut raw = format!(
-        "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1,{} +1,{} @@\n",
+        "{}@@ -1,{} +1,{} @@\n",
+        header(name),
         context.len(),
         context.len() + added.len(),
     );

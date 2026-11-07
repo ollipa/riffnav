@@ -730,6 +730,7 @@ mod tests {
     use super::*;
     use crate::comment::store::{Anchor, Side};
     use crate::diff::parse;
+    use crate::diff::testing::header;
     use crate::render;
     use crate::render::moves::MoveIndex;
 
@@ -1295,9 +1296,7 @@ mod tests {
     #[test]
     fn a_hint_wider_than_the_pane_is_cut_short() {
         let long = format!("{}.rs", "x".repeat(60));
-        let moved = |file: &str, raw: &str| {
-            format!("diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n{raw}")
-        };
+        let moved = |file: &str, raw: &str| header(file) + raw;
         let raw = moved(
             "a.rs",
             "@@ -1,2 +0,0 @@\n-fn alpha_value() {\n-    first_call(1);\n",
