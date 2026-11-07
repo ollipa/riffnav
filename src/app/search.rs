@@ -274,7 +274,11 @@ impl App {
         };
         prompt.typed = Instant::now();
         let query = prompt.query.clone();
-        let origin = prompt.origin.clone();
+        let seek = Seek {
+            file: prompt.origin.file,
+            rank: prompt.origin.rank,
+            line: prompt.origin.cursor,
+        };
         self.find.search = Search::new(
             &query,
             self.files.len(),
@@ -282,12 +286,10 @@ impl App {
             self.cache.tab_width(),
         );
         self.find.landing = None;
-        self.find.seek = self.find.search.as_ref().map(|_| Seek {
-            file: origin.file,
-            rank: origin.rank,
-            line: origin.cursor,
-        });
-        if self.find.search.is_none() {
+        self.find.seek = self.find.search.as_ref().map(|_| seek);
+        if self.find.search.is_none()
+            && let Some(origin) = self.find.prompt.as_ref().map(|p| p.origin.clone())
+        {
             self.restore_view(&origin);
         }
     }
