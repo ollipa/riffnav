@@ -37,10 +37,10 @@ use self::corpus::{Corpus, Run, added_runs};
 use self::filter::extension;
 use self::matching::{Block, search};
 use self::sources::{Reading, add_diff_files, add_outside_files, rare_lines};
-use super::moves::{MAX_CHANGED_LINES, MoveIndex, Target, lines_changed};
+use super::moves::{self, MAX_CHANGED_LINES, MoveIndex, Target, lines_changed};
 use crate::autodiff::Tree;
 use crate::comment::store::{Anchor, Side};
-use crate::diff::{self, FileDiff, Row, path};
+use crate::diff::{self, FileDiff, Row};
 
 /// Lines of real code a block needs. See [`is_code`]. Much more than a move needs:
 /// two lines coming back after being removed is a coincidence worth checking, but
@@ -221,10 +221,7 @@ fn index_of(blocks: &[Block], runs: &[Run], corpus: &Corpus, files: &[FileDiff])
         let origin = &corpus.origins[stretch.origin];
         let added = &run.lines[block.from..block.from + block.len];
         let kept = &stretch.lines[block.at..block.at + block.len];
-        let place = |line: u32| match origin.file == Some(run.file) {
-            true => format!("line {line}"),
-            false => format!("{}:{line}", path::shown(&origin.path)),
-        };
+        let place = |line| moves::place(origin.file == Some(run.file), &origin.path, line);
         index[run.file].notes.insert(
             added[0].row,
             format!("copied from {}", place(kept[0].number)),

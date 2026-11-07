@@ -1,5 +1,6 @@
 use super::*;
 use crate::diff::parse;
+use crate::diff::path;
 use crate::diff::testing::header;
 use crate::testing::Repo;
 

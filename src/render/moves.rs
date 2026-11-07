@@ -362,14 +362,20 @@ fn repeats(
 /// What to say above a block's removed and added halves, given their first lines.
 fn hints(old: &Line, new: &Line, files: &[FileDiff]) -> (String, String) {
     let there = |verb: &str, line: &Line| {
-        if old.file == new.file {
-            format!("moved {verb} line {}", line.number)
-        } else {
-            let path = path::shown(files[line.file].path());
-            format!("moved {verb} {path}:{}", line.number)
-        }
+        let place = place(old.file == new.file, files[line.file].path(), line.number);
+        format!("moved {verb} {place}")
     };
     (there("to", new), there("from", old))
+}
+
+/// Where a line is, as said from where it's seen: `line N` in the same file, and
+/// `path:N` from another.
+pub(super) fn place(same_file: bool, path: &str, line: u32) -> String {
+    if same_file {
+        format!("line {line}")
+    } else {
+        format!("{}:{line}", path::shown(path))
+    }
 }
 
 #[cfg(test)]
