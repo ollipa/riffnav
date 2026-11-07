@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{App, CursorToken, Focus};
+use super::{App, By, CursorToken, Focus};
 use crate::comment::Anchor;
 use crate::diff::RowWalk;
 use crate::render::{Marks, Rendered};
@@ -311,6 +311,7 @@ impl App {
             return;
         };
         self.focus = Focus::Diff;
+        self.head(true, By::Match);
         self.find.fallback = Some(prompt.origin);
         self.settle_search();
     }
@@ -566,6 +567,7 @@ impl App {
             return self.set_status(note);
         }
         self.focus = Focus::Diff;
+        self.head(forward, By::Match);
         if let Some(index) = self.next_in_file(forward) {
             return self.show_match(index);
         }
@@ -628,6 +630,24 @@ impl App {
             let end = if forward { "top" } else { "bottom" };
             self.set_status(format!("Search wrapped to the {end}"));
         }
+    }
+
+    /// The file `n` would go on to after this one, or `N`, short of a wrap that
+    /// the scan hasn't got to yet.
+    pub(super) fn next_file_with_matches(&self, forward: bool) -> Option<usize> {
+        let search = self.find.search.as_ref()?;
+        let here = self.selected_file();
+        let ranks = self.ranks_onward(forward, search.file_count());
+        let ranks = ranks.take_while(|&(_, wrapped)| !wrapped || search.done());
+        ranks
+            .filter_map(|(rank, _)| search.file_at(rank))
+            .find(|&file| Some(file) != here && !search.in_file(file).is_empty())
+    }
+
+    /// What the search has found so far, which is what decides where `n` goes.
+    pub(super) fn search_found(&self) -> Option<(String, usize, bool)> {
+        let search = self.find.search.as_ref()?;
+        Some((search.query.clone(), search.total(), search.done()))
     }
 
     /// What identifies the current match across a reload, along with the path of

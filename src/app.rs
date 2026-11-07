@@ -1,4 +1,5 @@
 mod changes;
+mod prefetch;
 mod search;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -33,6 +34,8 @@ use crate::review::ReviewStore;
 use crate::session::Session;
 use crate::theme::DiffTheme;
 use crate::tree::{self, Node, Row, RowKind};
+
+use self::prefetch::{By, Heading, PrefetchAsked};
 
 const MIN_DIFF_WIDTH: u16 = 20;
 const HALF_PAGE: i32 = 15;
@@ -286,8 +289,9 @@ pub struct App {
     held_keys: VecDeque<KeyEvent>,
     /// Which way the reader is working through the files.
     heading: Heading,
-    /// What the last prefetch was worked out from, as it only changes with these.
-    prefetch_asked: Option<PrefetchAsked>,
+    /// What the files to prefetch were worked out from, as they only change with
+    /// these, and the files.
+    prefetch_asked: Option<(PrefetchAsked, Vec<usize>)>,
     /// The id `x` has asked about deleting, waiting on the y/N answer. Holds the
     /// next keypress hostage, which is the whole point of it.
     confirm_delete: Option<String>,
@@ -319,18 +323,6 @@ pub struct App {
     /// When set, the current `status` clears itself once this instant passes.
     status_deadline: Option<Instant>,
 }
-
-/// Which way the reader is working through the files, which is the best guess at
-/// which file is next.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Heading {
-    forward: bool,
-    /// By `J` and `K`, which skip files with no changes.
-    by_change: bool,
-}
-
-/// What decides which file to prefetch and how it's to look.
-type PrefetchAsked = (usize, Heading, u16, bool, DiffTheme);
 
 /// Panics on other threads, to report once the terminal is back.
 static BACKGROUND_PANICS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -435,7 +427,7 @@ impl App {
             held_keys: VecDeque::new(),
             heading: Heading {
                 forward: true,
-                by_change: false,
+                by: By::File,
             },
             prefetch_asked: None,
             confirm_delete: None,
@@ -879,6 +871,7 @@ impl App {
             && self.review_auto_advance
             && let Some(i) = self.next_unviewed_after(self.selected_index())
         {
+            self.head(true, By::Unviewed);
             self.select(i);
         }
     }
@@ -936,6 +929,7 @@ impl App {
     /// Select the next unviewed file after the cursor, reporting when everything
     /// has been reviewed.
     fn jump_unviewed(&mut self) {
+        self.head(true, By::Unviewed);
         match self.next_unviewed_after(self.selected_index()) {
             Some(i) => self.select(i),
             None => self.set_status("All files reviewed ✓"),
@@ -1101,7 +1095,12 @@ impl App {
     }
 
     /// Put a question to the render cache about file `idx`, shown `width` wide.
-    fn ask_cache(&mut self, idx: usize, width: u16, ask: fn(&mut RenderCache, &Request<'_>)) {
+    fn ask_cache<T>(
+        &mut self,
+        idx: usize,
+        width: u16,
+        ask: impl FnOnce(&mut RenderCache, &Request<'_>) -> T,
+    ) -> T {
         let side_by_side = self.side_by_side_for(idx);
         let diff_hash = self.file_hashes.get(idx).copied().unwrap_or(0);
         let comments = Self::comment_layer(
@@ -1121,7 +1120,7 @@ impl App {
             theme: self.diff_theme,
             comments,
         };
-        ask(&mut self.cache, &request);
+        ask(&mut self.cache, &request)
     }
 
     /// Render the selected file, and put the cursor and any jump in progress on it.
@@ -1205,52 +1204,6 @@ impl App {
                 return;
             };
             let _ = self.route_key(key, true);
-        }
-    }
-
-    /// With the file on screen done, get the one the reader is heading for ready.
-    fn prefetch_next(&mut self, width: u16) {
-        if !self.view_settled() || !self.held_keys.is_empty() || self.cache.busy() {
-            return;
-        }
-        let asked = (
-            self.selected_index(),
-            self.heading,
-            width,
-            self.side_by_side,
-            self.diff_theme,
-        );
-        if self.prefetch_asked == Some(asked) {
-            return;
-        }
-        self.prefetch_asked = Some(asked);
-        if let Some(next) = self.likely_next() {
-            self.ask_cache(next, width, RenderCache::prefetch);
-        }
-    }
-
-    /// The file the next press in the direction of travel would open.
-    fn likely_next(&self) -> Option<usize> {
-        let Heading { forward, by_change } = self.heading;
-        if by_change {
-            let order = self.tree_order();
-            let here = self.selected_file();
-            let mut onward = self.ranks_onward(forward, order.len());
-            return onward
-                .find(|&(rank, _)| {
-                    Some(order[rank]) != here && crate::diff::has_changes(&self.files[order[rank]])
-                })
-                .map(|(rank, _)| order[rank]);
-        }
-        let file = |row: &Row| match row.kind {
-            RowKind::File { diff_index } => Some(diff_index),
-            RowKind::Dir { .. } => None,
-        };
-        let here = self.selected_index();
-        if forward {
-            self.rows.iter().skip(here + 1).find_map(file)
-        } else {
-            self.rows.iter().take(here).rev().find_map(file)
         }
     }
 
@@ -1474,18 +1427,13 @@ impl App {
             return;
         }
         let max = self.rows.len() as isize - 1;
-        self.head(delta > 0, false);
+        self.head(delta > 0, By::File);
         self.select((self.selected_index() as isize + delta).clamp(0, max) as usize);
-    }
-
-    /// Note the way the reader is going, for [`App::likely_next`].
-    fn head(&mut self, forward: bool, by_change: bool) {
-        self.heading = Heading { forward, by_change };
     }
 
     /// Jump to the next/previous file row, skipping directories.
     fn jump_file(&mut self, forward: bool) {
-        self.head(forward, false);
+        self.head(forward, By::File);
         let cur = self.selected_index();
         let is_file = |i: &usize| matches!(self.rows[*i].kind, RowKind::File { .. });
         let next = if forward {
@@ -1734,6 +1682,7 @@ impl App {
     /// so `]` held down visits every note in the review exactly once per lap.
     /// Reports when there's nothing to jump to.
     pub(crate) fn jump_comment(&mut self, forward: bool) {
+        self.head(forward, By::Comment);
         let starts: Vec<usize> = self
             .current_render()
             .map(|r| r.comment_rows.iter().map(|b| b.start).collect())

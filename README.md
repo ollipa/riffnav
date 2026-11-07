@@ -379,8 +379,12 @@ text without syntax colors, already in its final layout, until the real render
 replaces it, and one too big to color shows `rendering…` until it's done. A key
 that needs the render, such as `j` or `G`, acts when it lands, in the order
 pressed, while `n`, `p` and `q` act at once. With the file on screen done, the
-next file in the direction of travel is rendered ahead of time, and work for a file
-that's no longer wanted is dropped. The cache keeps roughly 256 MB of renders.
+file the last move would reach if made again is rendered ahead of time: the next
+in the tree for `n` and `p`, the next with a change for `J` and `K`, the next
+unviewed for `v` and `V`, the next with a match or a comment while stepping
+through those, and after it the file `m` would jump to from the cursor's line.
+Work for a file that's no longer wanted is dropped. The cache keeps roughly 256 MB
+of renders.
 
 Comments anchor to a *diff line*, never a screen row, so they stay put across a
 resize, a theme switch, or a unified/side-by-side toggle. Each rendered row keeps

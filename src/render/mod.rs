@@ -19,7 +19,7 @@ mod starts;
 mod tokens;
 mod words;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::size_of;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -971,6 +971,17 @@ impl CopyJob {
     }
 }
 
+/// How a prefetch stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Prefetch {
+    /// The file is as ready as a prefetch makes it.
+    Ready,
+    /// It's being made.
+    Started,
+    /// It isn't being made: something else is, or it was made and didn't fit.
+    Stopped,
+}
+
 /// What the file on screen is missing.
 enum Need {
     Nothing,
@@ -1044,9 +1055,11 @@ pub struct RenderCache {
     clock: u64,
     /// The file on screen, which isn't dropped however big it is.
     shown: Option<Key>,
-    /// The last file prefetched, so one too big to stay in the cache isn't made over
-    /// and over.
-    prefetched: Option<Key>,
+    /// The file on screen before it, which a prefetch doesn't push out either.
+    left: Option<Key>,
+    /// The files prefetched since they were last on screen, so one too big to stay
+    /// in the cache isn't made over and over.
+    prefetched: HashSet<Key>,
     /// Whether to prefetch at all.
     prefetching: bool,
     #[cfg(test)]
@@ -1085,7 +1098,8 @@ impl RenderCache {
             bytes: 0,
             clock: 0,
             shown: None,
-            prefetched: None,
+            left: None,
+            prefetched: HashSet::new(),
             // Tests want what they pressed for, with nothing else going on.
             prefetching: !cfg!(test),
             #[cfg(test)]
@@ -1149,21 +1163,33 @@ impl RenderCache {
             self.jobs.discard(done);
             return false;
         };
-        let (key, copies_rev) = (self.running[at].key, self.running[at].copies_rev);
+        let job = &self.running[at];
+        let (key, copies_rev, idle) = (job.key, job.copies_rev, job.idle);
+        // A prefetch keeps what it makes only where there's room for it.
+        let spare = if idle { self.left } else { None };
+        let roomy = |cache: &Self, made: &Made| !idle || cache.room_for(key, made);
         match done.outcome {
             Outcome::Preview(made) => {
                 // A file only gets one, and it never replaces the real thing.
-                if self.entries.contains_key(&key) {
+                if self.entries.contains_key(&key) || !roomy(self, &made) {
                     self.jobs.discard(made);
                 } else {
-                    self.keep(key, made, true, copies_rev);
+                    self.keep(key, made, true, copies_rev, spare);
                 }
                 return true;
             }
+            Outcome::Final(made) if !roomy(self, &made) => {
+                self.jobs.discard(made);
+                self.prefetched.insert(key);
+                // The preview that made it in has nothing to follow it.
+                if self.entries.get(&key).is_some_and(|entry| entry.preview) {
+                    self.remove(|other| *other == key);
+                }
+            }
             Outcome::Final(made) => {
-                self.keep(key, made, false, copies_rev);
-                if self.running[at].idle {
-                    self.prefetched = Some(key);
+                self.keep(key, made, false, copies_rev, spare);
+                if idle {
+                    self.prefetched.insert(key);
                 }
             }
             Outcome::Spliced(mut made) => {
@@ -1174,7 +1200,7 @@ impl RenderCache {
                         made.base = entry.base.clone();
                     }
                     let copies_rev = entry.copies_rev;
-                    self.keep(key, made, false, copies_rev);
+                    self.keep(key, made, false, copies_rev, None);
                 }
             }
             Outcome::NotSpliced(rev) => {
@@ -1190,8 +1216,17 @@ impl RenderCache {
         true
     }
 
-    /// Put `made` in the cache, and make room for it.
-    fn keep(&mut self, key: Key, made: Made, preview: bool, copies_rev: u64) {
+    /// Whether a prefetch of `key` can keep `made`, which can push out what was
+    /// looked at a while ago, but not the file on screen or the one before it.
+    fn room_for(&self, key: Key, made: &Made) -> bool {
+        let size = |key: Key| self.entries.get(&key).map_or(0, |entry| entry.bytes);
+        let kept = [self.shown, self.left].into_iter().flatten();
+        let kept: usize = kept.filter(|&other| other != key).map(size).sum();
+        kept + made.bytes <= self.limit()
+    }
+
+    /// Put `made` in the cache, and make room for it without dropping `spare`.
+    fn keep(&mut self, key: Key, made: Made, preview: bool, copies_rev: u64, spare: Option<Key>) {
         let entry = Entry {
             base: made.base,
             rendered: Arc::new(made.rendered),
@@ -1211,15 +1246,19 @@ impl RenderCache {
             }
             self.retire(vec![old]);
         }
-        self.trim();
+        self.trim(spare);
     }
 
-    /// Drop the renders looked at longest ago until what's left fits.
-    fn trim(&mut self) {
+    /// Drop the renders looked at longest ago until what's left fits, keeping the
+    /// file on screen and `spare`.
+    fn trim(&mut self, spare: Option<Key>) {
         let mut doomed = Vec::new();
         while self.bytes > self.limit() {
-            let shown = self.shown;
-            let oldest = self.entries.iter().filter(|(key, _)| Some(**key) != shown);
+            let kept = [self.shown, spare];
+            let oldest = self
+                .entries
+                .iter()
+                .filter(|(key, _)| !kept.contains(&Some(**key)));
             let Some(key) = oldest
                 .min_by_key(|(_, entry)| entry.used)
                 .map(|(key, _)| *key)
@@ -1277,7 +1316,7 @@ impl RenderCache {
 
     /// Give up on what's being rendered for the screen, which has nothing to show.
     pub fn release(&mut self) {
-        self.shown = None;
+        self.left = self.shown.take().or(self.left);
         self.cancel(|job| !job.idle);
     }
 
@@ -1370,7 +1409,7 @@ impl RenderCache {
             entry.preview |= changed(key.file);
         }
         if any {
-            self.prefetched = None;
+            self.forget_prefetches();
         }
         self.copies = Arc::new(index);
         any
@@ -1425,7 +1464,12 @@ impl RenderCache {
     /// until then [`Self::get`] has whatever there is of it so far.
     pub fn ensure(&mut self, request: &Request<'_>) {
         let key = request.key();
+        if self.shown != Some(key) {
+            self.left = self.shown;
+        }
         self.shown = Some(key);
+        // It's an ordinary file now, which can be prefetched again once it's gone.
+        self.prefetched.remove(&key);
         self.clock += 1;
         self.collect();
         self.cancel(|job| !job.idle && job.key != key);
@@ -1545,18 +1589,24 @@ impl RenderCache {
         true
     }
 
-    /// With the file on screen done, render the one likely to be next. Anything for
+    /// With the file on screen done, render one likely to be next. Anything for
     /// the screen stops it, and a prefetch for a file that has stopped being next
     /// goes the same way.
-    pub fn prefetch(&mut self, request: &Request<'_>) {
+    pub fn prefetch(&mut self, request: &Request<'_>) -> Prefetch {
         if !self.prefetching {
-            return;
+            return Prefetch::Stopped;
         }
         let key = request.key();
         self.cancel(|job| job.idle && job.key != key);
-        let done = self.entries.get(&key).is_some_and(|entry| !entry.preview);
-        if !done && self.prefetched != Some(key) && !self.busy() {
+        if self.entries.get(&key).is_some_and(|entry| !entry.preview) {
+            Prefetch::Ready
+        } else if self.running.iter().any(|job| job.key == key) {
+            Prefetch::Started
+        } else if self.prefetched.contains(&key) || self.busy() {
+            Prefetch::Stopped
+        } else {
             self.start_render(key, request, true);
+            Prefetch::Started
         }
     }
 
@@ -1634,7 +1684,11 @@ impl RenderCache {
     pub fn clear(&mut self) {
         self.cancel(|_| true);
         self.remove(|_| true);
-        self.prefetched = None;
+        self.forget_prefetches();
+    }
+
+    fn forget_prefetches(&mut self) {
+        self.prefetched.clear();
     }
 
     /// Drop the cached renders for a single file (every width/theme variant),
@@ -1642,7 +1696,7 @@ impl RenderCache {
     pub fn invalidate(&mut self, file: usize) {
         self.cancel(|job| job.key.file == file);
         self.remove(|key| key.file == file);
-        self.prefetched = None;
+        self.forget_prefetches();
     }
 
     /// Seed a render directly, for tests that want exact text rather than a diff.
@@ -2595,6 +2649,38 @@ mod tests {
         cache.finish();
         assert!(cached(&cache, 1));
         assert_eq!(started(&mut cache), [1], "no second job");
+    }
+
+    #[test]
+    fn a_prefetch_keeps_the_file_just_left() {
+        let mut cache = RenderCache::new(4, false, false);
+        cache.prefetch_for_test();
+        let files: Vec<FileDiff> = (0..4).map(|at| file(&format!("{at}.rs"))).collect();
+        cache.ensure(&request(0, &files[0], WIDTH, GitHubDark));
+        let one = cache.stored_bytes();
+        cache.ensure(&request(1, &files[1], WIDTH, GitHubDark));
+        // 2, prefetched, has been in the cache longer than 1 was on screen.
+        cache.prefetch(&request(2, &files[2], WIDTH, GitHubDark));
+        cache.finish();
+        cache.ensure(&request(0, &files[0], WIDTH, GitHubDark));
+        cache.ensure(&request(1, &files[1], WIDTH, GitHubDark));
+        cache.ensure(&request(2, &files[2], WIDTH, GitHubDark));
+        cache.hooks().limit = Some(one * 3 + one / 2);
+
+        cache.prefetch(&request(3, &files[3], WIDTH, GitHubDark));
+        cache.finish();
+        assert!(cached(&cache, 3));
+        assert!(cached(&cache, 2), "on screen");
+        assert!(cached(&cache, 1), "just left");
+        assert!(!cached(&cache, 0));
+
+        // With no room but what those two take up, it isn't kept at all.
+        cache.hooks().limit = Some(one * 2 + one / 2);
+        cache.ensure(&request(1, &files[1], WIDTH, GitHubDark));
+        cache.prefetch(&request(0, &files[0], WIDTH, GitHubDark));
+        cache.finish();
+        assert!(!cached(&cache, 0));
+        assert!(cached(&cache, 1) && cached(&cache, 2));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use super::{App, Focus};
+use super::{App, By, Focus};
 use crate::comment::Anchor;
 use crate::diff;
 use crate::render::Rendered;
@@ -37,7 +37,7 @@ impl App {
     /// The `J` and `K` keys. They act on the diff from either pane.
     pub(super) fn jump_change(&mut self, forward: bool) {
         self.focus = Focus::Diff;
-        self.head(forward, true);
+        self.head(forward, By::Change);
         self.change_jumps.queued.push_back(forward);
         // A jump on its way somewhere goes first, as it was asked for first.
         if self.comment_landing.is_none()
@@ -1381,50 +1381,6 @@ mod tests {
         settle(&mut app);
         assert!(app.cursor_screen_row.is_none());
         assert_eq!(cursor_row(&app), row);
-    }
-
-    #[test]
-    fn the_next_file_is_prefetched_in_the_direction_of_travel() {
-        let raw = format!(
-            "{}{}{}{}",
-            hunk("a", " x\n-y\n"),
-            hunk("b", " x\n y\n"),
-            hunk("c", " x\n-y\n"),
-            hunk("d", " x\n-y\n"),
-        );
-        let mut app = app(&raw);
-        app.cache.prefetch_for_test();
-        app.prefetch_asked = None;
-        let prefetched = |app: &mut App, file: usize| {
-            app.cache.finish();
-            app.render_of(file).is_some()
-        };
-        frame(&mut app);
-        assert!(prefetched(&mut app, 1), "next in tree order");
-
-        press(&mut app, Char('n'));
-        press(&mut app, Char('n'));
-        press(&mut app, Char('p'));
-        assert_eq!(file_name(&app).as_deref(), Some("b"));
-        assert!(prefetched(&mut app, 0), "going backwards");
-    }
-
-    #[test]
-    fn a_change_jump_prefetches_the_next_file_with_a_change() {
-        let raw = format!(
-            "{}{}{}",
-            hunk("a", " x\n-y\n z\n-w\n"),
-            hunk("b", " x\n y\n"),
-            hunk("c", " x\n-y\n"),
-        );
-        let mut app = app(&raw);
-        app.cache.prefetch_for_test();
-        press(&mut app, Char('J'));
-        app.cache.finish();
-        frame(&mut app);
-        app.cache.finish();
-        assert!(app.render_of(2).is_some(), "c, as b has nothing to stop at");
-        assert!(app.render_of(1).is_none());
     }
 
     /// A file taller than a `u16` can count, the way each layout gets there.
