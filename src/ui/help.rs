@@ -6,6 +6,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use super::centered_rect;
 
 pub(super) fn render_help(
@@ -17,8 +19,14 @@ pub(super) fn render_help(
     can_refresh: bool,
     comments: bool,
 ) {
+    // With comments on, the diff has a line cursor for j/k to move.
+    let move_keys = if comments {
+        "move selection / line cursor (per focus)"
+    } else {
+        "move selection / scroll diff (per focus)"
+    };
     let mut entries = vec![
-        ("j / k", "move selection / scroll diff (per focus)"),
+        ("j / k  ↑ / ↓", move_keys),
         ("n / p", "next / previous file"),
         ("J / K", "next / previous change"),
         ("/", "search the text of the whole diff"),
@@ -28,7 +36,8 @@ pub(super) fn render_help(
         ("PgDn / PgUp", "page down / up (focused pane)"),
         ("g / G", "top / bottom of diff"),
         ("Enter", "expand / collapse folder"),
-        ("Tab / ← / →", "switch focus tree <-> diff"),
+        ("Tab", "switch focus tree <-> diff"),
+        ("← / →", "focus the tree / the diff"),
         ("t", "fuzzy find a file"),
         ("s", "toggle side-by-side / unified"),
         ("e", "toggle file tree"),
@@ -62,24 +71,179 @@ pub(super) fn render_help(
         entries.push(("z", "toggle herdr zoom"));
     }
     entries.push(("?", "toggle this help"));
-    entries.push(("q / Esc", "quit (Esc clears a search first)"));
-    let lines: Vec<Line> = entries
-        .iter()
-        .map(|(key, desc)| {
-            Line::from(vec![
-                Span::styled(
-                    format!(" {key:<16}"),
-                    Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!("{desc} ")),
-            ])
-        })
-        .collect();
+    entries.push(("q / Esc / Ctrl-c", "quit (Esc clears a search first)"));
 
-    let popup = centered_rect(52, entries.len() as u16 + 2, area);
+    // As wide as the longest entry needs, and no wider than the screen.
+    let keys = entries
+        .iter()
+        .map(|(key, _)| key.width())
+        .max()
+        .unwrap_or(0);
+    let descs = entries
+        .iter()
+        .map(|(_, desc)| desc.width())
+        .max()
+        .unwrap_or(0);
+    let inner = (1 + keys + 2 + descs + 1).max(TITLE.width());
+    let width = (inner + 2).min(usize::from(area.width));
+    let mut lines = help_lines(&entries, keys, width.saturating_sub(2));
+    // A screen too short for them all says there's more, rather than just ending.
+    let room = usize::from(area.height).saturating_sub(2);
+    if lines.len() > room && room > 0 {
+        lines.truncate(room - 1);
+        let more = Style::new().add_modifier(Modifier::DIM);
+        lines.push(Line::from(Span::styled(
+            " … (a taller window shows the rest)",
+            more,
+        )));
+    }
+    let height = (lines.len() + 2).min(usize::from(area.height));
+    let popup = centered_rect(width as u16, height as u16, area);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" Keybindings (?/Esc to close) ")),
+        Paragraph::new(lines).block(Block::bordered().title(TITLE)),
         popup,
     );
+}
+
+const TITLE: &str = " Keybindings (?/Esc to close) ";
+
+/// The entries laid out `inner` columns wide, each key in a column `keys` wide
+/// and its description beside it, wrapped at spaces to fit what's left. Too
+/// narrow for that leaves no room worth having for the descriptions, so each
+/// one goes under its key instead.
+fn help_lines(entries: &[(&str, &str)], keys: usize, inner: usize) -> Vec<Line<'static>> {
+    let key_style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let beside = inner.saturating_sub(1 + keys + 2 + 1);
+    let stacked = beside < MIN_DESCRIPTION;
+    let mut lines = Vec::new();
+    for (key, desc) in entries {
+        let (indent, room) = if stacked {
+            lines.push(Line::from(Span::styled(format!(" {key}"), key_style)));
+            (3, inner.saturating_sub(3 + 1))
+        } else {
+            (1 + keys + 2, beside)
+        };
+        for (at, part) in wrap_words(desc, room).into_iter().enumerate() {
+            let lead = if at == 0 && !stacked {
+                let pad = keys - key.width();
+                Span::styled(format!(" {key}{}  ", " ".repeat(pad)), key_style)
+            } else {
+                Span::raw(" ".repeat(indent))
+            };
+            lines.push(Line::from(vec![lead, Span::raw(part)]));
+        }
+    }
+    lines
+}
+
+/// Fewer columns than this for the descriptions puts them under their keys.
+const MIN_DESCRIPTION: usize = 24;
+
+/// `text` broken at spaces into lines of at most `cols` columns. A word longer
+/// than that is cut, so nothing is lost off the edge.
+fn wrap_words(text: &str, cols: usize) -> Vec<String> {
+    let cols = cols.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let mut word = word.to_string();
+        while word.width() > cols {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            let cut = cut_at(&word, cols);
+            lines.push(word[..cut].to_string());
+            word = word[cut..].to_string();
+        }
+        if !line.is_empty() && line.width() + 1 + word.width() > cols {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(&word);
+    }
+    lines.push(line);
+    lines
+}
+
+/// The byte offset of the end of the first `cols` columns of `text`.
+fn cut_at(text: &str, cols: usize) -> usize {
+    let mut used = 0;
+    for (at, c) in text.char_indices() {
+        used += c.width().unwrap_or(0);
+        if used > cols {
+            return at.max(c.len_utf8().min(text.len()));
+        }
+    }
+    text.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+
+    /// The help drawn on a `width` by `height` screen with everything on, row
+    /// by row.
+    fn drawn(width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| render_help(f, f.area(), true, true, true, true, true))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    /// Every word of every description is on screen, whatever the width.
+    #[test]
+    fn nothing_is_cut_off_at_any_width() {
+        for width in [200, 90, 60, 40, 24] {
+            let rows = drawn(width, 200);
+            let squeezed = |text: &str| -> String {
+                text.chars()
+                    .filter(|c| !c.is_whitespace() && *c != '│')
+                    .collect()
+            };
+            let screen = squeezed(&rows.concat());
+            let wanted = [
+                "all vs base / all uncommitted / staged / unstaged / branch vs base",
+                "switch diff theme (github-dark/github-light)",
+                "delete the comment under the cursor (asks first)",
+                "move selection / line cursor (per focus)",
+                "open PR diff in browser",
+            ];
+            for desc in wanted {
+                assert!(
+                    screen.contains(&squeezed(desc)),
+                    "{desc:?} at {width}: {rows:#?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_box_fits_its_longest_entry_and_no_more() {
+        let rows = drawn(200, 80);
+        let top = rows.iter().find(|row| row.contains('┌')).unwrap();
+        let width = top.trim().chars().count();
+        // The key column, two spaces and the longest description, inside a margin.
+        let longest = "all vs base / all uncommitted / staged / unstaged / branch vs base";
+        assert_eq!(
+            width,
+            2 + 1 + "q / Esc / Ctrl-c".len() + 2 + longest.len() + 1
+        );
+    }
+
+    #[test]
+    fn a_short_screen_says_there_is_more() {
+        let rows = drawn(100, 12);
+        assert!(rows[10].contains('…'), "{rows:#?}");
+        assert!(rows[11].contains('└'), "{rows:#?}");
+    }
 }
