@@ -14,7 +14,7 @@
 //! in explicitly (see [`untracked_diff`]) — otherwise a brand-new file would be
 //! invisible until staged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -301,6 +301,16 @@ impl GitDiff {
         Ok(argv)
     }
 
+    /// Whether this plain view compares the working tree with a commit, where git
+    /// writes no `* Unmerged path` line (see [`add_missing_unmerged`]). The
+    /// unstaged and staged views compare with the index, and git writes one.
+    fn against_a_commit(&self) -> bool {
+        matches!(
+            self.plain_source(),
+            Some(DiffSource::All | DiffSource::AllUncommitted)
+        )
+    }
+
     /// Whether this command's output should have untracked files folded in.
     fn includes_untracked(&self) -> bool {
         self.plain_source()
@@ -315,7 +325,11 @@ impl GitDiff {
         if self.includes_untracked() {
             // `git diff [HEAD]` fails on an unborn branch (no commits yet); treat
             // that as "no tracked changes" so untracked files still surface.
-            Ok(tracked.unwrap_or_default() + &untracked_diff(here))
+            let mut tracked = tracked.unwrap_or_default();
+            if self.against_a_commit() {
+                tracked = add_missing_unmerged(here, tracked, None);
+            }
+            Ok(tracked + &untracked_diff(here))
         } else {
             tracked
         }
@@ -335,6 +349,7 @@ impl GitDiff {
         argv.push("--".to_string());
         argv.push(literal_pathspec(path));
         match run_git(&argv).map(|text| describe_unmerged(here, text)) {
+            Ok(text) if self.against_a_commit() => Ok(add_missing_unmerged(here, text, Some(path))),
             Ok(text) => Ok(text),
             // An unborn branch, as in `load`.
             Err(_) if self.includes_untracked() => Ok(String::new()),
@@ -585,6 +600,60 @@ fn describe_unmerged(dir: &Path, text: String) -> String {
         }
     }
     out
+}
+
+/// `text` with an unmerged path added, as git writes one, for each path the index
+/// holds unmerged that the diff doesn't mention (only `only`, if given). Diffed
+/// against a commit, as `git diff HEAD` is, a file one side deleted and the other
+/// modified can match the commit and write nothing at all, so it would be missing.
+/// The index is only read while a merge, cherry-pick, revert or rebase is under
+/// way, which is the only time such a path can be there.
+fn add_missing_unmerged(dir: &Path, mut text: String, only: Option<&str>) -> String {
+    if !resolving(dir) {
+        return text;
+    }
+    let stages = unmerged_stages(dir);
+    let files = crate::diff::parse(&text);
+    let sides = files.iter().flat_map(|f| [&f.old_path, &f.new_path]);
+    let shown: HashSet<&str> = sides.flatten().map(String::as_str).collect();
+    let mut missing: Vec<(&String, &u8)> = stages
+        .iter()
+        .filter(|(name, _)| only.is_none_or(|only| only == name.as_str()))
+        // git writes the name unquoted, so one with a newline can't be written.
+        .filter(|(name, _)| !shown.contains(name.as_str()) && !name.contains('\n'))
+        .collect();
+    missing.sort();
+    for (name, &stages) in missing {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&format!("* Unmerged path {name}\n"));
+        if let Some(how) = conflict(stages) {
+            text.push_str(&format!("* Conflict: {how}\n"));
+        }
+    }
+    text
+}
+
+/// Whether git in `dir` is in the middle of something that can leave paths
+/// unmerged: one `rev-parse`, against reading the whole index.
+fn resolving(dir: &Path) -> bool {
+    const MARKERS: [&str; 5] = [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "rebase-merge",
+        "rebase-apply",
+    ];
+    let mut args = vec!["rev-parse"];
+    for marker in MARKERS {
+        args.extend(["--git-path", marker]);
+    }
+    let Some(paths) = git::raw(dir, args) else {
+        return false;
+    };
+    let paths = String::from_utf8_lossy(&paths);
+    paths.lines().any(|path| dir.join(path).exists())
 }
 
 /// Which index stages each unmerged path has, as bits 1 (base), 2 (ours) and 3
@@ -913,10 +982,9 @@ mod tests {
         );
     }
 
-    /// Each way a merge can leave a path that `git diff` can only call unmerged
-    /// is named, as `git status` names it.
-    #[test]
-    fn unmerged_paths_say_how_the_merge_left_them() {
+    /// A repository stopped in a merge with every kind of unmerged path, and an
+    /// empty `sub` directory to run from.
+    fn conflicted() -> crate::testing::Repo {
         let repo = crate::testing::Repo::new();
         let files = ["model", "dus", "ddel", "rn"];
         for name in files {
@@ -934,8 +1002,57 @@ mod tests {
         repo.write("model.txt", "1\n2\n3\nours\n");
         repo.commit("aa.txt", "ours\n");
         assert!(!repo.run(&["merge", "other"]).status.success());
-
         std::fs::create_dir_all(repo.0.join("sub")).unwrap();
+        repo
+    }
+
+    /// Diffed against `HEAD`, git writes nothing for an unmerged path that matches
+    /// it, so those are added; ones the diff has stay as git wrote them.
+    #[test]
+    fn unmerged_paths_a_diff_against_head_leaves_out_are_added() {
+        let repo = conflicted();
+        let sub = repo.0.join("sub");
+        let text = String::from_utf8(repo.run(&["diff", "HEAD"]).stdout).unwrap();
+        let added = add_missing_unmerged(&sub, text.clone(), None);
+        assert!(added.starts_with(&text), "git's own text comes first");
+        let files = crate::diff::parse(&added);
+        let got: Vec<_> = files
+            .iter()
+            .map(|f| (f.path(), f.status.sigil(), crate::diff::notes(f).join(",")))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("aa.txt", 'M', String::new()),
+                ("dus.txt", 'A', String::new()),
+                ("rn_theirs.txt", 'A', String::new()),
+                ("ddel.txt", 'U', "both deleted".to_string()),
+                ("model.txt", 'U', "deleted by them".to_string()),
+                ("rn_ours.txt", 'U', "added by us".to_string()),
+            ]
+        );
+        // One file, as `load_file` asks for it.
+        let one = add_missing_unmerged(&sub, String::new(), Some("model.txt"));
+        assert_eq!(
+            one,
+            "* Unmerged path model.txt\n* Conflict: deleted by them\n"
+        );
+        assert_eq!(
+            add_missing_unmerged(&sub, text.clone(), Some("aa.txt")),
+            text
+        );
+
+        // Once the merge is given up, nothing is read or added.
+        repo.git(&["merge", "--abort"]);
+        assert!(!resolving(&sub));
+        assert_eq!(add_missing_unmerged(&sub, text.clone(), None), text);
+    }
+
+    /// Each way a merge can leave a path that `git diff` can only call unmerged
+    /// is named, as `git status` names it.
+    #[test]
+    fn unmerged_paths_say_how_the_merge_left_them() {
+        let repo = conflicted();
         let text = String::from_utf8(repo.run(&["diff", "--staged"]).stdout).unwrap();
         let described = describe_unmerged(&repo.0.join("sub"), text);
         let files = crate::diff::parse(&described);
