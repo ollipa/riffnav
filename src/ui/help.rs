@@ -86,16 +86,20 @@ pub(super) fn render_help(
         .unwrap_or(0);
     let inner = (1 + keys + 2 + descs + 1).max(TITLE.width());
     let width = (inner + 2).min(usize::from(area.width));
-    let mut lines = help_lines(&entries, keys, width.saturating_sub(2));
+    let inner_width = width.saturating_sub(2);
+    let mut lines = help_lines(&entries, keys, inner_width);
     // A screen too short for them all says there's more, rather than just ending.
     let room = usize::from(area.height).saturating_sub(2);
     if lines.len() > room && room > 0 {
         lines.truncate(room - 1);
         let more = Style::new().add_modifier(Modifier::DIM);
-        lines.push(Line::from(Span::styled(
-            " … (a taller window shows the rest)",
-            more,
-        )));
+        let said = " … (a taller window shows the rest)";
+        let said = if said.width() <= inner_width {
+            said
+        } else {
+            " …"
+        };
+        lines.push(Line::from(Span::styled(said, more)));
     }
     let height = (lines.len() + 2).min(usize::from(area.height));
     let popup = centered_rect(width as u16, height as u16, area);
@@ -242,8 +246,10 @@ mod tests {
 
     #[test]
     fn a_short_screen_says_there_is_more() {
-        let rows = drawn(100, 12);
-        assert!(rows[10].contains('…'), "{rows:#?}");
-        assert!(rows[11].contains('└'), "{rows:#?}");
+        for width in [100, 30] {
+            let rows = drawn(width, 12);
+            assert!(rows[10].contains('…'), "{rows:#?}");
+            assert!(rows[11].contains('└'), "{rows:#?}");
+        }
     }
 }
