@@ -692,7 +692,7 @@ fn claim(
     corpus: &Corpus,
     files: &[FileDiff],
 ) -> Vec<Block> {
-    candidates.sort_by_key(|block| {
+    candidates.sort_by_cached_key(|block| {
         let origin = &corpus.origins[corpus.stretches[block.stretch].origin];
         let line = corpus.stretches[block.stretch].lines[block.at].number;
         let (hidden, near) = distance(block, runs, corpus, files);
