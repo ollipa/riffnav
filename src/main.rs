@@ -1,3 +1,13 @@
+/// `println!` that returns the write's result, so a reader that stops reading,
+/// as `riffnav --list | head` does, ends the program quietly instead of
+/// panicking. See [`quiet_on_closed_pipe`].
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        writeln!(std::io::stdout(), $($arg)*)
+    }};
+}
+
 mod app;
 mod autodiff;
 mod cli;
@@ -20,7 +30,7 @@ mod theme;
 mod tree;
 mod ui;
 
-use std::io::{IsTerminal, Read};
+use std::io::{ErrorKind, IsTerminal, Read};
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
@@ -117,6 +127,27 @@ fn read_stdin() -> Result<Input> {
 }
 
 fn main() -> Result<()> {
+    quiet_on_closed_pipe(run())
+}
+
+/// `result`, but a write to a pipe its reader has closed counts as done, as it
+/// does for any command-line tool whose output was cut short on purpose.
+fn quiet_on_closed_pipe(result: Result<()>) -> Result<()> {
+    match result {
+        Err(e)
+            if e.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == ErrorKind::BrokenPipe)
+            }) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+fn run() -> Result<()> {
     let cli = cli::Cli::parse();
     let config = config::Config::load(cli.config.as_deref())?;
 
@@ -142,7 +173,7 @@ fn main() -> Result<()> {
         // No subcommand and nothing piped in: show what can be asked for.
         None if std::io::stdin().is_terminal() => {
             cli::Cli::command().print_help()?;
-            println!();
+            say!()?;
             std::process::exit(2);
         }
         None => read_stdin()?,
@@ -151,8 +182,7 @@ fn main() -> Result<()> {
     // `--list` is a debug helper: print the parsed files for whatever source was
     // selected (piped diff, or the git command that was run) and exit.
     if cli.list {
-        cli::print_list(&diff::parse(&input.text));
-        return Ok(());
+        return cli::print_list(&diff::parse(&input.text));
     }
 
     let files = diff::parse(&input.text);
@@ -195,6 +225,17 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use autodiff::View;
+
+    /// A reader that stopped reading ends the program quietly; any other error,
+    /// even one about writing, is still reported.
+    #[test]
+    fn only_a_closed_pipe_is_quiet() {
+        let io = |kind| std::io::Error::from(kind);
+        let closed = anyhow::Error::from(io(ErrorKind::BrokenPipe)).context("listing");
+        assert!(quiet_on_closed_pipe(Err(closed)).is_ok());
+        assert!(quiet_on_closed_pipe(Err(io(ErrorKind::PermissionDenied).into())).is_err());
+        assert!(quiet_on_closed_pipe(Err(anyhow::anyhow!("no repo"))).is_err());
+    }
 
     #[test]
     fn an_empty_merge_says_why_and_how_to_see_it() {

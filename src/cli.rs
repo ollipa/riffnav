@@ -237,17 +237,18 @@ pub struct AddArgs {
 }
 
 /// `--list` debug output: the parsed files with status and ± counts.
-pub fn print_list(files: &[FileDiff]) {
-    println!("{} file(s):", files.len());
+pub fn print_list(files: &[FileDiff]) -> anyhow::Result<()> {
+    say!("{} file(s):", files.len())?;
     for f in files {
-        println!(
+        say!(
             "  {} {:<48} +{} -{}",
             f.status.sigil(),
             shown(f.path()),
             f.additions,
             f.deletions
-        );
+        )?;
     }
+    Ok(())
 }
 
 #[cfg(test)]

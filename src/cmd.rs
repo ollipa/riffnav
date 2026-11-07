@@ -106,7 +106,7 @@ fn add(args: AddArgs) -> Result<()> {
         let id = store.add(build(&resolved, body, args.author, args.reply_to));
         Ok((id, resolved))
     })?;
-    println!("#{id}  {}:{}", shown(&resolved.file), resolved.line);
+    say!("#{id}  {}:{}", shown(&resolved.file), resolved.line)?;
     Ok(())
 }
 
@@ -181,7 +181,7 @@ fn apply(stdin: bool) -> Result<()> {
             .collect::<Vec<_>>())
     })?;
     for (id, r) in added {
-        println!("#{id}  {}:{}", shown(&r.file), r.line);
+        say!("#{id}  {}:{}", shown(&r.file), r.line)?;
     }
     Ok(())
 }
@@ -196,11 +196,11 @@ fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> 
         .collect();
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&selected)?);
+        say!("{}", serde_json::to_string_pretty(&selected)?)?;
         return Ok(());
     }
     if selected.is_empty() {
-        println!("No comments.");
+        say!("No comments.")?;
         return Ok(());
     }
     for c in selected {
@@ -217,16 +217,16 @@ fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> 
                 reply.push_str(&format!(" (stored at {}:{})", shown(&c.file), c.line));
             }
         }
-        println!(
+        say!(
             "#{}  {}:{} ({}){reply}  — {}",
             c.id,
             shown(&root.file),
             root.line,
             root.side.as_str(),
             c.author
-        );
+        )?;
         for line in c.body.lines() {
-            println!("    {line}");
+            say!("    {line}")?;
         }
     }
     Ok(())
@@ -237,7 +237,7 @@ fn remove(id: &str) -> Result<()> {
     match write(&mut store, |store| Ok(store.remove(id)))? {
         0 => bail!("no comment with id {id} (see `riffnav comment list`)"),
         n => {
-            println!("Removed {n} comment(s).");
+            say!("Removed {n} comment(s).")?;
             Ok(())
         }
     }
@@ -253,19 +253,19 @@ fn clear(file: Option<String>, yes: bool) -> Result<()> {
     let n = write(&mut store, |store| {
         Ok(store.remove_where(|store, c| file.as_deref().is_none_or(|f| in_file(store, c, f))))
     })?;
-    println!("Removed {n} comment(s).");
+    say!("Removed {n} comment(s).")?;
     Ok(())
 }
 
 fn context(json: bool) -> Result<()> {
     let session = require_session()?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&session)?);
+        say!("{}", serde_json::to_string_pretty(&session)?)?;
         return Ok(());
     }
-    println!("{} ({} files)", session.source, session.files.len());
+    say!("{} ({} files)", session.source, session.files.len())?;
     for f in &session.files {
-        println!(
+        say!(
             "  {} {}  +{} -{}   new: {}   old: {}",
             f.status,
             shown(&f.path),
@@ -273,14 +273,15 @@ fn context(json: bool) -> Result<()> {
             f.deletions,
             f.ranges(Side::New),
             f.ranges(Side::Old),
-        );
+        )?;
     }
     Ok(())
 }
 
 fn skill(as_path: bool) -> Result<()> {
     if !as_path {
-        print!("{SKILL}");
+        use std::io::Write as _;
+        std::io::stdout().write_all(SKILL.as_bytes())?;
         return Ok(());
     }
     let dir = state::dir("skill").context("no state directory to write the skill into")?;
@@ -288,7 +289,7 @@ fn skill(as_path: bool) -> Result<()> {
     if !state::write_atomic(&path, SKILL.as_bytes()) {
         bail!("couldn't write the skill to {}", path.display());
     }
-    println!("{}", path.display());
+    say!("{}", path.display())?;
     Ok(())
 }
 
