@@ -26,6 +26,10 @@ use crate::git;
 /// `diff.noprefix` say. Otherwise paths keep a stray `i/`/`w/` prefix and `o` opens nothing.
 const PREFIX_ARGS: [&str; 2] = ["--src-prefix=a/", "--dst-prefix=b/"];
 
+/// Ask for git's own diff, never a `diff.external` tool's, which isn't a unified diff
+/// the parser can read.
+const NO_EXT_DIFF: &str = "--no-ext-diff";
+
 /// Have git quote every name that isn't ASCII, whatever `core.quotePath` says, as a
 /// name that isn't UTF-8 only reaches us intact in its quoted form.
 const QUOTE_ARGS: [&str; 2] = ["-c", "core.quotePath=on"];
@@ -279,7 +283,7 @@ impl GitDiff {
         let mut argv: Vec<String> = ["--no-pager", "-c", "color.ui=never"]
             .into_iter()
             .chain(QUOTE_ARGS)
-            .chain([self.sub()])
+            .chain([self.sub(), NO_EXT_DIFF])
             .chain(PREFIX_ARGS)
             .map(str::to_string)
             .collect();
@@ -507,7 +511,7 @@ fn diff_against_devnull(path: &OsStr) -> Option<String> {
 fn devnull_args(path: &OsStr) -> Vec<&OsStr> {
     let mut args = ["-c", "color.ui=never"].to_vec();
     args.extend(QUOTE_ARGS);
-    args.extend(["diff", "--no-index"]);
+    args.extend(["diff", "--no-index", NO_EXT_DIFF]);
     args.extend(PREFIX_ARGS);
     args.extend(["--", "/dev/null"]);
     let mut args: Vec<&OsStr> = args.into_iter().map(OsStr::new).collect();
@@ -540,6 +544,7 @@ mod tests {
             "-c",
             "core.quotePath=on",
             "diff",
+            "--no-ext-diff",
         ];
         let pre = ["--src-prefix=a/", "--dst-prefix=b/"];
         let expect = |tail: &[&str]| -> Vec<String> {
@@ -721,5 +726,21 @@ mod tests {
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(text.contains("+one"), "{text}");
         assert!(!text.contains('\x1b'), "{text:?}");
+    }
+
+    /// A `diff.external` tool's output isn't a unified diff.
+    #[test]
+    fn an_untracked_file_is_diffed_by_git_itself() {
+        let dir = crate::testing::TempDir::new("ext-diff");
+        let file = dir.join("new.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let out = Command::new("git")
+            .args(["-c", "diff.external=echo external"])
+            .args(devnull_args(file.as_os_str()))
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("+one"), "{text}");
+        assert!(!text.contains("external"), "{text}");
     }
 }
