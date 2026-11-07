@@ -37,8 +37,6 @@ fn parse_one(raw: &str) -> FileDiff {
     let mut status = FileStatus::Modified;
     let mut old_path = None;
     let mut new_path = None;
-    let mut additions = 0;
-    let mut deletions = 0;
     let mut in_hunk = false;
     // Track whether each file header was present so the `diff --git` fallback
     // doesn't overwrite an explicit `/dev/null` (added/deleted) side.
@@ -52,12 +50,6 @@ fn parse_one(raw: &str) -> FileDiff {
             continue;
         }
         if in_hunk {
-            // Within a hunk, a leading '+'/'-' marks an added/removed line.
-            match line.as_bytes().first() {
-                Some(b'+') => additions += 1,
-                Some(b'-') => deletions += 1,
-                _ => {}
-            }
             continue;
         }
 
@@ -107,10 +99,10 @@ fn parse_one(raw: &str) -> FileDiff {
         }
     }
 
-    // The marker columns can't be read without knowing where a combined hunk ends.
-    if combined {
-        (additions, deletions) = count_changes(raw);
-    }
+    // Counted by the hunks' own lengths: text after the last one, such as a
+    // `format-patch` signature, isn't part of the diff, and a combined hunk's
+    // marker columns can't be read without knowing where it ends.
+    let (additions, deletions) = count_changes(raw);
 
     FileDiff {
         old_path,
@@ -356,10 +348,23 @@ mod tests {
         assert_eq!(files[1].path(), "b.rs");
     }
 
+    /// `git format-patch` ends the last file with a `-- ` signature line, and
+    /// `git log -p` can put a subject starting with `-` or `+` between commits.
+    #[test]
+    fn text_after_the_last_hunk_is_not_counted() {
+        let patch = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n-- \n2.43.0\n";
+        let f = &parse(patch)[0];
+        assert_eq!((f.additions, f.deletions), (1, 1));
+        let log = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n\
+                   commit 1\n\n    -fix the thing\n+++ not a header\n";
+        let f = &parse(log)[0];
+        assert_eq!((f.additions, f.deletions), (1, 1));
+    }
+
     #[test]
     fn counts_additions_and_deletions() {
         let diff =
-            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n ctx\n-gone\n+added\n+more\n";
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,3 @@\n ctx\n-gone\n+added\n+more\n";
         let f = &parse(diff)[0];
         assert_eq!(f.status, FileStatus::Modified);
         assert_eq!(f.additions, 2);
