@@ -99,6 +99,7 @@ mod tests {
     use crate::diff::testing::bare;
     use crate::diff::{FileDiff, FileStatus};
     use crate::icons::IconStyle;
+    use crate::render::Key;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -343,9 +344,12 @@ mod tests {
         let out = render(&mut app, width, height);
 
         let line = app.selected_file().and_then(|idx| {
-            let r = app
-                .cache
-                .get(idx, width - app.tree_width, false, app.diff_theme)?;
+            let r = app.cache.get(Key {
+                file: idx,
+                width: width - app.tree_width,
+                side_by_side: false,
+                theme: app.diff_theme,
+            })?;
             Some(r.text.lines[app.diff_cursor].to_string())
         });
         assert!(
@@ -468,12 +472,12 @@ mod tests {
         app.jump_comment(true);
         let render = app
             .cache
-            .get(
-                app.selected_file().unwrap(),
-                width - app.tree_width,
-                false,
-                app.diff_theme,
-            )
+            .get(Key {
+                file: app.selected_file().unwrap(),
+                width: width - app.tree_width,
+                side_by_side: false,
+                theme: app.diff_theme,
+            })
             .expect("seeded render");
         let block = render.comment_rows.first().expect("the note is spliced in");
         let (top, bottom) = (
@@ -503,7 +507,12 @@ mod tests {
         let idx = app.selected_file().unwrap();
         let starts: Vec<usize> = app
             .cache
-            .get(idx, width - app.tree_width, false, app.diff_theme)
+            .get(Key {
+                file: idx,
+                width: width - app.tree_width,
+                side_by_side: false,
+                theme: app.diff_theme,
+            })
             .expect("seeded render")
             .comment_rows
             .iter()

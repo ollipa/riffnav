@@ -42,11 +42,11 @@ const BIG_BYTES: usize = 1 << 20;
 const STOP_GRACE: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct Key {
-    pub(super) file: usize,
-    pub(super) width: u16,
-    pub(super) side_by_side: bool,
-    pub(super) theme: DiffTheme,
+pub struct Key {
+    pub file: usize,
+    pub width: u16,
+    pub side_by_side: bool,
+    pub theme: DiffTheme,
 }
 
 /// One cached file render.
@@ -562,20 +562,10 @@ impl RenderCache {
 
     /// The scroll that keeps the view on the same code, if the render of what's on
     /// screen has just had its copies' notes put in.
-    pub fn kept_scroll(
-        &mut self,
-        file: usize,
-        width: u16,
-        side_by_side: bool,
-        theme: DiffTheme,
-        scroll: u32,
-    ) -> Option<u32> {
+    pub fn kept_scroll(&mut self, wanted: Key, scroll: u32) -> Option<u32> {
         let (key, old) = self.replaced.take()?;
-        let kept = (key.file == file
-            && key.width == width
-            && key.side_by_side == side_by_side
-            && key.theme == theme)
-            .then(|| self.entries.get(&key)?.rendered.scroll_like(&old, scroll));
+        let kept =
+            (key == wanted).then(|| self.entries.get(&key)?.rendered.scroll_like(&old, scroll));
         self.jobs.discard(old);
         kept.flatten()
     }
@@ -732,55 +722,24 @@ impl RenderCache {
         }
     }
 
-    pub fn get(
-        &self,
-        file: usize,
-        width: u16,
-        side_by_side: bool,
-        theme: DiffTheme,
-    ) -> Option<&Rendered> {
-        self.entry(file, width, side_by_side, theme)
-            .map(|e| e.rendered.as_ref())
+    pub fn get(&self, key: Key) -> Option<&Rendered> {
+        self.entry(key).map(|e| e.rendered.as_ref())
     }
 
     /// The copies behind what [`Self::get`] returns, which it can trail while its
     /// new render is being made. Its lines change when these do.
-    pub fn copies_rev(
-        &self,
-        file: usize,
-        width: u16,
-        side_by_side: bool,
-        theme: DiffTheme,
-    ) -> Option<u64> {
-        self.entry(file, width, side_by_side, theme)
-            .map(|e| e.copies_rev)
+    pub fn copies_rev(&self, key: Key) -> Option<u64> {
+        self.entry(key).map(|e| e.copies_rev)
     }
 
     /// The comment revision behind what [`Self::get`] returns. The render on show
     /// can trail the store's while the new one is being spliced.
-    pub fn rev(
-        &self,
-        file: usize,
-        width: u16,
-        side_by_side: bool,
-        theme: DiffTheme,
-    ) -> Option<u64> {
-        self.entry(file, width, side_by_side, theme).map(|e| e.rev)
+    pub fn rev(&self, key: Key) -> Option<u64> {
+        self.entry(key).map(|e| e.rev)
     }
 
-    fn entry(
-        &self,
-        file: usize,
-        width: u16,
-        side_by_side: bool,
-        theme: DiffTheme,
-    ) -> Option<&Entry> {
-        self.entries.get(&Key {
-            file,
-            width,
-            side_by_side,
-            theme,
-        })
+    fn entry(&self, key: Key) -> Option<&Entry> {
+        self.entries.get(&key)
     }
 
     /// Drop the renders `doomed` picks.
@@ -834,7 +793,12 @@ impl RenderCache {
 
     pub fn is_preview(&self, file: usize, width: u16, side_by_side: bool) -> bool {
         let theme = DiffTheme::GitHubDark;
-        let entry = self.entry(file, width, side_by_side, theme);
+        let entry = self.entry(Key {
+            file,
+            width,
+            side_by_side,
+            theme,
+        });
         entry.is_some_and(|e| e.preview)
     }
 
@@ -996,11 +960,11 @@ mod tests {
     }
 
     fn cached(cache: &RenderCache, file: usize) -> bool {
-        cache.get(file, WIDTH, false, GitHubDark).is_some()
+        cache.get(key(file, WIDTH, false, GitHubDark)).is_some()
     }
 
     fn says(cache: &RenderCache, file: usize, text: &str) -> bool {
-        let rendered = cache.get(file, WIDTH, false, GitHubDark).unwrap();
+        let rendered = cache.get(key(file, WIDTH, false, GitHubDark)).unwrap();
         rendered
             .text
             .lines
@@ -1054,7 +1018,7 @@ mod tests {
 
     /// The colors of the `let x = 1;` row, which are all one if it's a comment.
     fn colors_of_the_edit(cache: &RenderCache, width: u16, theme: DiffTheme) -> usize {
-        let rendered = cache.get(0, width, false, theme).unwrap();
+        let rendered = cache.get(key(0, width, false, theme)).unwrap();
         let line = rendered.text.lines.iter().find(|line| {
             let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             text.contains("let x")
@@ -1121,6 +1085,15 @@ mod tests {
         assert!(colors_of_the_edit(&cache, WIDTH, GitHubDark) > 1);
     }
 
+    fn key(file: usize, width: u16, side_by_side: bool, theme: DiffTheme) -> Key {
+        Key {
+            file,
+            width,
+            side_by_side,
+            theme,
+        }
+    }
+
     fn rust(path: &str, body: &str) -> FileDiff {
         one(&hunk(path, body))
     }
@@ -1179,7 +1152,7 @@ mod tests {
     }
 
     fn all_text(cache: &RenderCache, file: usize) -> String {
-        let render = cache.get(file, WIDTH, false, GitHubDark).unwrap();
+        let render = cache.get(key(file, WIDTH, false, GitHubDark)).unwrap();
         let lines = render.text.lines.iter();
         lines
             .map(|l| {
@@ -1372,10 +1345,10 @@ mod tests {
         gate.open();
         cache.finish();
         assert!(!cached(&cache, 0));
-        assert!(cache.get(0, WIDTH + 2, false, GitHubDark).is_none());
+        assert!(cache.get(key(0, WIDTH + 2, false, GitHubDark)).is_none());
         assert!(
             cache
-                .get(0, WIDTH + 2, false, DiffTheme::GitHubLight)
+                .get(key(0, WIDTH + 2, false, DiffTheme::GitHubLight))
                 .is_some()
         );
     }
@@ -1410,7 +1383,7 @@ mod tests {
         cache.ensure(&with_comments(&diff, &notes, 2));
         cache.finish();
         assert!(says(&cache, 0, "arrived late"));
-        assert_eq!(cache.rev(0, WIDTH, false, GitHubDark), Some(2));
+        assert_eq!(cache.rev(key(0, WIDTH, false, GitHubDark)), Some(2));
         assert_eq!(started(&mut cache).len(), 1, "one render, and a splice");
     }
 
@@ -1442,7 +1415,7 @@ mod tests {
         let diff = file("a.rs");
         cache.ensure(&with_comments(&diff, &[], 1));
         let before = cache
-            .get(0, WIDTH, false, GitHubDark)
+            .get(key(0, WIDTH, false, GitHubDark))
             .unwrap()
             .text
             .lines
@@ -1450,13 +1423,13 @@ mod tests {
         cache.ensure(&with_comments(&diff, &[], 2));
         assert!(!cache.busy());
         let after = cache
-            .get(0, WIDTH, false, GitHubDark)
+            .get(key(0, WIDTH, false, GitHubDark))
             .unwrap()
             .text
             .lines
             .as_ptr();
         assert_eq!(before, after);
-        assert_eq!(cache.rev(0, WIDTH, false, GitHubDark), Some(2));
+        assert_eq!(cache.rev(key(0, WIDTH, false, GitHubDark)), Some(2));
     }
 
     #[test]

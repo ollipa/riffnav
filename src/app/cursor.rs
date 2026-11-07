@@ -1,11 +1,16 @@
 //! The line cursor and scrolling the diff.
 
 use super::{App, CURSOR_PADDING, Focus};
-use crate::theme::DiffTheme;
+use crate::render::Key;
 
 /// What a render looks like, as far as the line cursor's index into it goes. When
 /// this changes, the index is stale.
-pub(super) type CursorToken = (usize, u16, bool, DiffTheme, u64, u64);
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct CursorToken {
+    key: Key,
+    comment_rev: u64,
+    copies_rev: u64,
+}
 
 impl App {
     pub(super) fn scroll_diff(&mut self, delta: i32) {
@@ -23,29 +28,28 @@ impl App {
 
     /// File `idx`'s render as it would be shown now, if it's already cached.
     pub(super) fn render_of(&self, idx: usize) -> Option<&crate::render::Rendered> {
-        self.cache.get(
-            idx,
-            self.last_width,
-            self.side_by_side_for(idx),
-            self.diff_theme,
-        )
+        self.cache.get(self.render_key(idx))
     }
 
     /// What file `idx`'s render looks like now, to hold a cursor's index against.
     /// Comments count once they're in the render on show.
     pub(super) fn render_token(&self, idx: usize) -> CursorToken {
-        let (width, side_by_side, theme) =
-            (self.last_width, self.side_by_side_for(idx), self.diff_theme);
-        let rev = self.cache.rev(idx, width, side_by_side, theme);
-        let copies = self.cache.copies_rev(idx, width, side_by_side, theme);
-        (
-            idx,
-            width,
-            side_by_side,
-            theme,
-            rev.unwrap_or(self.comment_rev),
-            copies.unwrap_or(0),
-        )
+        let key = self.render_key(idx);
+        CursorToken {
+            key,
+            comment_rev: self.cache.rev(key).unwrap_or(self.comment_rev),
+            copies_rev: self.cache.copies_rev(key).unwrap_or(0),
+        }
+    }
+
+    /// The key file `idx`'s render is cached under as it would be shown now.
+    pub(super) fn render_key(&self, idx: usize) -> Key {
+        Key {
+            file: idx,
+            width: self.last_width,
+            side_by_side: self.side_by_side_for(idx),
+            theme: self.diff_theme,
+        }
     }
 
     /// Re-resolve the cursor's line index after the render it pointed into was

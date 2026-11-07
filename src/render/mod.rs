@@ -31,7 +31,7 @@ use std::time::Duration;
 #[cfg(test)]
 use ratatui::text::Text;
 
-pub use self::cache::{Prefetch, RenderCache, Request};
+pub use self::cache::{Key, Prefetch, RenderCache, Request};
 pub use self::copies::Jump;
 pub use self::highlight::warm_up;
 #[cfg(test)]

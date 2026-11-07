@@ -544,10 +544,8 @@ impl App {
         let Some(file) = self.selected_file() else {
             return;
         };
-        let (width, side_by_side) = (self.last_width, self.side_by_side_for(file));
-        let scroll = self.diff_scroll;
-        let kept = (self.cache).kept_scroll(file, width, side_by_side, self.diff_theme, scroll);
-        if let Some(scroll) = kept {
+        let key = self.render_key(file);
+        if let Some(scroll) = self.cache.kept_scroll(key, self.diff_scroll) {
             self.diff_scroll = scroll;
         }
     }

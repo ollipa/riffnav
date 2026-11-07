@@ -5,6 +5,7 @@ use ratatui::text::Text;
 use ratatui::widgets::Paragraph;
 
 use crate::app::{App, Focus};
+use crate::render::Key;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
     // Record the viewport height so PageUp/PageDown can jump by a screenful.
@@ -29,16 +30,19 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
     // cheap. The returned paragraph owns its lines, so the cache borrow ends here
     // and we can write the clamped scroll back below.
     let marks = app.search_marks(idx, area.width);
-    let built = app
-        .cache
-        .get(idx, diff_width, side_by_side, app.diff_theme)
-        .map(|r| {
-            let scroll = app
-                .diff_scroll
-                .min(r.height.saturating_sub(area.height.into()));
-            let shown = r.visible(scroll, area.width, area.height, marks.as_ref());
-            (shown, scroll)
-        });
+    let key = Key {
+        file: idx,
+        width: diff_width,
+        side_by_side,
+        theme: app.diff_theme,
+    };
+    let built = app.cache.get(key).map(|r| {
+        let scroll = app
+            .diff_scroll
+            .min(r.height.saturating_sub(area.height.into()));
+        let shown = r.visible(scroll, area.width, area.height, marks.as_ref());
+        (shown, scroll)
+    });
 
     let Some((paragraph, scroll)) = built else {
         placeholder(frame, area, "  rendering…");
@@ -67,10 +71,13 @@ fn highlight_cursor(
     side_by_side: bool,
     scroll: u32,
 ) {
-    let Some(render) = app
-        .cache
-        .get(idx, app.last_diff_width(), side_by_side, app.diff_theme)
-    else {
+    let key = Key {
+        file: idx,
+        width: app.last_diff_width(),
+        side_by_side,
+        theme: app.diff_theme,
+    };
+    let Some(render) = app.cache.get(key) else {
         return;
     };
     // A wrapped line covers several rows, so highlight the whole run.
