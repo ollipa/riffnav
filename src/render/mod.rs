@@ -19,7 +19,7 @@ mod starts;
 mod tokens;
 mod words;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::mem::size_of;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -29,6 +29,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use ratatui::buffer::CellWidth;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use twox_hash::XxHash3_128;
@@ -142,7 +144,7 @@ pub struct Rendered {
     /// Scrollable height in rows at the keyed `width`: the exact line count for
     /// side-by-side (each panel is wrapped when it's drawn), or the wrapped row
     /// count for unified (long lines are left whole for the viewer to wrap).
-    pub height: u16,
+    pub height: u32,
     /// Unified only: cumulative wrapped-row offset before each source line, with
     /// a trailing total — `row_offsets[i]` is the first screen row of line `i`.
     /// `None` for side-by-side, where lines map one-to-one to rows.
@@ -238,7 +240,7 @@ impl Rendered {
 
     /// Where to scroll this render to show what `old` shows at `scroll`, going by
     /// the first numbered line in view. The top of the file stays the top.
-    fn scroll_like(&self, old: &Rendered, scroll: u16) -> Option<u16> {
+    fn scroll_like(&self, old: &Rendered, scroll: u32) -> Option<u32> {
         if scroll == 0 {
             return None;
         }
@@ -246,27 +248,24 @@ impl Rendered {
         let (line, anchor) =
             (top..old.lines()).find_map(|line| Some((line, old.line_map.get(line).anchor()?)))?;
         let here = self.row_of(self.line_map.row_for(anchor)?);
-        let above = i32::from(old.row_of(line)) - i32::from(scroll);
-        Some((i32::from(here) - above).clamp(0, i32::from(u16::MAX)) as u16)
+        let above = i64::from(old.row_of(line)) - i64::from(scroll);
+        Some((i64::from(here) - above).clamp(0, i64::from(u32::MAX)) as u32)
     }
 
     /// The first screen row of line `line`, for scrolling a cursor into view.
-    pub fn row_of(&self, line: usize) -> u16 {
+    pub fn row_of(&self, line: usize) -> u32 {
         match &self.row_offsets {
-            None => line.min(u16::MAX as usize) as u16,
-            Some(offsets) => offsets
-                .get(line)
-                .or(offsets.last())
-                .map_or(0, |r| (*r).min(u16::MAX as u32) as u16),
+            None => line.min(u32::MAX as usize) as u32,
+            Some(offsets) => offsets.get(line).or(offsets.last()).copied().unwrap_or(0),
         }
     }
 
     /// The line occupying screen row `row` — the inverse of [`Self::row_of`],
     /// used to park the cursor after a page jump.
-    pub fn line_at(&self, row: u16) -> usize {
+    pub fn line_at(&self, row: u32) -> usize {
         match &self.row_offsets {
             None => (row as usize).min(self.text.lines.len().saturating_sub(1)),
-            Some(offsets) => match offsets.binary_search(&u32::from(row)) {
+            Some(offsets) => match offsets.binary_search(&row) {
                 Ok(i) => i,
                 Err(i) => i.saturating_sub(1),
             }
@@ -281,7 +280,7 @@ impl Rendered {
 
     /// The screen row `hit` starts on: lower than [`Self::row_of`] its line when
     /// the line wraps, as a long one will. `width` is the width of the render.
-    pub fn row_of_hit(&self, hit: Hit, width: u16) -> Option<u16> {
+    pub fn row_of_hit(&self, hit: Hit, width: u16) -> Option<u32> {
         let first = self.row_start(hit.row)?.line;
         match &self.row_offsets {
             // Side-by-side wrapped the row itself, onto lines of its own. Comments
@@ -318,19 +317,25 @@ impl Rendered {
                     .wrap(WRAP)
                     .line_count(width)
                     .max(1);
-                let below = (rows - 1).min(u16::MAX as usize) as u16;
+                let below = (rows - 1).min(u32::MAX as usize) as u32;
                 Some(self.row_of(first).saturating_add(below))
             }
         }
     }
 
     /// A `Paragraph` showing just the rows visible at `scroll` for a viewport
-    /// `height` rows tall, so per-frame work is `O(height)` rather than
+    /// `width` by `height`, so per-frame work is `O(height)` rather than
     /// `O(scroll)`. The returned widget owns its (cloned) slice of lines, so it
     /// outlives the borrow of `self`, and `marks` are painted on those copies.
     ///
     /// `scroll` must already be clamped to `self.height`.
-    pub fn visible(&self, scroll: u16, height: u16, marks: Option<&Marks>) -> Paragraph<'static> {
+    pub fn visible(
+        &self,
+        scroll: u32,
+        width: u16,
+        height: u16,
+        marks: Option<&Marks>,
+    ) -> Paragraph<'static> {
         let lines = &self.text.lines;
         let shown = |from: usize, to: usize, reach: u32| -> Vec<Line<'static>> {
             let mut shown = lines[from..to].to_vec();
@@ -353,16 +358,27 @@ impl Rendered {
             // at least one row), and let ratatui wrap just that window. The
             // sub-offset skips the part of the first line already scrolled past.
             Some(offsets) => {
-                let start = match offsets.binary_search(&u32::from(scroll)) {
+                let start = match offsets.binary_search(&scroll) {
                     Ok(i) => i,
                     Err(i) => i.saturating_sub(1),
                 };
                 // `offsets[start] <= scroll` by construction, so this can't wrap.
-                let sub = (u32::from(scroll) - offsets[start]) as u16;
+                let sub = scroll - offsets[start];
                 let end = start.saturating_add(height as usize + 1).min(lines.len());
-                let rows = sub.saturating_add(height).saturating_add(1);
+                let rows = sub.saturating_add(u32::from(height)).saturating_add(1);
                 let reach = marks.map_or(0, |marks| marks.reach(rows));
-                Paragraph::new(Text::from(shown(start, end, reach)))
+                let mut window = shown(start, end, reach);
+                // ratatui's scroll is a `u16`, and one line can wrap further than
+                // that. Such a line loses the rows above the view here instead.
+                let sub = match (u16::try_from(sub), window.first_mut()) {
+                    (Ok(sub), _) => sub,
+                    (Err(_), Some(first)) => {
+                        skip_rows(first, width, sub);
+                        0
+                    }
+                    (Err(_), None) => 0,
+                };
+                Paragraph::new(Text::from(window))
                     .wrap(WRAP)
                     .scroll((sub, 0))
             }
@@ -396,6 +412,76 @@ fn rows_of(line: &Line<'static>, width: u16) -> u32 {
         .max(1) as u32
 }
 
+/// Where a grapheme is in a line: its span and its byte in that span.
+type Place = (usize, usize);
+
+/// Take the first `rows` rows off `line`, as wrapped to `width`, leaving what the
+/// rows after them would show. ratatui keeps its wrapping to itself, so this walks
+/// the line the way its `WordWrapper` does with `trim: false`, down to which
+/// whitespace a break swallows, only noting where each row starts. Text carried
+/// over a break is carried from where it starts, so a row starts with it.
+fn skip_rows(line: &mut Line<'static>, width: u16, rows: u32) {
+    let mut left = rows;
+    let (mut full, mut empty) = (0, true); // the columns the row has settled on
+    let (mut word, mut word_start) = (0, None);
+    let (mut gap, mut spaces) = (0, VecDeque::<(Place, u16)>::new());
+    let mut after_word = false;
+    let mut next = None;
+    'walk: for (index, span) in line.spans.iter().enumerate() {
+        for grapheme in span.styled_graphemes(Style::default()) {
+            let place = (
+                index,
+                grapheme.symbol.as_ptr() as usize - span.content.as_ptr() as usize,
+            );
+            if left == 0 {
+                next = Some(next.unwrap_or(place));
+                break 'walk;
+            }
+            let blank = grapheme.is_whitespace();
+            let cols = grapheme.symbol.cell_width();
+            if cols > width {
+                continue;
+            }
+            if (after_word && blank) || (empty && word + gap + cols > width) {
+                full += gap + word;
+                empty = empty && spaces.is_empty() && word_start.is_none();
+                (gap, word, word_start) = (0, 0, None);
+                spaces.clear();
+            }
+            if full >= width || (cols > 0 && full + gap + word >= width) {
+                let mut room = width.saturating_sub(full);
+                (full, empty) = (0, true);
+                while let Some(&(_, cols)) = spaces.front().filter(|(_, cols)| *cols <= room) {
+                    gap -= cols;
+                    room -= cols;
+                    spaces.pop_front();
+                }
+                left -= 1;
+                next = spaces.front().map(|(place, _)| *place).or(word_start);
+                if blank && spaces.is_empty() {
+                    continue;
+                }
+                next = next.or(Some(place));
+            }
+            if blank {
+                gap += cols;
+                spaces.push_back((place, cols));
+            } else {
+                word += cols;
+                word_start.get_or_insert(place);
+            }
+            after_word = !blank;
+        }
+    }
+    let Some((span, byte)) = next.filter(|_| left == 0) else {
+        line.spans.clear();
+        return;
+    };
+    line.spans.drain(..span);
+    let first = &mut line.spans[0];
+    first.content = first.content[byte..].to_string().into();
+}
+
 /// Measure a render at `width`: its scrollable height and, for unified output,
 /// the per-line wrapped-row offsets (see [`Rendered::row_offsets`]). Side-by-side
 /// is already wrapped, so each line is exactly one row. Stops short once
@@ -405,9 +491,9 @@ fn measure(
     width: u16,
     side_by_side: bool,
     cancelled: &AtomicBool,
-) -> (u16, Option<Vec<u32>>) {
+) -> (u32, Option<Vec<u32>>) {
     if side_by_side {
-        let height = text.lines.len().min(u16::MAX as usize) as u16;
+        let height = text.lines.len().min(u32::MAX as usize) as u32;
         return (height, None);
     }
     // Wrap each line on its own — `Wrap` resets at every newline, so a line's
@@ -423,7 +509,7 @@ fn measure(
         acc = acc.saturating_add(rows_of(line, width));
     }
     offsets.push(acc);
-    (acc.min(u16::MAX as u32) as u16, Some(offsets))
+    (acc, Some(offsets))
 }
 
 /// Splice `comments` into a fresh render and measure the result.
@@ -1312,8 +1398,8 @@ impl RenderCache {
         width: u16,
         side_by_side: bool,
         theme: DiffTheme,
-        scroll: u16,
-    ) -> Option<u16> {
+        scroll: u32,
+    ) -> Option<u32> {
         let (key, old) = self.replaced.take()?;
         let kept = (key.file == file
             && key.width == width
@@ -1721,6 +1807,9 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+    use ratatui::widgets::Widget;
 
     use crate::diff::parse;
     use crate::theme::DiffTheme::GitHubDark;
@@ -1895,7 +1984,7 @@ mod tests {
 
         let (height, row_offsets) = measure(&text, width, false, &AtomicBool::new(false));
         // The per-line offsets must sum to the same height a single full wrap gives.
-        let full = Paragraph::new(text.clone()).wrap(WRAP).line_count(width) as u16;
+        let full = Paragraph::new(text.clone()).wrap(WRAP).line_count(width) as u32;
         assert_eq!(height, full, "summed offsets disagree with a full wrap");
 
         let rendered = Rendered {
@@ -1914,12 +2003,97 @@ mod tests {
         };
 
         for scroll in 0..=height {
-            let got = draw(rendered.visible(scroll, view_h, None));
-            let want = draw(Paragraph::new(text.clone()).wrap(WRAP).scroll((scroll, 0)));
+            let got = draw(rendered.visible(scroll, width, view_h, None));
+            let want = draw(
+                Paragraph::new(text.clone())
+                    .wrap(WRAP)
+                    .scroll((scroll as u16, 0)),
+            );
             assert_eq!(
                 got, want,
                 "visible window differs from full wrap at scroll {scroll}"
             );
+        }
+    }
+
+    /// What `line` shows from row `from`, for as many rows as `view` has.
+    fn rows_from(line: Line<'static>, width: u16, view: u16, from: u16) -> Buffer {
+        // With room to spare, as a word of wide characters can run a column over.
+        let mut buffer = Buffer::empty(Rect::new(0, 0, width + 2, view + 1));
+        let shown = Paragraph::new(line).wrap(WRAP).scroll((from, 0));
+        shown.render(Rect::new(0, 0, width, view), &mut buffer);
+        buffer
+    }
+
+    /// Cutting the rows off has to leave what ratatui would have shown below them,
+    /// whatever the line is made of.
+    #[test]
+    fn skipping_rows_shows_what_scrolling_to_them_shows() {
+        let pieces = [
+            "a", "bc", "def", " ", "  ", "\t", "語", "é", "e\u{301}", "\u{200b}", "\u{a0}", "🙂",
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut random = move |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 33) as usize % below
+        };
+        for _ in 0..3000 {
+            let width = 1 + random(12) as u16;
+            let mut spans = Vec::new();
+            for span in 0..1 + random(5) {
+                let text: String = (0..random(30))
+                    .map(|_| pieces[random(pieces.len())])
+                    .collect();
+                spans.push(Span::styled(
+                    text,
+                    Style::new().fg(Color::Indexed(span as u8)),
+                ));
+            }
+            let line = Line::from(spans);
+            let rows = Paragraph::new(line.clone()).wrap(WRAP).line_count(width) as u32;
+            for skip in 0..=rows {
+                let mut cut = line.clone();
+                skip_rows(&mut cut, width, skip);
+                let want = rows_from(line.clone(), width, 4, skip as u16);
+                // Starting over can't reproduce a row that overran, which ratatui
+                // only lets through mid-line: it wraps it instead.
+                if want[(width, 0)].symbol() != " "
+                    || want[(width - 1, 0)].symbol().cell_width() > 1
+                {
+                    continue;
+                }
+                let got = rows_from(cut.clone(), width, 4, 0);
+                assert_eq!(got, want, "{line:?} at {width}, {skip} rows off: {cut:?}");
+            }
+        }
+    }
+
+    /// One line can wrap past what a `Paragraph` can scroll to.
+    #[test]
+    fn a_line_taller_than_a_paragraph_can_scroll_shows_its_far_end() {
+        let (width, view) = (8u16, 4u16);
+        let words: String = (0..200_000).map(|i| format!("{i:06} ")).collect();
+        let text = Text::from(Line::from(words));
+        let (height, row_offsets) = measure(&text, width, false, &AtomicBool::new(false));
+        assert!(height > u32::from(u16::MAX), "{height}");
+        let rendered = Rendered {
+            text,
+            height,
+            row_offsets,
+            line_map: LineMap::default(),
+            comment_rows: Vec::new(),
+            row_starts: Vec::new(),
+            changes: Vec::new(),
+        };
+        for scroll in [70_000, 150_000, height - u32::from(view)] {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, width, view));
+            rendered
+                .visible(scroll, width, view, None)
+                .render(buffer.area, &mut buffer);
+            let row: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+            assert_eq!(row.trim_end(), format!("{scroll:06}"), "{scroll}");
         }
     }
 

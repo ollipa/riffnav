@@ -891,15 +891,15 @@ mod tests {
             render.row_of(block.start + block.len),
         );
         assert!(
-            bottom > app.diff_height,
+            bottom > app.diff_height.into(),
             "the box must overrun the pane from the top, or this proves nothing"
         );
         assert!(
-            top >= app.diff_scroll && bottom <= app.diff_scroll + app.diff_height,
+            top >= app.diff_scroll && bottom <= app.diff_scroll + u32::from(app.diff_height),
             "the whole box is on screen: rows {top}..{bottom}, \
              view {}..{}",
             app.diff_scroll,
-            app.diff_scroll + app.diff_height
+            app.diff_scroll + u32::from(app.diff_height)
         );
     }
 

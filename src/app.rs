@@ -64,7 +64,7 @@ const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l";
 /// Rows of context kept between the diff cursor and the viewport edge, so moving
 /// the cursor scrolls before it reaches the very top or bottom. Matches the file
 /// tree's `SCROLL_PADDING`.
-const CURSOR_PADDING: u16 = 4;
+const CURSOR_PADDING: u32 = 4;
 
 /// Lines of context `+`/`-` add or take away around each change, per press.
 const CONTEXT_STEP: u32 = 1;
@@ -199,7 +199,7 @@ pub struct App {
     pub files: Vec<FileDiff>,
     pub rows: Vec<Row>,
     pub tree_state: ListState,
-    pub diff_scroll: u16,
+    pub diff_scroll: u32,
     /// Height of the diff viewport at the last render, used to size page jumps.
     pub diff_height: u16,
     pub side_by_side: bool,
@@ -263,7 +263,7 @@ pub struct App {
     /// The screen row the cursor sat on before `+`/`-` reloaded the diff, to put
     /// it back there once the new render exists. Widening the context pushes the
     /// cursor's line down the render; without this it would slide off screen.
-    cursor_screen_row: Option<u16>,
+    cursor_screen_row: Option<u32>,
     /// A `]`/`[` jump that crossed into another file, waiting for that file to be
     /// rendered before the cursor can be put on the comment it was aimed at:
     /// `true` for its first comment, `false` for its last.
@@ -1499,7 +1499,7 @@ impl App {
     }
 
     fn scroll_diff(&mut self, delta: i32) {
-        self.diff_scroll = (self.diff_scroll as i32 + delta).max(0) as u16;
+        self.diff_scroll = self.diff_scroll.saturating_add_signed(delta);
         // Scrolling drags the cursor along so it never drifts off-screen; the
         // cursor stays wherever it already is when that's still visible.
         self.park_cursor_in_view();
@@ -1592,7 +1592,10 @@ impl App {
         let Some(max) = self.current_render().map(|r| r.lines().saturating_sub(1)) else {
             return;
         };
-        self.diff_cursor = (self.diff_cursor as i32 + delta).clamp(0, max as i32) as usize;
+        self.diff_cursor = self
+            .diff_cursor
+            .saturating_add_signed(delta as isize)
+            .min(max);
         self.remember_cursor_anchor();
         self.scroll_cursor_into_view();
     }
@@ -1614,7 +1617,7 @@ impl App {
     /// is aligned to its top, which is where reading starts.
     fn set_cursor_on_block(&mut self, line: usize) {
         self.set_cursor(line);
-        let height = self.diff_height;
+        let height = u32::from(self.diff_height);
         if height == 0 {
             return;
         }
@@ -1625,12 +1628,12 @@ impl App {
             return;
         };
         let pad = CURSOR_PADDING.min(height / 3);
-        if bottom + pad > self.diff_scroll + height {
+        if bottom + pad > self.diff_scroll.saturating_add(height) {
             self.diff_scroll = (bottom + pad).saturating_sub(height);
         }
         // Last, so a block taller than the pane keeps its top rather than its
         // foot: the two pulls are in opposite directions and only one can win.
-        if top < self.diff_scroll + pad {
+        if top < self.diff_scroll.saturating_add(pad) {
             self.diff_scroll = top.saturating_sub(pad);
         }
     }
@@ -1639,7 +1642,7 @@ impl App {
     /// wraps onto several rows — inside the viewport, with [`CURSOR_PADDING`]
     /// rows of lead so the cursor never sits flush against an edge.
     fn scroll_cursor_into_view(&mut self) {
-        let (Some(render), height) = (self.current_render(), self.diff_height) else {
+        let (Some(render), height) = (self.current_render(), u32::from(self.diff_height)) else {
             return;
         };
         if height == 0 {
@@ -1653,7 +1656,7 @@ impl App {
         let scroll = self.diff_scroll;
         if top < scroll.saturating_add(pad) {
             self.diff_scroll = top.saturating_sub(pad);
-        } else if bottom + pad > scroll + height {
+        } else if bottom + pad > scroll.saturating_add(height) {
             self.diff_scroll = (bottom + pad).saturating_sub(height);
         }
     }
@@ -1661,7 +1664,7 @@ impl App {
     /// After a scroll or page jump, pull the cursor to the nearest visible line
     /// rather than letting it sit off-screen.
     fn park_cursor_in_view(&mut self) {
-        let (Some(render), height) = (self.current_render(), self.diff_height) else {
+        let (Some(render), height) = (self.current_render(), u32::from(self.diff_height)) else {
             return;
         };
         if height == 0 {
@@ -1696,7 +1699,8 @@ impl App {
         let bottom = render.row_of(past).max(top + 1);
         let top = top.checked_sub(self.diff_scroll)?;
         let bottom = bottom.saturating_sub(self.diff_scroll);
-        (top < self.diff_height).then_some((top, bottom))
+        let height = u32::from(self.diff_height);
+        (top < height).then_some((top as u16, bottom.min(height) as u16))
     }
 
     /// One PageUp/PageDown step: the diff viewport height less a line of overlap,
@@ -1840,7 +1844,7 @@ impl App {
         let rows = if self.comments_on {
             self.diff_cursor..self.diff_cursor + 1
         } else {
-            let bottom = self.diff_scroll.saturating_add(self.diff_height);
+            let bottom = self.diff_scroll.saturating_add(self.diff_height.into());
             render.line_at(self.diff_scroll)..render.line_at(bottom) + 1
         };
         rows.into_iter().find_map(|row| {
@@ -1968,7 +1972,7 @@ impl App {
         let Some(top) = self.current_render().map(|r| r.row_of(line)) else {
             return;
         };
-        let height = self.diff_height;
+        let height = u32::from(self.diff_height);
         let on_screen = (self.diff_scroll..self.diff_scroll.saturating_add(height)).contains(&top);
         self.set_cursor(line);
         if !on_screen || top < self.diff_scroll {
@@ -2443,7 +2447,7 @@ impl App {
             return;
         };
         // Clicks on the empty space below a short diff land nowhere.
-        let row = self.diff_scroll.saturating_add(y);
+        let row = self.diff_scroll.saturating_add(y.into());
         if row >= render.height {
             return;
         }
@@ -2638,7 +2642,7 @@ impl App {
                 self.set_cursor(0);
             }
             KeyCode::Char('G') => {
-                self.diff_scroll = u16::MAX; // clamped on draw
+                self.diff_scroll = u32::MAX; // clamped on draw
                 let last = self.current_render().map(|r| r.lines().saturating_sub(1));
                 if let Some(last) = last {
                     self.diff_cursor = last;

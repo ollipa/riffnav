@@ -36,8 +36,8 @@ pub struct Marks<'a> {
 
 impl Marks<'_> {
     /// How many characters of a line can be showing in its first `rows` rows.
-    pub fn reach(&self, rows: u16) -> u32 {
-        let cells = u32::from(rows) * u32::from(self.width);
+    pub fn reach(&self, rows: u32) -> u32 {
+        let cells = rows.saturating_mul(u32::from(self.width));
         cells.saturating_mul(CHARS_PER_CELL)
     }
 

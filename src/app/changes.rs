@@ -170,7 +170,7 @@ impl App {
         if !self.comments_on
             && let Some(top) = self.current_render().map(|r| r.row_of(line))
         {
-            self.diff_scroll = top.saturating_sub(self.diff_height / 3);
+            self.diff_scroll = top.saturating_sub(u32::from(self.diff_height / 3));
         }
         self.change_jumps.stopped = self.selected_file().zip(self.cursor_anchor);
         let numbered = self.current_render().is_some_and(|render| {
@@ -301,9 +301,9 @@ mod tests {
         (Some(line), None)
     }
 
-    fn cursor_row(app: &App) -> i32 {
+    fn cursor_row(app: &App) -> i64 {
         let render = app.current_render().unwrap();
-        i32::from(render.row_of(app.diff_cursor)) - i32::from(app.diff_scroll)
+        i64::from(render.row_of(app.diff_cursor)) - i64::from(app.diff_scroll)
     }
 
     /// Everywhere `J` stops, from where the view is, until it comes back round.
@@ -396,7 +396,7 @@ mod tests {
         let mut app = app(&hunk("f", &edits(2, 40)));
         press(&mut app, Char('J'));
         press(&mut app, Char('J'));
-        let height = i32::from(app.diff_height);
+        let height = i64::from(app.diff_height);
         assert_eq!(cursor_row(&app), height / 3);
     }
 
@@ -472,7 +472,7 @@ mod tests {
         press(&mut app, Char('J'));
         assert_eq!(at(&app), old(7));
         let row = cursor_row(&app);
-        assert!((0..i32::from(app.diff_height)).contains(&row), "{row}");
+        assert!((0..i64::from(app.diff_height)).contains(&row), "{row}");
     }
 
     /// The moved block's note sits above its first line.
@@ -1425,5 +1425,41 @@ mod tests {
         app.cache.finish();
         assert!(app.render_of(2).is_some(), "c, as b has nothing to stop at");
         assert!(app.render_of(1).is_none());
+    }
+
+    /// A file taller than a `u16` can count, the way each layout gets there.
+    #[test]
+    fn rows_past_a_u16_can_all_be_reached() {
+        let mut body: String = (0..70_000).map(|i| format!(" context {i}\n")).collect();
+        body.push_str("-old\n+new\n tail\n");
+        for side_by_side in [false, true] {
+            let mut app = app_with(&hunk("a", &body), side_by_side, true);
+            press(&mut app, Char('G'));
+            let render = app.current_render().unwrap();
+            assert!(render.height > u32::from(u16::MAX), "{}", render.height);
+            assert!(app.diff_scroll > u32::from(u16::MAX), "{}", app.diff_scroll);
+            assert_eq!(app.diff_cursor, render.lines() - 1);
+
+            press(&mut app, Char('g'));
+            press(&mut app, Char('J'));
+            let (row, scroll) = (cursor_row(&app), app.diff_scroll);
+            assert!(scroll > 70_000 - u32::from(HEIGHT), "{scroll}");
+            assert!((0..i64::from(app.diff_height)).contains(&row), "{row}");
+            assert_eq!(at(&app).0, Some(70_001));
+
+            app.scroll_diff(-1);
+            assert_eq!(app.diff_scroll, scroll - 1, "a step, not a wrap");
+        }
+    }
+
+    /// `G` sets the scroll for the next draw to clamp, which a key can get in ahead of.
+    #[test]
+    fn a_key_straight_after_g_is_not_thrown_by_its_scroll() {
+        let mut app = app(&hunk("a", &edits(3, 30)));
+        app.press_for_test(Char('G'), false);
+        app.press_for_test(Char('k'), false);
+        app.press_for_test(Char('j'), false);
+        frame(&mut app);
+        assert_eq!(app.diff_cursor, app.current_render().unwrap().lines() - 1);
     }
 }

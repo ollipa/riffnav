@@ -54,7 +54,7 @@ struct Prompt {
 struct Origin {
     selected: usize,
     collapsed: HashSet<String>,
-    scroll: u16,
+    scroll: u32,
     cursor: usize,
     anchor: Option<Anchor>,
     token: Option<CursorToken>,
@@ -533,10 +533,10 @@ impl App {
         let line = start.line;
         let row = render.row_of_hit(hit, self.last_width);
         let row = row.unwrap_or_else(|| render.row_of(line));
-        let height = self.diff_height;
+        let height = u32::from(self.diff_height);
         // Short of the last row, as a match wrapped there would go on out of sight.
         let bottom = height.saturating_sub(1).max(1);
-        let in_view = |scroll: u16| (scroll..scroll.saturating_add(bottom)).contains(&row);
+        let in_view = |scroll: u32| (scroll..scroll.saturating_add(bottom)).contains(&row);
         let was_in_view = in_view(self.diff_scroll);
         self.set_cursor(line);
         if !was_in_view || !in_view(self.diff_scroll) {

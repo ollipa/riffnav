@@ -33,8 +33,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
         .cache
         .get(idx, diff_width, side_by_side, app.diff_theme)
         .map(|r| {
-            let scroll = app.diff_scroll.min(r.height.saturating_sub(area.height));
-            (r.visible(scroll, area.height, marks.as_ref()), scroll)
+            let scroll = app
+                .diff_scroll
+                .min(r.height.saturating_sub(area.height.into()));
+            let shown = r.visible(scroll, area.width, area.height, marks.as_ref());
+            (shown, scroll)
         });
 
     let Some((paragraph, scroll)) = built else {
@@ -62,7 +65,7 @@ fn highlight_cursor(
     app: &App,
     idx: usize,
     side_by_side: bool,
-    scroll: u16,
+    scroll: u32,
 ) {
     let Some(render) = app
         .cache
@@ -73,16 +76,16 @@ fn highlight_cursor(
     // A wrapped line covers several rows, so highlight the whole run.
     let top = render.row_of(app.diff_cursor);
     let bottom = render.row_of(app.diff_cursor + 1).max(top + 1);
+    // Rows above the viewport (or below it) simply have no cells to paint, and a
+    // minified line can have far more of them than there are on screen.
+    let rows = top.max(scroll)..bottom.min(scroll.saturating_add(area.height.into()));
     let bg = app.diff_theme.cursor_line_bg();
     let matches = [app.diff_theme.match_bg(), app.diff_theme.current_match_bg()];
     let buf = frame.buffer_mut();
-    for row in top..bottom {
-        // Rows above the viewport (or below it) simply have no cells to paint.
-        let Some(y) = row.checked_sub(scroll).filter(|y| *y < area.height) else {
-            continue;
-        };
+    for row in rows {
+        let y = area.y + (row - scroll) as u16;
         for x in area.left()..area.right() {
-            let cell = &mut buf[(x, area.y + y)];
+            let cell = &mut buf[(x, y)];
             if !matches.contains(&cell.bg) {
                 cell.set_bg(bg);
             }
