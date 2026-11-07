@@ -247,12 +247,15 @@ mod tests {
 
         // An agent in another terminal writes to the same scope file.
         let mut theirs = CommentStore::with_path(path.clone());
-        theirs.add(Comment {
-            author: "claude".to_string(),
-            created: crate::state::now_unix(),
-            ..note("a.rs", 2, "written elsewhere")
-        });
-        theirs.save();
+        theirs
+            .update(|s| {
+                s.add(Comment {
+                    author: "claude".to_string(),
+                    created: crate::state::now_unix(),
+                    ..note("a.rs", 2, "written elsewhere")
+                })
+            })
+            .unwrap();
 
         let rev = app.comment_rev;
         assert_eq!(app.reload_comments(), Some(1), "the note is picked up");
@@ -346,7 +349,7 @@ mod tests {
     #[test]
     fn jumping_wraps_inside_the_file_when_no_other_file_has_notes() {
         let mut app = app_with_a_note_in_two_files();
-        app.comments.clear(Some("b.rs"));
+        app.comments.remove_where(|s, c| s.file_of(c) == "b.rs");
         app.bump_comments();
         app.seed_render_for_test(60, seed_text());
         app.resync_cursor();

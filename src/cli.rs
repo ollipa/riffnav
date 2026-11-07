@@ -195,7 +195,7 @@ pub enum CommentCmd {
     },
     /// Delete many comments at once.
     Clear {
-        /// Limit the deletion to one file.
+        /// Only this file's comments, replies included: the ones `list --file` shows.
         #[arg(long, value_name = "PATH")]
         file: Option<String>,
         /// Required: deleting comments can't be undone.

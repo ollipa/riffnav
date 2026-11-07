@@ -190,13 +190,13 @@ impl App {
             self.set_status("Delete cancelled");
             return;
         }
-        let removed = self.comments.remove(&id);
-        self.comments.save();
+        let removed = self.comments.update(|store| store.remove(&id));
         self.bump_comments();
         self.set_status(match removed {
-            0 => "Nothing to delete".to_string(),
-            1 => format!("Deleted comment #{id}"),
-            n => format!("Deleted comment #{id} and {} repl(ies)", n - 1),
+            Ok(0) => "Nothing to delete".to_string(),
+            Ok(1) => format!("Deleted comment #{id}"),
+            Ok(n) => format!("Deleted comment #{id} and {} repl(ies)", n - 1),
+            Err(e) => format!("Couldn't delete comment #{id}: {e}"),
         });
     }
 
@@ -207,7 +207,7 @@ impl App {
             self.set_status("Empty comment — nothing saved");
             return;
         }
-        let id = self.comments.add(Comment {
+        let comment = Comment {
             id: String::new(),
             file: pending.file.clone(),
             side: pending.anchor.side,
@@ -217,13 +217,16 @@ impl App {
             created: crate::state::now_unix(),
             reply_to: pending.reply_to,
             diff_hash: Some(format!("{:032x}", pending.diff_hash)),
-        });
-        self.comments.save();
+        };
+        let saved = self.comments.update(|store| store.add(comment));
         self.bump_comments();
-        self.set_status(format!(
-            "💬 Commented on {}:{}  (#{id})",
-            pending.file, pending.anchor.line
-        ));
+        self.set_status(match saved {
+            Ok(id) => format!(
+                "💬 Commented on {}:{}  (#{id})",
+                pending.file, pending.anchor.line
+            ),
+            Err(e) => format!("Couldn't save the comment: {e}"),
+        });
     }
 }
 

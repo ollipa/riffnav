@@ -10,8 +10,12 @@
 //! work, nothing persists.
 //!
 //! Persisting to disk means `riffnav comment add` works with no window open and
-//! notes survive a restart.
+//! notes survive a restart. Every write goes through [`CommentStore::update`],
+//! which re-reads the file under a lock first, so a window and any number of
+//! `riffnav comment` runs can write at once without losing each other's notes.
 
+use std::collections::HashMap;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -99,9 +103,16 @@ struct StoreFile {
 /// means session-only.
 pub struct CommentStore {
     path: Option<PathBuf>,
+    /// The comments tree's root, whose `.lock` guards every write (see
+    /// [`state::lock`]).
+    root: PathBuf,
     repo: String,
     branch: String,
     comments: Vec<Comment>,
+    /// How many comments render in each file, by their thread root's file the
+    /// way [`Self::threads`] places them. Rebuilt on every change, since the
+    /// tree asks for it per row per frame.
+    counts: HashMap<String, usize>,
     dirty: bool,
 }
 
@@ -111,9 +122,11 @@ impl CommentStore {
     pub fn disabled() -> Self {
         Self {
             path: None,
+            root: PathBuf::new(),
             repo: String::new(),
             branch: String::new(),
             comments: Vec::new(),
+            counts: HashMap::new(),
             dirty: false,
         }
     }
@@ -129,14 +142,19 @@ impl CommentStore {
         let path = state::scope_path(&dir, &repo, &branch);
 
         // Reap branch files untouched for `retention`, but never the one we're
-        // about to use — opening a branch counts as keeping it alive.
-        state::sweep(&dir, retention, &path);
+        // about to use — opening a branch counts as keeping it alive. Under the
+        // lock, so a file another process is rewriting isn't deleted under it.
+        if let Some(_lock) = state::lock(&dir) {
+            state::sweep(&dir, retention, &path);
+        }
 
         let mut store = Self {
             path: Some(path),
+            root: dir,
             repo,
             branch,
             comments: Vec::new(),
+            counts: HashMap::new(),
             dirty: false,
         };
         store.reload();
@@ -145,18 +163,64 @@ impl CommentStore {
 
     /// Re-read the backing file, discarding in-memory state. Called on startup
     /// and whenever the filesystem watcher reports the file changed — including
-    /// after our own save, where it's a harmless no-op.
+    /// after our own save, where it's a harmless no-op. A file that won't parse
+    /// reads as empty here; [`Self::update`] refuses to write over it.
     pub fn reload(&mut self) {
+        let _ = self.read();
+    }
+
+    /// [`Self::reload`], saying whether the file was readable. A missing file is
+    /// an empty store, not an error.
+    fn read(&mut self) -> io::Result<()> {
         let Some(path) = &self.path else {
-            return;
+            return Ok(());
         };
-        let comments = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<StoreFile>(&text).ok())
-            .map(|stored| stored.comments)
-            .unwrap_or_default();
+        let read = match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str::<StoreFile>(&text)
+                .map(|stored| stored.comments)
+                .map_err(|e| {
+                    let why = format!("the store doesn't parse ({e}): {}", path.display());
+                    io::Error::new(io::ErrorKind::InvalidData, why)
+                }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        };
+        let (comments, result) = match read {
+            Ok(comments) => (comments, Ok(())),
+            Err(e) => (Vec::new(), Err(e)),
+        };
         self.comments = comments;
         self.dirty = false;
+        self.recount();
+        result
+    }
+
+    /// Change the comments as they are on disk now, not as this store last read
+    /// them, and write the result: lock, re-read, apply `f`, write, unlock. That
+    /// way a note another process saved since the last read survives, whoever
+    /// writes next. Returns what `f` returned.
+    ///
+    /// Fails without writing when the lock can't be taken, the file is there but
+    /// unreadable (overwriting it would lose every note in it), or the write
+    /// fails. The store is then left as the file is. A session-only store just
+    /// applies `f`.
+    pub fn update<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> io::Result<R> {
+        if self.path.is_none() {
+            return Ok(f(self));
+        }
+        let Some(_lock) = state::lock(&self.root) else {
+            return Err(io::Error::other(format!(
+                "couldn't lock {}",
+                self.root.join(".lock").display()
+            )));
+        };
+        self.read()?;
+        let out = f(self);
+        if let Err(e) = self.save() {
+            self.reload();
+            return Err(e);
+        }
+        Ok(out)
     }
 
     /// Where this scope persists, for the filesystem watcher. `None` when
@@ -173,8 +237,24 @@ impl CommentStore {
         self.comments.iter().find(|c| c.id == id)
     }
 
+    /// How many comments render in `file`: the notes of every thread rooted
+    /// there, the same set [`Self::threads`] draws.
     pub fn count_for_file(&self, file: &str) -> usize {
-        self.comments.iter().filter(|c| c.file == file).count()
+        self.counts.get(file).copied().unwrap_or(0)
+    }
+
+    /// The file a comment renders in: its thread root's (see [`Self::root_of`]).
+    pub fn file_of<'a>(&'a self, c: &'a Comment) -> &'a str {
+        &self.root_of(c).file
+    }
+
+    /// Rebuild [`Self::counts`] after the comments changed.
+    fn recount(&mut self) {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for c in &self.comments {
+            *counts.entry(self.file_of(c).to_string()).or_default() += 1;
+        }
+        self.counts = counts;
     }
 
     /// The comment a thread hangs from: `c` itself when it starts one, otherwise
@@ -278,6 +358,7 @@ impl CommentStore {
         let id = comment.id.clone();
         self.comments.push(comment);
         self.dirty = true;
+        self.recount();
         id
     }
 
@@ -316,47 +397,63 @@ impl CommentStore {
     /// Returns how many were removed.
     pub fn remove(&mut self, id: &str) -> usize {
         let doomed = self.thread_ids(id);
-        let before = self.comments.len();
-        self.comments.retain(|c| !doomed.contains(&c.id));
-        let removed = before - self.comments.len();
-        self.dirty |= removed > 0;
-        removed
+        self.drop_ids(&doomed)
     }
 
-    /// Delete every comment, or only those on `file`. Returns how many went.
-    pub fn clear(&mut self, file: Option<&str>) -> usize {
+    /// Delete every comment for which `doomed` holds, given the store and the
+    /// comment. Returns how many went.
+    pub fn remove_where(&mut self, doomed: impl Fn(&Self, &Comment) -> bool) -> usize {
+        let ids: Vec<String> = self
+            .comments
+            .iter()
+            .filter(|c| doomed(self, c))
+            .map(|c| c.id.clone())
+            .collect();
+        self.drop_ids(&ids)
+    }
+
+    fn drop_ids(&mut self, ids: &[String]) -> usize {
         let before = self.comments.len();
-        match file {
-            Some(f) => self.comments.retain(|c| c.file != f),
-            None => self.comments.clear(),
+        self.comments.retain(|c| !ids.contains(&c.id));
+        let removed = before - self.comments.len();
+        if removed > 0 {
+            self.dirty = true;
+            self.recount();
         }
-        let removed = before - self.comments.len();
-        self.dirty |= removed > 0;
         removed
     }
 
-    /// Persist pending changes atomically, best-effort. An emptied scope deletes
-    /// its file rather than leaving a husk behind.
-    pub fn save(&mut self) {
+    /// Persist pending changes atomically. An emptied scope deletes its file
+    /// rather than leaving a husk behind. Only [`Self::update`] calls this, with
+    /// the lock held and the file freshly read.
+    fn save(&mut self) -> io::Result<()> {
         if !self.dirty {
-            return;
+            return Ok(());
         }
-        self.dirty = false;
         let Some(path) = self.path.clone() else {
-            return;
+            return Ok(());
         };
         if self.comments.is_empty() {
-            let _ = std::fs::remove_file(&path);
-            return;
+            match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        } else {
+            let stored = StoreFile {
+                repo: self.repo.clone(),
+                branch: self.branch.clone(),
+                comments: self.comments.clone(),
+            };
+            let json = serde_json::to_vec_pretty(&stored).map_err(io::Error::other)?;
+            if !state::write_atomic(&path, &json) {
+                return Err(io::Error::other(format!(
+                    "couldn't write {}",
+                    path.display()
+                )));
+            }
         }
-        let stored = StoreFile {
-            repo: self.repo.clone(),
-            branch: self.branch.clone(),
-            comments: self.comments.clone(),
-        };
-        if let Ok(json) = serde_json::to_vec_pretty(&stored) {
-            state::write_atomic(&path, &json);
-        }
+        self.dirty = false;
+        Ok(())
     }
 
     /// A short handle derived from the comment's content, salted until it doesn't
@@ -390,10 +487,12 @@ impl CommentStore {
     /// detection so the save/load IO path is testable in isolation.
     pub(crate) fn with_path(path: PathBuf) -> Self {
         Self {
+            root: path.parent().expect("a file in a directory").to_path_buf(),
             path: Some(path),
             repo: "repo".to_string(),
             branch: "branch".to_string(),
             comments: Vec::new(),
+            counts: HashMap::new(),
             dirty: false,
         }
     }
@@ -583,24 +682,50 @@ mod tests {
     }
 
     #[test]
-    fn count_and_clear_are_scoped_to_one_file() {
+    fn count_and_removal_are_scoped_to_one_file() {
         let mut store = CommentStore::disabled();
         store.add(draft("a", 1, "x"));
         store.add(draft("a", 2, "y"));
         store.add(draft("b", 1, "z"));
         assert_eq!(store.count_for_file("a"), 2);
-        assert_eq!(store.clear(Some("a")), 2);
+        assert_eq!(store.remove_where(|s, c| s.file_of(c) == "a"), 2);
+        assert_eq!(store.count_for_file("a"), 0);
+        assert_eq!(store.count_for_file("b"), 1);
+    }
+
+    /// The tree's badge counts what the threads draw, even for a reply a
+    /// hand-edited store files under another path than its root.
+    #[test]
+    fn the_count_agrees_with_the_threads_drawn() {
+        let mut store = CommentStore::disabled();
+        let root = store.add(draft("a", 10, "root"));
+        let mut reply = draft("b", 3, "reply filed under b");
+        reply.reply_to = Some(root.clone());
+        store.add(reply);
+        let mut orphan = draft("b", 4, "reply to nothing");
+        orphan.reply_to = Some("gone00".to_string());
+        store.add(orphan);
+
+        for file in ["a", "b", "c"] {
+            let drawn: usize = store.threads(file).iter().map(|(_, t)| t.len()).sum();
+            assert_eq!(store.count_for_file(file), drawn, "{file}");
+        }
+        assert_eq!(store.count_for_file("a"), 2);
+
+        // Removing the root takes its reply off a's count, not b's.
+        store.remove(&root);
         assert_eq!(store.count_for_file("a"), 0);
         assert_eq!(store.count_for_file("b"), 1);
     }
 
     #[test]
-    fn save_round_trips_and_emptying_removes_the_file() {
+    fn update_round_trips_and_emptying_removes_the_file() {
         let dir = TempDir::new("comments");
         let path = dir.join("nested").join("scope.json");
         let mut store = CommentStore::with_path(path.clone());
-        let id = store.add(draft("src/app.rs", 103, "why the retry here?"));
-        store.save();
+        let id = store
+            .update(|s| s.add(draft("src/app.rs", 103, "why the retry here?")))
+            .unwrap();
 
         let mut reloaded = CommentStore::with_path(path.clone());
         reloaded.reload();
@@ -609,17 +734,103 @@ mod tests {
         assert_eq!(got.line, 103);
         assert_eq!(got.side, Side::New);
 
-        reloaded.remove(&id);
-        reloaded.save();
+        assert_eq!(reloaded.update(|s| s.remove(&id)).unwrap(), 1);
         assert!(!path.exists(), "an emptied scope deletes its file");
     }
 
     #[test]
-    fn save_is_a_noop_without_changes() {
+    fn an_update_that_changes_nothing_writes_nothing() {
         let dir = TempDir::new("comments-clean");
         let path = dir.join("scope.json");
         let mut store = CommentStore::with_path(path.clone());
-        store.save();
+        assert_eq!(store.update(|s| s.remove("nope")).unwrap(), 0);
         assert!(!path.exists());
+    }
+
+    /// A window's store was read before an agent wrote; its next write must
+    /// keep the agent's note rather than write back what it read.
+    #[test]
+    fn an_update_keeps_a_note_written_since_the_last_read() {
+        let dir = TempDir::new("comments-merge");
+        let path = dir.join("scope.json");
+        let mut window = CommentStore::with_path(path.clone());
+        window.reload();
+
+        let mut agent = CommentStore::with_path(path.clone());
+        agent
+            .update(|s| s.add(draft("f", 2, "agent note")))
+            .unwrap();
+
+        window.update(|s| s.add(draft("f", 5, "my note"))).unwrap();
+        let mut bodies: Vec<String> = window.all().iter().map(|c| c.body.clone()).collect();
+        bodies.sort();
+        assert_eq!(bodies, ["agent note", "my note"], "in memory");
+
+        let mut fresh = CommentStore::with_path(path);
+        fresh.reload();
+        assert_eq!(fresh.all().len(), 2, "and on disk");
+    }
+
+    /// A delete is applied to what's on disk too, so it can't resurrect or drop
+    /// someone else's note either.
+    #[test]
+    fn a_delete_keeps_a_note_written_since_the_last_read() {
+        let dir = TempDir::new("comments-delete");
+        let path = dir.join("scope.json");
+        let mut window = CommentStore::with_path(path.clone());
+        let mine = window.update(|s| s.add(draft("f", 5, "mine"))).unwrap();
+
+        let mut agent = CommentStore::with_path(path.clone());
+        agent
+            .update(|s| s.add(draft("f", 2, "agent note")))
+            .unwrap();
+
+        assert_eq!(window.update(|s| s.remove(&mine)).unwrap(), 1);
+        let bodies: Vec<&str> = window.all().iter().map(|c| c.body.as_str()).collect();
+        assert_eq!(bodies, ["agent note"]);
+    }
+
+    /// A file that's there but won't parse holds notes we can't see. Writing
+    /// over it would lose all of them, so the write is refused.
+    #[test]
+    fn an_unreadable_store_is_not_written_over() {
+        let dir = TempDir::new("comments-corrupt");
+        let path = dir.join("scope.json");
+        std::fs::write(&path, "{\"comments\": [ half a file").unwrap();
+        let mut store = CommentStore::with_path(path.clone());
+        let err = store.update(|s| s.add(draft("f", 1, "x"))).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"comments\": [ half a file",
+            "the file is left as it was"
+        );
+    }
+
+    /// Writers in parallel, each adding its notes one update at a time: nothing
+    /// is lost and the file always parses.
+    #[test]
+    fn parallel_updates_lose_nothing() {
+        let dir = TempDir::new("comments-parallel");
+        let path = dir.join("scope.json");
+        let writers: Vec<_> = (0..4)
+            .map(|w| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut store = CommentStore::with_path(path);
+                    for i in 0..25 {
+                        store
+                            .update(|s| s.add(draft("f", i, &format!("{w}-{i}"))))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        let mut store = CommentStore::with_path(path);
+        store.read().expect("the file parses");
+        assert_eq!(store.all().len(), 100);
     }
 }

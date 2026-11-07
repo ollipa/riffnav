@@ -403,7 +403,6 @@ impl App {
         self.restore_herdr_zoom();
         self.flush_review_sync(); // let in-flight GitHub marks finish (bounded)
         self.review.save(); // safety net; toggles already persist eagerly
-        self.comments.save(); // ditto — comment writes persist as they're made
         if self.comments_on {
             Session::clear(); // don't leave the CLI validating against a dead window
         }

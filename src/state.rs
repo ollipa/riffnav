@@ -97,6 +97,27 @@ pub fn sweep(dir: &Path, retention: u64, keep: &Path) {
     }
 }
 
+/// Hold an exclusive lock on `<dir>/.lock` until the returned file is dropped.
+/// It serializes every read-modify-write of a kind's scope files: one lock for
+/// the whole tree, since each hold lasts a read and a write, and sweeping, which
+/// deletes scope files, must not race a writer either. The OS drops the lock if
+/// its holder dies, so a killed process can't wedge the next one. `None` if the
+/// lock file can't be opened or locked.
+///
+/// The lock file sits beside the repo directories, never in one, so [`sweep`],
+/// which only looks inside them, can't delete a lock someone holds.
+pub fn lock(dir: &Path) -> Option<std::fs::File> {
+    std::fs::create_dir_all(dir).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".lock"))
+        .ok()?;
+    file.lock().ok()?;
+    Some(file)
+}
+
 /// Write `bytes` to `path` via a temp file + rename, creating parent directories
 /// as needed. Best-effort: returns whether the file landed. The rename keeps a
 /// concurrent reader from ever seeing a half-written file.
@@ -197,6 +218,23 @@ mod tests {
         assert!(
             !other.parent().unwrap().exists(),
             "an unrelated empty directory is still swept"
+        );
+    }
+
+    /// A second holder waits until the first lets go.
+    #[test]
+    fn lock_excludes_a_second_holder_until_the_first_drops_it() {
+        let dir = TempDir::new("lock");
+        let held = lock(&dir).expect("the lock is taken");
+        let second = std::fs::File::open(dir.join(".lock")).unwrap();
+        assert!(
+            matches!(second.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "a second holder must wait"
+        );
+        drop(held);
+        assert!(
+            second.try_lock().is_ok(),
+            "and gets it once the first is done"
         );
     }
 

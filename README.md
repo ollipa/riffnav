@@ -269,7 +269,9 @@ printf '%s' '{"comments":[
 
 There's no daemon and no port — just a JSON file under
 `$XDG_STATE_HOME/riffnav/comments/`, scoped per repository and branch like
-viewed marks, and garbage-collected by age (`comment_retention_days`). A comment
+viewed marks, and garbage-collected by age (`comment_retention_days`). Every
+write locks it and re-reads it first, so the window and any number of agents can
+write at once without losing each other's notes. A comment
 whose code has changed since it was written is flagged rather than silently
 sliding onto a different line.
 

@@ -91,20 +91,39 @@ fn add(args: AddArgs) -> Result<()> {
         None => Some(require_session()?),
     };
     let mut store = CommentStore::load(CLI_RETENTION_DAYS);
-    let resolved = anchor(
-        session.as_ref(),
-        &store,
-        args.file.as_deref(),
-        args.old_line,
-        args.new_line,
-        args.reply_to.as_deref(),
-        "comment add",
-    )?;
-
-    let id = store.add(build(&resolved, body, args.author, args.reply_to));
-    store.save();
+    // Validated inside the update, against the store as it is when written: a
+    // parent deleted since the load is caught rather than replied to.
+    let (id, resolved) = write(&mut store, |store| {
+        let resolved = anchor(
+            session.as_ref(),
+            store,
+            args.file.as_deref(),
+            args.old_line,
+            args.new_line,
+            args.reply_to.as_deref(),
+            "comment add",
+        )?;
+        let id = store.add(build(&resolved, body, args.author, args.reply_to));
+        Ok((id, resolved))
+    })?;
     println!("#{id}  {}:{}", shown(&resolved.file), resolved.line);
     Ok(())
+}
+
+/// [`CommentStore::update`] for a change that can be refused: `f`'s error is
+/// returned as is, and a store that can't be read or written becomes one.
+fn write<R>(store: &mut CommentStore, f: impl FnOnce(&mut CommentStore) -> Result<R>) -> Result<R> {
+    store
+        .update(f)
+        .context("saving comments — nothing was changed")?
+}
+
+/// Whether a comment renders in `file`, given as stored or as riffnav prints
+/// it. A reply renders in its thread's file, so that's the one compared: the
+/// same file the window lists it under, and what `list` and `clear` both use.
+fn in_file(store: &CommentStore, c: &Comment, file: &str) -> bool {
+    let renders_in = store.file_of(c);
+    renders_in == file || shown(renders_in) == file
 }
 
 fn apply(stdin: bool) -> Result<()> {
@@ -131,31 +150,39 @@ fn apply(stdin: bool) -> Result<()> {
     };
     let mut store = CommentStore::load(CLI_RETENTION_DAYS);
 
-    // Resolve everything first: a batch that half-applies would leave the review
-    // in a state the agent didn't ask for and can't easily reason about.
-    let mut resolved = Vec::with_capacity(batch.comments.len());
-    for (i, item) in batch.comments.iter().enumerate() {
-        let where_ = format!("comment {} of {}", i + 1, batch.comments.len());
-        let r = anchor(
-            session.as_ref(),
-            &store,
-            item.file.as_deref(),
-            item.old_line,
-            item.new_line,
-            item.reply_to.as_deref(),
-            &where_,
-        )?;
-        if item.body.trim().is_empty() {
-            bail!("{where_}: body is empty");
+    let added = write(&mut store, |store| {
+        // Resolve everything first: a batch that half-applies would leave the
+        // review in a state the agent didn't ask for and can't easily reason
+        // about.
+        let mut resolved = Vec::with_capacity(batch.comments.len());
+        for (i, item) in batch.comments.iter().enumerate() {
+            let where_ = format!("comment {} of {}", i + 1, batch.comments.len());
+            let r = anchor(
+                session.as_ref(),
+                store,
+                item.file.as_deref(),
+                item.old_line,
+                item.new_line,
+                item.reply_to.as_deref(),
+                &where_,
+            )?;
+            if item.body.trim().is_empty() {
+                bail!("{where_}: body is empty");
+            }
+            resolved.push(r);
         }
-        resolved.push(r);
-    }
-
-    for (r, item) in resolved.iter().zip(batch.comments) {
-        let id = store.add(build(r, item.body, item.author, item.reply_to));
+        Ok(resolved
+            .into_iter()
+            .zip(batch.comments)
+            .map(|(r, item)| {
+                let id = store.add(build(&r, item.body, item.author, item.reply_to));
+                (id, r)
+            })
+            .collect::<Vec<_>>())
+    })?;
+    for (id, r) in added {
         println!("#{id}  {}:{}", shown(&r.file), r.line);
     }
-    store.save();
     Ok(())
 }
 
@@ -164,14 +191,7 @@ fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> 
     let selected: Vec<&Comment> = store
         .all()
         .iter()
-        // Selected by the file the note renders in, which for a reply is its
-        // thread's — the same file the window would list it under.
-        .filter(|c| {
-            file.as_deref().is_none_or(|f| {
-                let root = &store.root_of(c).file;
-                root == f || shown(root) == f
-            })
-        })
+        .filter(|c| file.as_deref().is_none_or(|f| in_file(&store, c, f)))
         .filter(|c| author.as_deref().is_none_or(|a| c.author == a))
         .collect();
 
@@ -214,10 +234,9 @@ fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> 
 
 fn remove(id: &str) -> Result<()> {
     let mut store = CommentStore::load(CLI_RETENTION_DAYS);
-    match store.remove(id) {
+    match write(&mut store, |store| Ok(store.remove(id)))? {
         0 => bail!("no comment with id {id} (see `riffnav comment list`)"),
         n => {
-            store.save();
             println!("Removed {n} comment(s).");
             Ok(())
         }
@@ -229,8 +248,11 @@ fn clear(file: Option<String>, yes: bool) -> Result<()> {
         bail!("pass --yes to confirm: clearing comments can't be undone");
     }
     let mut store = CommentStore::load(CLI_RETENTION_DAYS);
-    let n = store.clear(file.as_deref());
-    store.save();
+    // The notes `list --file` shows, thread by thread, so no reply is left
+    // behind as a stray thread of its own.
+    let n = write(&mut store, |store| {
+        Ok(store.remove_where(|store, c| file.as_deref().is_none_or(|f| in_file(store, c, f))))
+    })?;
     println!("Removed {n} comment(s).");
     Ok(())
 }
@@ -478,6 +500,33 @@ mod tests {
              @@ -1,2 +1,2 @@\n-a\n+b\n c\n",
         );
         Session::new(&files, "stdin", None)
+    }
+
+    /// `list --file` and `clear --file` pick the same notes: by the file a note
+    /// renders in, named as stored or as printed, whole threads at a time.
+    #[test]
+    fn clear_takes_exactly_what_list_shows_for_a_file() {
+        for name in ["a\tb.rs", "a\\tb.rs"] {
+            let mut store = CommentStore::disabled();
+            let root = store.add(note("a\tb.rs", 2, "root"));
+            // A reply a hand-edited store files elsewhere still renders here.
+            let mut reply = note("other.rs", 9, "reply");
+            reply.reply_to = Some(root);
+            store.add(reply);
+            store.add(note("other.rs", 1, "unrelated"));
+
+            let listed: Vec<String> = store
+                .all()
+                .iter()
+                .filter(|c| in_file(&store, c, name))
+                .map(|c| c.body.clone())
+                .collect();
+            assert_eq!(listed, ["root", "reply"], "{name:?}");
+            let gone = store.remove_where(|s, c| in_file(s, c, name));
+            assert_eq!(gone, 2, "{name:?}");
+            let left: Vec<&str> = store.all().iter().map(|c| c.body.as_str()).collect();
+            assert_eq!(left, ["unrelated"], "no stray reply is left behind");
+        }
     }
 
     /// A store holding one comment, to reply to.
