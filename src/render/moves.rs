@@ -12,9 +12,9 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use super::jump::Target;
 use crate::comment::store::{Anchor, Side};
-use crate::diff::change_runs;
-use crate::diff::{self, FileDiff, Row, path};
+use crate::diff::{self, FileDiff, Row, change_runs, path};
 
 /// Substantial lines a block needs. See [`Line::is_anchor`].
 const MIN_LINES: usize = 2;
@@ -42,13 +42,6 @@ pub struct Mark {
     /// On a removed row, the added row it matches if the two share a change, which
     /// is what side-by-side sets opposite it.
     pub twin: Option<usize>,
-}
-
-/// The line at the other end of a move.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Target {
-    pub file: usize,
-    pub anchor: Anchor,
 }
 
 /// One file's moved rows.

@@ -13,8 +13,7 @@ use super::moves::FileMoves;
 use super::words::Changes;
 use crate::comment::LineMap;
 use crate::comment::anchor::{LineNumbers, Source};
-use crate::diff::change_runs;
-use crate::diff::{self, FileDiff, FileStatus, Row, RowKind, path};
+use crate::diff::{self, FileDiff, FileStatus, Row, RowKind, change_runs, path};
 use crate::theme::{DiffPalette, DiffTheme};
 
 /// Width of a line-number field.

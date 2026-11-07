@@ -37,7 +37,8 @@ use self::corpus::{Corpus, Run, added_runs};
 use self::filter::extension;
 use self::matching::{Block, search};
 use self::sources::{Reading, add_diff_files, add_outside_files, rare_lines};
-use super::moves::{self, MAX_CHANGED_LINES, MoveIndex, Target, lines_changed};
+use super::jump::{Jump, Target};
+use super::moves::{self, MAX_CHANGED_LINES, MoveIndex, lines_changed};
 use crate::autodiff::Tree;
 use crate::comment::store::{Anchor, Side};
 use crate::diff::{self, FileDiff, Row};
@@ -71,16 +72,6 @@ const GREP_LIMIT: Duration = Duration::from_secs(2);
 const MAX_GREP_BYTES: u64 = 1 << 20;
 /// Files outside the diff to read, the ones matching the most lines first.
 const MAX_OUTSIDE_FILES: usize = 24;
-
-/// The other end of a moved or copied line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Jump {
-    Moved(Target),
-    /// A line of the diff, on the far side of a copy.
-    Copied(Target),
-    /// A copy's source that the diff doesn't show, which is what's said instead.
-    Elsewhere(String),
-}
 
 /// One file's copied rows.
 #[derive(Debug, Default, PartialEq, Eq)]

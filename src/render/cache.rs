@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use ratatui::text::Text;
 use twox_hash::XxHash3_128;
 
-use super::copies::{CopyIndex, Git, Jump};
+use super::copies::{CopyIndex, Git};
 use super::jobs::Jobs;
+use super::jump::Jump;
 use super::moves::MoveIndex;
 use super::rendered::Rendered;
 #[cfg(test)]

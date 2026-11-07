@@ -14,6 +14,7 @@ mod cache;
 mod copies;
 mod highlight;
 mod jobs;
+mod jump;
 mod layout;
 mod marks;
 mod moves;
@@ -32,14 +33,13 @@ use std::time::Duration;
 use ratatui::text::Text;
 
 pub use self::cache::{Key, Prefetch, RenderCache, Request};
-pub use self::copies::Jump;
 pub use self::highlight::warm_up;
 #[cfg(test)]
 use self::highlight::{HunkStart, Parsing};
+pub use self::jump::{Jump, Target};
 #[cfg(test)]
 use self::layout::Content;
 pub use self::marks::Marks;
-pub use self::moves::Target;
 pub use self::rendered::Rendered;
 pub use self::spec::CommentLayer;
 #[cfg(test)]
