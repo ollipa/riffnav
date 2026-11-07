@@ -16,12 +16,8 @@ use crate::comment::anchor::{LineNumbers, Source};
 use crate::diff::{self, FileDiff, FileStatus, Row, RowKind, change_runs, path};
 use crate::theme::{DiffPalette, DiffTheme};
 
-/// Width of a line-number field.
+/// Width of a line-number field, unless the file's numbers need more.
 const NUMBER: usize = 5;
-/// Columns the unified gutter takes: two number fields and their separators.
-const GUTTER: usize = NUMBER * 2 + 2;
-/// Columns each side-by-side panel's gutter takes.
-const PANEL_GUTTER: usize = NUMBER + 1;
 /// Closes the left and right panels' number fields.
 const LEFT_DELIM: char = '⋮';
 const RIGHT_DELIM: char = '│';
@@ -31,6 +27,39 @@ pub const WRAP_MARK: char = '↵';
 pub const MOVE_MARK: char = '⇄';
 /// Starts the row saying where a copied block came from.
 pub const COPY_MARK: char = '≡';
+
+/// How wide the line numbers are drawn, which is wide enough for the file's
+/// biggest with a space in front of it.
+#[derive(Clone, Copy)]
+struct Gutter {
+    number: usize,
+}
+
+impl Gutter {
+    fn of(rows: &[Row]) -> Self {
+        let most = rows
+            .iter()
+            .flat_map(|row| [row.old, row.new])
+            .flatten()
+            .max();
+        let digits = most
+            .and_then(u32::checked_ilog10)
+            .map_or(1, |log| log as usize + 1);
+        Self {
+            number: (digits + 1).max(NUMBER),
+        }
+    }
+
+    /// Columns the unified gutter takes: two number fields and their separators.
+    fn unified(self) -> usize {
+        self.number * 2 + 2
+    }
+
+    /// Columns each side-by-side panel's gutter takes.
+    fn panel(self) -> usize {
+        self.number + 1
+    }
+}
 
 /// The lines laid out so far, and the diff line numbers and code each one stands
 /// for, kept in step.
@@ -104,6 +133,7 @@ pub fn unified(
     let palette = theme.palette();
     let width = usize::from(width);
     let tab = usize::from(tab_width.max(1));
+    let gutter = Gutter::of(content.rows);
 
     let mut out = Out::default();
     out.unnumbered(file_header(file, width, &palette));
@@ -117,10 +147,10 @@ pub fn unified(
                 out.unnumbered(hunk_header(new_start, &row.text, width, tab, &palette));
                 continue;
             }
-            RowKind::NoNewline => (no_newline(&row.text, &palette), None),
+            RowKind::NoNewline => (no_newline(&row.text, gutter, &palette), None),
             RowKind::Context | RowKind::Added | RowKind::Removed => {
                 if let Some(note) = content.note(i) {
-                    out.unnumbered([block_note(&note, width, &palette)]);
+                    out.unnumbered([block_note(&note, width, gutter, &palette)]);
                 }
                 let source = Source {
                     row: i as u32,
@@ -129,8 +159,11 @@ pub fn unified(
                     end_char: u32::MAX,
                 };
                 let (syntax, emphasis) = (&content.syntax[i], &content.changes.emphasis[i]);
-                let line = code_line(row, syntax, emphasis, mark.is_some(), width, tab, &palette);
-                (line, Some([Some(source), None]))
+                let room = width.saturating_sub(gutter.unified());
+                let code = code_line(row, syntax, emphasis, mark.is_some(), room, tab, &palette);
+                let mut spans = vec![numbers(row.old, row.new, row.kind, gutter, &palette)];
+                spans.extend(code);
+                (Line::from(spans), Some([Some(source), None]))
             }
         };
         let numbers = LineNumbers {
@@ -165,6 +198,7 @@ struct Panels<'a> {
     left: usize,
     right: usize,
     tab: usize,
+    gutter: Gutter,
     palette: &'a DiffPalette,
     content: &'a Content<'a>,
 }
@@ -183,6 +217,7 @@ pub fn side_by_side(
         left,
         right: width - left,
         tab: usize::from(tab_width.max(1)),
+        gutter: Gutter::of(content.rows),
         palette: &palette,
         content,
     };
@@ -334,7 +369,11 @@ impl Panels<'_> {
             number,
             kind: self.content.rows[row].kind,
             moved,
-            rows: wrap(spans, panel.saturating_sub(PANEL_GUTTER), self.palette),
+            rows: wrap(
+                spans,
+                panel.saturating_sub(self.gutter.panel()),
+                self.palette,
+            ),
         }
     }
 
@@ -349,12 +388,12 @@ impl Panels<'_> {
     ) -> Vec<Span<'static>> {
         let kind = cell.map_or(RowKind::Context, |c| c.kind);
         let number = cell.and_then(|c| c.number).filter(|_| at == 0);
-        let mut spans = vec![panel_gutter(number, kind, delim, self.palette)];
+        let mut spans = vec![panel_gutter(number, kind, delim, self.gutter, self.palette)];
         let text = cell.and_then(|c| c.rows.get(at));
         let shown = text.map_or(&[][..], |t| &t.spans);
         let used: usize = shown.iter().map(|s| display_width(&s.content)).sum();
         spans.extend(shown.iter().cloned());
-        let fill = panel.saturating_sub(PANEL_GUTTER + used);
+        let fill = panel.saturating_sub(self.gutter.panel() + used);
         // An empty panel keeps the terminal's background: tinting it would read
         // as a change on a side where nothing happened.
         let style = cell.map_or(self.palette.context(), |c| {
@@ -365,8 +404,9 @@ impl Panels<'_> {
     }
 
     fn note_side(&self, text: Option<String>, panel: usize, delim: char) -> Vec<Span<'static>> {
-        let mut spans = vec![panel_gutter(None, RowKind::Context, delim, self.palette)];
-        let room = panel.saturating_sub(PANEL_GUTTER);
+        let gutter = panel_gutter(None, RowKind::Context, delim, self.gutter, self.palette);
+        let mut spans = vec![gutter];
+        let room = panel.saturating_sub(self.gutter.panel());
         let shown = fit_note(&text.unwrap_or_default(), room);
         let fill = room.saturating_sub(display_width(&shown));
         spans.push(Span::styled(shown, self.palette.marker()));
@@ -379,11 +419,12 @@ fn panel_gutter(
     number: Option<u32>,
     kind: RowKind,
     delim: char,
+    gutter: Gutter,
     palette: &DiffPalette,
 ) -> Span<'static> {
     let field = number.map_or_else(String::new, |n| n.to_string());
     Span::styled(
-        format!("{field:>NUMBER$}{delim}"),
+        format!("{field:>0$}{delim}", gutter.number),
         Style::new().fg(number_color(kind, palette)),
     )
 }
@@ -582,59 +623,61 @@ fn last_columns(text: &str, cols: usize) -> &str {
     &text[start..]
 }
 
-fn no_newline(text: &str, palette: &DiffPalette) -> Line<'static> {
+fn no_newline(text: &str, gutter: Gutter, palette: &DiffPalette) -> Line<'static> {
     Line::from(vec![
-        gutter(None, None, RowKind::Context, palette),
+        numbers(None, None, RowKind::Context, gutter, palette),
         Span::styled(format!("⌀ {text}"), palette.marker()),
     ])
 }
 
 /// The unnumbered row above a moved or copied block, saying where the block went or
 /// came from.
-fn block_note(note: &str, width: usize, palette: &DiffPalette) -> Line<'static> {
-    let room = width.saturating_sub(GUTTER);
+fn block_note(note: &str, width: usize, gutter: Gutter, palette: &DiffPalette) -> Line<'static> {
+    let room = width.saturating_sub(gutter.unified());
     let shown = fit_note(note, room);
     let fill = room.saturating_sub(display_width(&shown));
     Line::from(vec![
-        gutter(None, None, RowKind::Context, palette),
+        numbers(None, None, RowKind::Context, gutter, palette),
         Span::styled(shown, palette.marker()),
         Span::styled(" ".repeat(fill), palette.context()),
     ])
 }
 
-fn gutter(
+/// A unified row's gutter: its old and new line numbers.
+fn numbers(
     old: Option<u32>,
     new: Option<u32>,
     kind: RowKind,
+    gutter: Gutter,
     palette: &DiffPalette,
 ) -> Span<'static> {
     let field = |n: Option<u32>| n.map_or_else(String::new, |n| n.to_string());
+    let number = gutter.number;
     Span::styled(
-        format!("{:>NUMBER$}⋮{:>NUMBER$}│", field(old), field(new)),
+        format!("{:>number$}⋮{:>number$}│", field(old), field(new)),
         Style::new().fg(number_color(kind, palette)),
     )
 }
 
+/// A unified row's code, padded out to `room` columns, to follow its gutter.
 fn code_line(
     row: &Row,
     runs: &[Run],
     emphasis: &[Range<usize>],
     moved: bool,
-    width: usize,
+    room: usize,
     tab: usize,
     palette: &DiffPalette,
-) -> Line<'static> {
-    let (code, column) = code_spans(row, runs, emphasis, moved, tab, palette);
-    let mut spans = vec![gutter(row.old, row.new, row.kind, palette)];
-    spans.extend(code);
-    let fill = width.saturating_sub(GUTTER + column);
+) -> Vec<Span<'static>> {
+    let (mut spans, column) = code_spans(row, runs, emphasis, moved, tab, palette);
+    let fill = room.saturating_sub(column);
     if fill > 0 {
         spans.push(Span::styled(
             " ".repeat(fill),
             line_style(row.kind, moved, palette),
         ));
     }
-    Line::from(spans)
+    spans
 }
 
 /// The background a row's unemphasized text and padding sit on.
@@ -832,6 +875,54 @@ mod tests {
 
     fn line_width(line: &Line<'_>) -> usize {
         display_width(&plain(line))
+    }
+
+    /// The gutters of a file whose lines start at `start`, in each layout.
+    fn gutters(start: u32, side_by_side: bool) -> Vec<String> {
+        let raw = file_with(&format!("@@ -{start},3 +{start},3 @@\n a\n-b\n+c\n d\n"));
+        let file = parse(&raw).remove(0);
+        let moves = FileMoves::default();
+        let (text, map) = laid_out(
+            &file,
+            &moves,
+            60,
+            DiffTheme::GitHubDark,
+            4,
+            &[],
+            side_by_side,
+        );
+        let numbered = (0..text.lines.len()).filter(|&at| map.get(at).anchor().is_some());
+        numbered
+            .map(|at| {
+                let spans = &text.lines[at].spans;
+                let right = map.sources(at)[1].map_or(1, |s| s.first_span);
+                let gutter = |at: usize| spans[at - 1].content.to_string();
+                match side_by_side {
+                    false => gutter(1),
+                    true => format!("{}{}", gutter(1), gutter(right)),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_gutter_grows_to_keep_a_space_before_the_biggest_number() {
+        let small = gutters(9997, false);
+        assert_eq!(
+            small,
+            [
+                " 9997⋮ 9997│",
+                " 9998⋮     │",
+                "     ⋮ 9998│",
+                " 9999⋮ 9999│"
+            ]
+        );
+        let unified = gutters(99_996, false);
+        assert_eq!(unified[0], " 99996⋮ 99996│");
+        assert_eq!(gutters(99_998, false)[3], " 100000⋮ 100000│");
+        assert_eq!(gutters(99_996, true)[1], " 99997⋮ 99997│");
+        assert_eq!(gutters(9_999_996, true)[0], " 9999996⋮ 9999996│");
+        assert_eq!(gutters(u32::MAX - 3, false)[0], " 4294967292⋮ 4294967292│");
     }
 
     #[test]
@@ -1285,7 +1376,7 @@ mod tests {
                 let wide: usize = line.spans.iter().map(|s| display_width(&s.content)).sum();
                 let note = line.spans.iter().any(|s| s.content.starts_with('≡'));
                 assert!(
-                    !note || wide <= usize::from(width).max(GUTTER),
+                    !note || wide <= usize::from(width).max(Gutter { number: NUMBER }.unified()),
                     "{wide} in {width}"
                 );
             }
