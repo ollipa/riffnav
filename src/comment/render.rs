@@ -17,6 +17,7 @@ use unicode_width::UnicodeWidthChar;
 
 use super::anchor::LineMap;
 use super::store::{Anchor, Comment};
+use crate::diff::path::shown;
 use crate::state;
 use crate::theme::DiffTheme;
 
@@ -193,7 +194,11 @@ fn block(
         }
         if i == 0 && orphaned {
             header.push(Span::styled(
-                format!("  ({file}:{} is no longer in this diff)", anchor.line),
+                format!(
+                    "  ({}:{} is no longer in this diff)",
+                    shown(file),
+                    anchor.line
+                ),
                 Style::new().fg(palette.stale),
             ));
         }
@@ -762,5 +767,33 @@ mod tests {
             },
         );
         assert!(text_of(&text.lines)[1].contains("code changed since"));
+    }
+
+    /// A file's name can hold control characters, which must not reach the
+    /// terminal from an orphan's header any more than from the tree.
+    #[test]
+    fn an_orphans_header_shows_the_name_escaped() {
+        let (mut text, mut map) = render(DIFF);
+        let mut store = CommentStore::disabled();
+        store.add(note("a\tb\x1b.rs", 99, "gone"));
+        splice(
+            &mut text,
+            &mut map,
+            &store.threads("a\tb\x1b.rs"),
+            &Card {
+                file: "a\tb\x1b.rs",
+                me: "me",
+                width: 80,
+                diff_hash: 0,
+                theme: DiffTheme::GitHubDark,
+            },
+        );
+        let out = text_of(&text.lines).join("\n");
+        let shown = crate::diff::path::shown("a\tb\x1b.rs");
+        assert!(
+            out.contains(&format!("({shown}:99 is no longer in this diff)")),
+            "{out}"
+        );
+        assert!(!out.contains(['\t', '\x1b']), "{out:?}");
     }
 }
