@@ -32,8 +32,44 @@ pub const MOVE_MARK: char = '⇄';
 /// Starts the row saying where a copied block came from.
 pub const COPY_MARK: char = '≡';
 
-/// The lines holding code, and what each one's sides came from.
-type Sources = Vec<(usize, [Option<Source>; 2])>;
+/// The lines laid out so far, and the diff line numbers and code each one stands
+/// for, kept in step.
+#[derive(Default)]
+struct Out {
+    lines: Vec<Line<'static>>,
+    numbers: Vec<LineNumbers>,
+    /// The lines holding code, and what each one's sides came from.
+    sources: Vec<(usize, [Option<Source>; 2])>,
+}
+
+impl Out {
+    /// Lines that stand for no diff line: headers, notes and markers.
+    fn unnumbered(&mut self, lines: impl IntoIterator<Item = Line<'static>>) {
+        for line in lines {
+            self.lines.push(line);
+            self.numbers.push(LineNumbers::none());
+        }
+    }
+
+    /// A line standing for `numbers`, whose code came from `sources`, if any.
+    fn line(
+        &mut self,
+        line: Line<'static>,
+        numbers: LineNumbers,
+        sources: Option<[Option<Source>; 2]>,
+    ) {
+        if let Some(sources) = sources {
+            self.sources.push((self.lines.len(), sources));
+        }
+        self.lines.push(line);
+        self.numbers.push(numbers);
+    }
+
+    fn finish(self) -> (Text<'static>, LineMap) {
+        let map = LineMap::from_numbers(self.numbers).with_sources(self.sources);
+        (Text::from(self.lines), map)
+    }
+}
 
 /// What the render passes worked out about a file, index-aligned with `rows`.
 pub struct Content<'a> {
@@ -69,26 +105,22 @@ pub fn unified(
     let width = usize::from(width);
     let tab = usize::from(tab_width.max(1));
 
-    let mut lines = file_header(file, width, &palette);
-    let mut numbers = vec![LineNumbers::none(); lines.len()];
-    let mut sources = Sources::new();
+    let mut out = Out::default();
+    out.unnumbered(file_header(file, width, &palette));
     for (i, row) in content.rows.iter().enumerate() {
         if content.cancelled.load(Ordering::Relaxed) {
             break;
         }
         let mark = content.moves.at(i);
-        let line = match row.kind {
+        let (line, sources) = match row.kind {
             RowKind::HunkHeader { new_start } => {
-                let header = hunk_header(new_start, &row.text, width, tab, &palette);
-                numbers.resize(numbers.len() + header.len(), LineNumbers::none());
-                lines.extend(header);
+                out.unnumbered(hunk_header(new_start, &row.text, width, tab, &palette));
                 continue;
             }
-            RowKind::NoNewline => no_newline(&row.text, &palette),
+            RowKind::NoNewline => (no_newline(&row.text, &palette), None),
             RowKind::Context | RowKind::Added | RowKind::Removed => {
                 if let Some(note) = content.note(i) {
-                    lines.push(block_note(&note, width, &palette));
-                    numbers.push(LineNumbers::none());
+                    out.unnumbered([block_note(&note, width, &palette)]);
                 }
                 let source = Source {
                     row: i as u32,
@@ -96,19 +128,18 @@ pub fn unified(
                     first_char: 0,
                     end_char: u32::MAX,
                 };
-                sources.push((lines.len(), [Some(source), None]));
                 let (syntax, emphasis) = (&content.syntax[i], &content.changes.emphasis[i]);
-                code_line(row, syntax, emphasis, mark.is_some(), width, tab, &palette)
+                let line = code_line(row, syntax, emphasis, mark.is_some(), width, tab, &palette);
+                (line, Some([Some(source), None]))
             }
         };
-        lines.push(line);
-        numbers.push(LineNumbers {
+        let numbers = LineNumbers {
             old: row.old,
             new: row.new,
-        });
+        };
+        out.line(line, numbers, sources);
     }
-    let map = LineMap::from_numbers(numbers).with_sources(sources);
-    (Text::from(lines), map)
+    out.finish()
 }
 
 /// One side of a side-by-side row.
@@ -157,9 +188,8 @@ pub fn side_by_side(
     };
     let rows = content.rows;
 
-    let mut lines = file_header(file, width, &palette);
-    let mut numbers = vec![LineNumbers::none(); lines.len()];
-    let mut sources = Sources::new();
+    let mut out = Out::default();
+    out.unnumbered(file_header(file, width, &palette));
     let mut runs = change_runs(rows).into_iter().peekable();
     let mut i = 0;
     while i < rows.len() && !content.cancelled.load(Ordering::Relaxed) {
@@ -169,7 +199,7 @@ pub fn side_by_side(
         {
             let last = removed.iter().chain(&added).max().copied().unwrap_or(i);
             for (old, new) in aligned(&removed, &added, &content.changes.partner) {
-                panels.emit(old, new, &mut lines, &mut numbers, &mut sources);
+                panels.emit(old, new, &mut out);
             }
             i = last + 1;
             // The marker after the run's last row was emitted with that row.
@@ -178,12 +208,12 @@ pub fn side_by_side(
         }
         match row.kind {
             RowKind::HunkHeader { new_start } => {
-                let header = hunk_header(new_start, &row.text, width, panels.tab, &palette);
-                numbers.resize(numbers.len() + header.len(), LineNumbers::none());
-                lines.extend(header);
+                out.unnumbered(hunk_header(
+                    new_start, &row.text, width, panels.tab, &palette,
+                ));
             }
             RowKind::Context => {
-                panels.emit(Some(i), Some(i), &mut lines, &mut numbers, &mut sources);
+                panels.emit(Some(i), Some(i), &mut out);
             }
             // Only reached for a marker with no code row in front of it to carry
             // it, which git doesn't write.
@@ -195,8 +225,7 @@ pub fn side_by_side(
             i += 1;
         }
     }
-    let map = LineMap::from_numbers(numbers).with_sources(sources);
-    (Text::from(lines), map)
+    out.finish()
 }
 
 /// The rows of one change, laid out opposite each other. A removed row and its
@@ -233,17 +262,10 @@ fn zip_into(out: &mut Vec<(Option<usize>, Option<usize>)>, old: &[usize], new: &
 impl Panels<'_> {
     /// Draw the rows at `old` and `new` opposite each other, plus any `\ No
     /// newline` markers that follow them.
-    fn emit(
-        &self,
-        old: Option<usize>,
-        new: Option<usize>,
-        lines: &mut Vec<Line<'static>>,
-        numbers: &mut Vec<LineNumbers>,
-        sources: &mut Sources,
-    ) {
+    fn emit(&self, old: Option<usize>, new: Option<usize>, out: &mut Out) {
         let rows = self.content.rows;
         let note = |at: Option<usize>| self.content.note(at?);
-        self.notes(note(old), note(new), lines, numbers);
+        self.notes(note(old), note(new), out);
 
         let left = old.map(|i| self.cell(i, rows[i].old, self.left));
         let right = new.map(|i| self.cell(i, rows[i].new, self.right));
@@ -266,42 +288,34 @@ impl Panels<'_> {
                     end_char: shown.chars.end,
                 })
             };
-            let line = [
+            let sources = [
                 source(left.as_ref(), 0),
                 source(right.as_ref(), right_gutter),
             ];
-            sources.push((lines.len(), line));
-            lines.push(Line::from(spans));
-            numbers.push(if at == 0 {
+            let numbers = if at == 0 {
                 LineNumbers {
                     old: left.as_ref().and_then(|c| c.number),
                     new: right.as_ref().and_then(|c| c.number),
                 }
             } else {
                 LineNumbers::none()
-            });
+            };
+            out.line(Line::from(spans), numbers, Some(sources));
         }
 
         let marker = |at: Option<usize>| {
             let next = rows.get(at? + 1)?;
             (next.kind == RowKind::NoNewline).then(|| format!("⌀ {}", next.text))
         };
-        self.notes(marker(old), marker(new), lines, numbers);
+        self.notes(marker(old), marker(new), out);
     }
 
     /// A row of unnumbered remarks, if either side has one.
-    fn notes(
-        &self,
-        old: Option<String>,
-        new: Option<String>,
-        lines: &mut Vec<Line<'static>>,
-        numbers: &mut Vec<LineNumbers>,
-    ) {
+    fn notes(&self, old: Option<String>, new: Option<String>, out: &mut Out) {
         if old.is_some() || new.is_some() {
             let mut spans = self.note_side(old, self.left, LEFT_DELIM);
             spans.extend(self.note_side(new, self.right, RIGHT_DELIM));
-            lines.push(Line::from(spans));
-            numbers.push(LineNumbers::none());
+            out.unnumbered([Line::from(spans)]);
         }
     }
 
