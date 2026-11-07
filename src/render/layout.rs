@@ -7,6 +7,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use unicode_width::UnicodeWidthChar;
 
+use super::copies::FileCopies;
 use super::highlight::Run;
 use super::moves::FileMoves;
 use super::words::{Changes, change_runs};
@@ -28,6 +29,8 @@ const RIGHT_DELIM: char = '│';
 pub const WRAP_MARK: char = '↵';
 /// Starts the row saying where a moved block went.
 pub const MOVE_MARK: char = '⇄';
+/// Starts the row saying where a copied block came from.
+pub const COPY_MARK: char = '≡';
 
 /// The lines holding code, and what each one's sides came from.
 type Sources = Vec<(usize, [Option<Source>; 2])>;
@@ -38,8 +41,21 @@ pub struct Content<'a> {
     pub syntax: &'a [Vec<Run>],
     pub changes: &'a Changes,
     pub moves: &'a FileMoves,
+    pub copies: &'a FileCopies,
     /// Set to stop short, with the lines so far.
     pub cancelled: &'a AtomicBool,
+}
+
+impl Content<'_> {
+    /// What to say above row `at`, if a moved or copied block starts there.
+    fn note(&self, at: usize) -> Option<String> {
+        let moved = self.moves.at(at).and_then(|mark| mark.hint.as_deref());
+        let moved = moved.map(|hint| format!("{MOVE_MARK} {hint}"));
+        moved.or_else(|| {
+            let note = self.copies.note(at)?;
+            Some(format!("{COPY_MARK} {note}"))
+        })
+    }
 }
 
 pub fn unified(
@@ -70,8 +86,8 @@ pub fn unified(
             }
             RowKind::NoNewline => no_newline(&row.text, &palette),
             RowKind::Context | RowKind::Added | RowKind::Removed => {
-                if let Some(hint) = mark.and_then(|m| m.hint.as_deref()) {
-                    lines.push(move_hint(hint, width, &palette));
+                if let Some(note) = content.note(i) {
+                    lines.push(block_note(&note, width, &palette));
                     numbers.push(LineNumbers::none());
                 }
                 let source = Source {
@@ -226,11 +242,8 @@ impl Panels<'_> {
         sources: &mut Sources,
     ) {
         let rows = self.content.rows;
-        let hint = |at: Option<usize>| {
-            let hint = self.content.moves.at(at?)?.hint.as_deref()?;
-            Some(format!("{MOVE_MARK} {hint}"))
-        };
-        self.notes(hint(old), hint(new), lines, numbers);
+        let note = |at: Option<usize>| self.content.note(at?);
+        self.notes(note(old), note(new), lines, numbers);
 
         let left = old.map(|i| self.cell(i, rows[i].old, self.left));
         let right = new.map(|i| self.cell(i, rows[i].new, self.right));
@@ -516,10 +529,11 @@ fn no_newline(text: &str, palette: &DiffPalette) -> Line<'static> {
     ])
 }
 
-/// The unnumbered row above a moved block, saying where the block went.
-fn move_hint(hint: &str, width: usize, palette: &DiffPalette) -> Line<'static> {
+/// The unnumbered row above a moved or copied block, saying where the block went or
+/// came from.
+fn block_note(note: &str, width: usize, palette: &DiffPalette) -> Line<'static> {
     let room = width.saturating_sub(GUTTER);
-    let shown = truncate(&format!("{MOVE_MARK} {hint}"), room);
+    let shown = truncate(note, room);
     let fill = room.saturating_sub(display_width(&shown));
     Line::from(vec![
         gutter(None, None, RowKind::Context, palette),
@@ -1055,6 +1069,106 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect();
         assert_eq!(strong, ["2"]);
+    }
+
+    /// A block with a copy of it added below, around nothing that changed.
+    fn copied(side_by_side: bool, width: u16) -> (Text<'static>, LineMap) {
+        let code = [
+            "fn load_settings(path: &Path) -> Result<Settings> {",
+            "    let text = fs::read_to_string(path).context(\"reading settings\")?;",
+            "    let parsed = toml::from_str(&text).context(\"parsing settings\")?;",
+            "    validate_settings(&parsed).context(\"checking settings\")?;",
+            "    Ok(apply_defaults(parsed))",
+        ];
+        let mut body = "@@ -1,5 +1,10 @@\n".to_string();
+        body.extend(code.iter().map(|line| format!(" {line}\n")));
+        body.extend(code.iter().map(|line| format!("+{line}\n")));
+        let files = parse(&format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n{body}"
+        ));
+        let moves = MoveIndex::build(&files);
+        let copies = crate::render::copies::build(&files, &moves, None, &AtomicBool::new(false));
+        let copies = copies.unwrap();
+        let cancelled = AtomicBool::new(false);
+        let rows = crate::diff::rows(&files[0]);
+        let syntax = vec![Vec::new(); rows.len()];
+        let changes = crate::render::words::changes(
+            &rows,
+            &vec![Default::default(); rows.len()],
+            moves.file(0),
+            &cancelled,
+        );
+        let content = Content {
+            rows: &rows,
+            syntax: &syntax,
+            changes: &changes,
+            moves: moves.file(0),
+            copies: copies.file(0),
+            cancelled: &cancelled,
+        };
+        let draw = if side_by_side {
+            self::side_by_side
+        } else {
+            unified
+        };
+        draw(&files[0], &content, width, DiffTheme::GitHubDark, 4)
+    }
+
+    #[test]
+    fn a_copy_keeps_its_added_colors_and_gets_a_note() {
+        let (text, map) = copied(false, WIDTH);
+        let palette = DiffTheme::GitHubDark.palette();
+        let row = map
+            .row_for(Anchor {
+                side: Side::New,
+                line: 6,
+            })
+            .unwrap();
+        let plain = |line: &Line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        assert!(plain(&text.lines[row - 1]).contains("≡ copied from line 1"));
+        assert_eq!(map.get(row - 1).anchor(), None);
+        let tint = text.lines[row].spans[1].style.bg;
+        assert_eq!(tint, palette.plus().bg);
+        assert_ne!(tint, palette.moved().bg);
+    }
+
+    #[test]
+    fn side_by_side_puts_a_copy_note_on_the_added_side() {
+        let (text, map) = copied(true, 80);
+        let row = map
+            .row_for(Anchor {
+                side: Side::New,
+                line: 6,
+            })
+            .unwrap();
+        let note: String = text.lines[row - 1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        let (left, right) = note.split_once('│').unwrap();
+        assert!(!left.contains("copied"), "{note}");
+        assert!(right.contains("copied from line 1"), "{note}");
+    }
+
+    #[test]
+    fn a_narrow_pane_cuts_a_copy_note_short_and_keeps_its_width() {
+        for width in [8, 14, 20] {
+            let (text, _) = copied(false, width);
+            for line in &text.lines {
+                let wide: usize = line.spans.iter().map(|s| display_width(&s.content)).sum();
+                let note = line.spans.iter().any(|s| s.content.starts_with('≡'));
+                assert!(
+                    !note || wide <= usize::from(width).max(GUTTER),
+                    "{wide} in {width}"
+                );
+            }
+        }
     }
 
     /// A function moved from line 1 to line 4, around a line that stayed.

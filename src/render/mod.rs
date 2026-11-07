@@ -9,6 +9,7 @@
 //! taken if the job is still wanted, so one that a resize or a reload has
 //! overtaken can't land.
 
+mod copies;
 mod highlight;
 mod jobs;
 mod layout;
@@ -21,24 +22,30 @@ mod words;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::panic::{self, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
+use twox_hash::XxHash3_128;
 
+pub use self::copies::Jump;
+use self::copies::{CopyIndex, Git};
 pub use self::highlight::warm_up;
 use self::highlight::{HunkStart, Run};
 use self::jobs::Jobs;
-use self::layout::{Content, MOVE_MARK, WRAP_MARK};
+use self::layout::{COPY_MARK, Content, MOVE_MARK, WRAP_MARK};
 pub use self::marks::Marks;
 use self::moves::MoveIndex;
 pub use self::moves::Target;
 use self::starts::StartReader;
 use self::tokens::Tokens;
 use self::words::Changes;
+use crate::autodiff::Tree;
 use crate::comment::anchor::Source;
 use crate::comment::render::CommentBlock;
 use crate::comment::store::{Anchor, Comment};
@@ -91,6 +98,7 @@ fn laid_out(
         syntax: &syntax.runs,
         changes: &changes,
         moves,
+        copies: &Default::default(),
         cancelled: &cancelled,
     };
     let lay_out = if side_by_side {
@@ -207,7 +215,7 @@ impl Rendered {
     }
 
     /// The numbered line behind `line`, which may be `line` itself: the note above
-    /// a moved block stands for the block's first line, and a wrapped side-by-side
+    /// a moved or copied block stands for its first line, and a wrapped side-by-side
     /// row for the row it continues. Anything else unnumbered is left as it is.
     pub fn code_line(&self, line: usize) -> usize {
         let numbered = |at: usize| self.line_map.get(at).anchor().is_some();
@@ -218,7 +226,7 @@ impl Rendered {
         if numbered(line) {
             return line;
         }
-        if has(line, &|text| text.starts_with(MOVE_MARK)) {
+        if has(line, &|text| text.starts_with([MOVE_MARK, COPY_MARK])) {
             return line + 1;
         }
         let mut at = line;
@@ -226,6 +234,20 @@ impl Rendered {
             at -= 1;
         }
         at
+    }
+
+    /// Where to scroll this render to show what `old` shows at `scroll`, going by
+    /// the first numbered line in view. The top of the file stays the top.
+    fn scroll_like(&self, old: &Rendered, scroll: u16) -> Option<u16> {
+        if scroll == 0 {
+            return None;
+        }
+        let top = old.line_at(scroll);
+        let (line, anchor) =
+            (top..old.lines()).find_map(|line| Some((line, old.line_map.get(line).anchor()?)))?;
+        let here = self.row_of(self.line_map.row_for(anchor)?);
+        let above = i32::from(old.row_of(line)) - i32::from(scroll);
+        Some((i32::from(here) - above).clamp(0, i32::from(u16::MAX)) as u16)
     }
 
     /// The first screen row of line `line`, for scrolling a cursor into view.
@@ -638,6 +660,7 @@ struct Spec {
     key: Key,
     diff: FileDiff,
     moves: Arc<MoveIndex>,
+    copies: Arc<CopyIndex>,
     tab_width: u8,
     comments: Comments,
     reader: Option<Arc<StartReader>>,
@@ -726,6 +749,7 @@ impl Spec {
             syntax,
             changes,
             moves: self.moves.file(file),
+            copies: self.copies.file(file),
             cancelled,
         };
         let lay_out = if side_by_side {
@@ -797,8 +821,11 @@ struct Entry {
     rev: u64,
     /// Whether `rendered` has comments in it.
     commented: bool,
-    /// Without its syntax color, until the real render takes its place.
+    /// Not the last word on this file, until the real render takes its place: it's
+    /// without its syntax color, or from before the copies were known.
     preview: bool,
+    /// The [`RenderCache::copies_rev`] it was made from.
+    copies_rev: u64,
     /// Roughly what this takes up.
     bytes: usize,
     /// When it was last on screen, as a count of the cache's own.
@@ -816,6 +843,37 @@ struct Running {
     /// A prefetch, which anything for the screen comes before.
     idle: bool,
     started: Instant,
+    /// The [`RenderCache::copies_rev`] it's working from.
+    copies_rev: u64,
+}
+
+/// The search for copied code, running on a thread of its own as it can take
+/// seconds, which would keep a render thread from the file on screen.
+struct CopyJob {
+    cancelled: Arc<AtomicBool>,
+    thread: JoinHandle<Option<CopyIndex>>,
+}
+
+impl CopyJob {
+    fn start(
+        files: Vec<FileDiff>,
+        moves: Option<Arc<MoveIndex>>,
+        git: Option<Git>,
+    ) -> Option<Self> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stop = cancelled.clone();
+        let search = move || {
+            // A block that's a move is a move, whether moves are being shown or not.
+            let moves = moves.unwrap_or_else(|| Arc::new(MoveIndex::build(&files)));
+            copies::build(&files, &moves, git.as_ref(), &stop)
+        };
+        // The panic hook goes by the thread, so it can't take the app down.
+        let thread = thread::Builder::new()
+            .name("render-copies".to_string())
+            .spawn(search)
+            .ok()?;
+        Some(Self { cancelled, thread })
+    }
 }
 
 /// What the file on screen is missing.
@@ -856,6 +914,25 @@ pub struct RenderCache {
     tab_width: u8,
     detect_moves: bool,
     moves: Arc<MoveIndex>,
+    detect_copies: bool,
+    /// What's known so far of what was copied, which starts with nothing and is
+    /// replaced when [`Self::copy_job`] is done. Width and theme don't come into it,
+    /// so a new one of either only costs its render.
+    copies: Arc<CopyIndex>,
+    /// Counts the times [`Self::copies`] has changed what a file looks like.
+    copies_rev: u64,
+    /// The hash of the diff the copies are for.
+    copies_of: u128,
+    /// Whether [`Self::start_copies`] has anything to do.
+    copies_wanted: bool,
+    copy_job: Option<CopyJob>,
+    /// Jobs given up on, kept so quitting can wait for their git to be stopped.
+    copy_jobs_stopping: Vec<JoinHandle<Option<CopyIndex>>>,
+    /// The render on screen before a copy search changed it, to keep the view on the
+    /// same code. See [`Self::kept_scroll`].
+    replaced: Option<(Key, Arc<Rendered>)>,
+    /// Where git runs, when riffnav ran it for the diff.
+    repo: Option<PathBuf>,
     /// Set when riffnav ran git itself, so there's a file behind the diff to read.
     /// Outlives [`Self::clear`]: a new width has the same hunks.
     starts: Option<Arc<StartReader>>,
@@ -887,13 +964,22 @@ impl RenderCache {
         usize::from(self.tab_width)
     }
 
-    pub fn new(tab_width: u8, detect_moves: bool) -> Self {
+    pub fn new(tab_width: u8, detect_moves: bool, detect_copies: bool) -> Self {
         let (sender, results) = mpsc::channel();
         Self {
             entries: HashMap::new(),
             tab_width,
             detect_moves,
             moves: Arc::default(),
+            detect_copies,
+            copies: Arc::default(),
+            copies_rev: 0,
+            copies_of: 0,
+            copies_wanted: false,
+            copy_job: None,
+            copy_jobs_stopping: Vec::new(),
+            replaced: None,
+            repo: None,
             starts: None,
             jobs: Jobs::default(),
             running: Vec::new(),
@@ -917,11 +1003,13 @@ impl RenderCache {
     pub fn read_starts(&mut self) {
         self.starts
             .get_or_insert_with(|| Arc::new(StartReader::new(".")));
+        self.repo.get_or_insert_with(|| PathBuf::from("."));
     }
 
     #[cfg(test)]
     fn read_starts_in(&mut self, repo: &std::path::Path) {
         self.starts = Some(Arc::new(StartReader::new(repo)));
+        self.repo = Some(repo.to_path_buf());
     }
 
     /// Set how long a render is waited for, from when it was asked for.
@@ -934,10 +1022,16 @@ impl RenderCache {
         self.wait
     }
 
-    /// Whether anything is being rendered, so the event loop has to keep waking up
-    /// to pick it up.
+    /// Whether anything is being rendered.
     pub fn busy(&self) -> bool {
         !self.running.is_empty()
+    }
+
+    /// Whether anything is on its way, so the event loop has to keep waking up to
+    /// pick it up. The search for copies counts here and not in [`Self::busy`], as a
+    /// prefetch has no reason to wait for it.
+    pub fn expecting(&self) -> bool {
+        self.busy() || self.copy_job.is_some()
     }
 
     /// What went wrong rendering the file on screen, the first time it's asked.
@@ -947,7 +1041,7 @@ impl RenderCache {
 
     /// Take in whatever has finished. Whether anything did.
     pub fn collect(&mut self) -> bool {
-        let mut any = false;
+        let mut any = self.collect_copies();
         while let Ok(done) = self.results.try_recv() {
             any |= self.land(done);
         }
@@ -960,19 +1054,19 @@ impl RenderCache {
             self.jobs.discard(done);
             return false;
         };
-        let key = self.running[at].key;
+        let (key, copies_rev) = (self.running[at].key, self.running[at].copies_rev);
         match done.outcome {
             Outcome::Preview(made) => {
                 // A file only gets one, and it never replaces the real thing.
                 if self.entries.contains_key(&key) {
                     self.jobs.discard(made);
                 } else {
-                    self.keep(key, made, true);
+                    self.keep(key, made, true, copies_rev);
                 }
                 return true;
             }
             Outcome::Final(made) => {
-                self.keep(key, made, false);
+                self.keep(key, made, false, copies_rev);
                 if self.running[at].idle {
                     self.prefetched = Some(key);
                 }
@@ -984,7 +1078,8 @@ impl RenderCache {
                     if made.commented && made.base.is_none() {
                         made.base = entry.base.clone();
                     }
-                    self.keep(key, made, false);
+                    let copies_rev = entry.copies_rev;
+                    self.keep(key, made, false, copies_rev);
                 }
             }
             Outcome::NotSpliced(rev) => {
@@ -1001,13 +1096,14 @@ impl RenderCache {
     }
 
     /// Put `made` in the cache, and make room for it.
-    fn keep(&mut self, key: Key, made: Made, preview: bool) {
+    fn keep(&mut self, key: Key, made: Made, preview: bool, copies_rev: u64) {
         let entry = Entry {
             base: made.base,
             rendered: Arc::new(made.rendered),
             rev: made.rev,
             commented: made.commented,
             preview,
+            copies_rev,
             bytes: made.bytes,
             used: self.clock,
             failure: None,
@@ -1015,6 +1111,9 @@ impl RenderCache {
         self.bytes += entry.bytes;
         if let Some(old) = self.entries.insert(key, entry) {
             self.bytes -= old.bytes;
+            if old.copies_rev != copies_rev && self.shown == Some(key) {
+                self.replaced = Some((key, old.rendered.clone()));
+            }
             self.retire(vec![old]);
         }
         self.trim();
@@ -1069,8 +1168,16 @@ impl RenderCache {
 
     /// Stop everything, for quitting.
     pub fn stop(&mut self) {
+        let deadline = Instant::now() + STOP_GRACE;
         self.cancel(|_| true);
+        self.cancel_copies();
         self.jobs.stop(STOP_GRACE);
+        // Each stops its git before it ends, so that's waited for like the renders.
+        while self.copy_jobs_stopping.iter().any(|job| !job.is_finished())
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// Give up on what's being rendered for the screen, which has nothing to show.
@@ -1083,6 +1190,7 @@ impl RenderCache {
     /// shows it differently now. That can be a file other than the one that
     /// changed: a block moved out of it may no longer have anywhere to have gone.
     pub fn index_moves(&mut self, files: &[FileDiff]) {
+        self.forget_copies(files);
         if !self.detect_moves {
             return;
         }
@@ -1093,9 +1201,127 @@ impl RenderCache {
         self.cancel(|_| true); // They're working from the old moves.
     }
 
-    /// The other end of the move `anchor` in `file` is part of, if it moved.
-    pub fn move_target(&self, file: usize, anchor: Anchor) -> Option<Target> {
-        self.moves.file(file).target(anchor)
+    /// Drop what's known of the copies in another diff, as its rows are no good for
+    /// `files`. The same diff again, as `r` often brings, keeps it all.
+    fn forget_copies(&mut self, files: &[FileDiff]) {
+        if !self.detect_copies {
+            return;
+        }
+        let diff = files.iter().fold(0_u128, |hash, file| {
+            let file = XxHash3_128::oneshot(file.raw.as_bytes());
+            hash.wrapping_mul(31).wrapping_add(file)
+        });
+        if diff != self.copies_of {
+            self.copies_of = diff;
+            self.copies_wanted = true;
+            self.cancel_copies();
+            self.take_copies(CopyIndex::default());
+        }
+    }
+
+    /// Whether there's a new diff to look for copies in.
+    pub fn wants_copies(&self) -> bool {
+        self.copies_wanted
+    }
+
+    /// Start looking for copies in `files`. Not before the first frame has been
+    /// drawn, which this must never hold up. `tree` is where the files they leave
+    /// alone can be read.
+    pub fn start_copies(&mut self, files: &[FileDiff], tree: Option<Tree>) {
+        self.copies_wanted = false;
+        if !copies::worth_trying(files) {
+            return;
+        }
+        let moves = self.detect_moves.then(|| self.moves.clone());
+        let git = self.repo.clone().map(|repo| Git { repo, tree });
+        self.copy_job = CopyJob::start(files.to_vec(), moves, git);
+    }
+
+    fn cancel_copies(&mut self) {
+        self.copy_jobs_stopping.retain(|job| !job.is_finished());
+        if let Some(job) = self.copy_job.take() {
+            job.cancelled.store(true, Ordering::Relaxed);
+            self.copy_jobs_stopping.push(job.thread);
+        }
+    }
+
+    /// Take in the copies if they're ready. Whether that changed anything.
+    fn collect_copies(&mut self) -> bool {
+        if self
+            .copy_job
+            .as_ref()
+            .is_none_or(|job| !job.thread.is_finished())
+        {
+            return false;
+        }
+        let found = self.copy_job.take().and_then(|job| job.thread.join().ok());
+        match found.flatten() {
+            Some(index) => self.take_copies(index),
+            None => false,
+        }
+    }
+
+    /// Show `index` from now on. A file it changes keeps its render on screen until
+    /// the new one is ready, so the note arrives without the file going blank.
+    /// Whether it changed anything.
+    fn take_copies(&mut self, index: CopyIndex) -> bool {
+        let old = self.copies.clone();
+        let changed = |file: usize| !old.file(file).looks_like(index.file(file));
+        let any = self.entries.keys().any(|key| changed(key.file))
+            || self.running.iter().any(|job| changed(job.key.file));
+        self.copies_rev += 1;
+        self.cancel(|job| changed(job.key.file));
+        for (key, entry) in &mut self.entries {
+            entry.preview |= changed(key.file);
+        }
+        if any {
+            self.prefetched = None;
+        }
+        self.copies = Arc::new(index);
+        any
+    }
+
+    /// Wait for the search for copies, for a test to say when it lands.
+    #[cfg(test)]
+    pub(crate) fn wait_for_copies(&mut self) {
+        while self.copy_job.is_some() {
+            self.collect_copies();
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Say where `anchor` jumps to, for what a test can't get from a diff.
+    #[cfg(test)]
+    pub(crate) fn set_jump_for_test(&mut self, file: usize, anchor: Anchor, jump: Jump) {
+        let mut index = CopyIndex::default();
+        index.set_jump_for_test(file, anchor, jump);
+        self.copies = Arc::new(index);
+    }
+
+    /// The other end of the move or copy `anchor` in `file` is part of, if any.
+    pub fn jump(&self, file: usize, anchor: Anchor) -> Option<Jump> {
+        let moved = self.moves.file(file).target(anchor).map(Jump::Moved);
+        moved.or_else(|| self.copies.file(file).jump(anchor).cloned())
+    }
+
+    /// The scroll that keeps the view on the same code, if the render of what's on
+    /// screen has just had its copies' notes put in.
+    pub fn kept_scroll(
+        &mut self,
+        file: usize,
+        width: u16,
+        side_by_side: bool,
+        theme: DiffTheme,
+        scroll: u16,
+    ) -> Option<u16> {
+        let (key, old) = self.replaced.take()?;
+        let kept = (key.file == file
+            && key.width == width
+            && key.side_by_side == side_by_side
+            && key.theme == theme)
+            .then(|| self.entries.get(&key)?.rendered.scroll_like(&old, scroll));
+        self.jobs.discard(old);
+        kept.flatten()
     }
 
     /// Get the file on screen under way, and wait for it for up to [`Self::wait`]
@@ -1161,6 +1387,7 @@ impl RenderCache {
             key,
             diff: request.diff.clone(),
             moves: self.moves.clone(),
+            copies: self.copies.clone(),
             tab_width: self.tab_width,
             comments: request.comments.owned(),
             reader: self.starts.clone(),
@@ -1195,6 +1422,7 @@ impl RenderCache {
             cancelled: cancelled.clone(),
             idle,
             started: Instant::now(),
+            copies_rev: self.copies_rev,
         });
         Ticket {
             id,
@@ -1246,6 +1474,19 @@ impl RenderCache {
     ) -> Option<&Rendered> {
         self.entry(file, width, side_by_side, theme)
             .map(|e| e.rendered.as_ref())
+    }
+
+    /// The copies behind what [`Self::get`] returns, which it can trail while its
+    /// new render is being made. Its lines change when these do.
+    pub fn copies_rev(
+        &self,
+        file: usize,
+        width: u16,
+        side_by_side: bool,
+        theme: DiffTheme,
+    ) -> Option<u64> {
+        self.entry(file, width, side_by_side, theme)
+            .map(|e| e.copies_rev)
     }
 
     /// The comment revision behind what [`Self::get`] returns. The render on show
@@ -1364,6 +1605,7 @@ impl RenderCache {
                 rev: comments.rev,
                 commented: true,
                 preview: false,
+                copies_rev: self.copies_rev,
                 bytes: 0,
                 used: 0,
                 failure: None,
@@ -1539,7 +1781,7 @@ mod tests {
     #[test]
     fn a_change_in_one_file_redraws_the_other_end_of_its_moves() {
         let mut files = [removal(), addition(1), unrelated()];
-        let mut cache = RenderCache::new(4, true);
+        let mut cache = RenderCache::new(4, true, false);
         cache.index_moves(&files);
         rendered(&mut cache, &files);
         assert!(says(&cache, 0, "moved to b:1"));
@@ -1557,7 +1799,7 @@ mod tests {
     #[test]
     fn moves_can_be_turned_off() {
         let files = [removal(), addition(1)];
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         cache.index_moves(&files);
         rendered(&mut cache, &files);
         assert!(!says(&cache, 0, "moved to"));
@@ -1603,7 +1845,7 @@ mod tests {
     fn hunk_starts_reach_the_render_and_outlive_a_resize_and_a_theme_change() {
         let dir = std::env::temp_dir().join(format!("riffnav-render-{}", std::process::id()));
         let file = edit_in_a_comment(&dir);
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         cache.read_starts_in(&dir);
         let draw = |cache: &mut RenderCache, width, theme| {
             cache.ensure(&request(0, &file, width, theme));
@@ -1630,7 +1872,7 @@ mod tests {
     fn a_cache_without_a_reader_leaves_hunks_starting_afresh() {
         let dir = std::env::temp_dir().join(format!("riffnav-piped-{}", std::process::id()));
         let file = edit_in_a_comment(&dir);
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         cache.ensure(&request(0, &file, WIDTH, GitHubDark));
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(!cache.busy());
@@ -1702,7 +1944,7 @@ mod tests {
 
     /// A cache that doesn't wait for anything, with its jobs held at the start.
     fn held() -> (RenderCache, Gate) {
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         let gate = Gate::default();
         cache.wait(Duration::ZERO);
         cache.hooks().start = Some(gate.clone());
@@ -1786,7 +2028,7 @@ mod tests {
 
     #[test]
     fn a_slow_file_shows_its_plain_text_until_the_real_render() {
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         let gate = Gate::default();
         cache.wait(Duration::ZERO);
         cache.hooks().real = Some(gate.clone());
@@ -1807,7 +2049,7 @@ mod tests {
 
     #[test]
     fn a_file_that_will_not_be_colored_has_no_preview() {
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         let gate = Gate::default();
         cache.wait(Duration::ZERO);
         cache.hooks().real = Some(gate.clone());
@@ -1907,6 +2149,7 @@ mod tests {
                         key,
                         diff: diff.clone(),
                         moves: moves.clone(),
+                        copies: Arc::default(),
                         tab_width: 4,
                         comments: layer.comments.owned(),
                         reader: None,
@@ -1990,7 +2233,7 @@ mod tests {
 
     #[test]
     fn comments_can_come_and_go_without_doubling_up() {
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         let diff = file("a.rs");
         let one = [note("a.rs", 2, "first")];
         let two = [note("a.rs", 2, "first"), note("a.rs", 1, "second")];
@@ -2012,7 +2255,7 @@ mod tests {
 
     #[test]
     fn a_comment_on_another_file_costs_this_one_nothing() {
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         let diff = file("a.rs");
         cache.ensure(&with_comments(&diff, &[], 1));
         let before = cache
@@ -2035,7 +2278,7 @@ mod tests {
 
     #[test]
     fn a_panic_leaves_the_plain_text_and_says_so() {
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         let diff = file(PANICS);
         cache.ensure(&request(0, &diff, WIDTH, GitHubDark));
         assert!(says(&cache, 0, "let b"));
@@ -2053,7 +2296,7 @@ mod tests {
 
     #[test]
     fn a_panic_in_the_fallback_still_lands_something() {
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         let diff = file(ALWAYS_PANICS);
         cache.ensure(&request(0, &diff, WIDTH, GitHubDark));
         assert!(says(&cache, 0, "Couldn't render"));
@@ -2066,7 +2309,7 @@ mod tests {
 
     #[test]
     fn the_cache_drops_what_was_looked_at_longest_ago() {
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         let files: Vec<FileDiff> = (0..4).map(|at| file(&format!("{at}.rs"))).collect();
         cache.ensure(&request(0, &files[0], WIDTH, GitHubDark));
         let one = cache.stored_bytes();
@@ -2082,7 +2325,7 @@ mod tests {
 
     #[test]
     fn the_file_on_screen_stays_however_big_it_is() {
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         cache.hooks().limit = Some(1);
         let files = [file("a.rs"), file("b.rs")];
         cache.ensure(&request(0, &files[0], WIDTH, GitHubDark));
@@ -2145,7 +2388,7 @@ mod tests {
 
     #[test]
     fn a_prefetch_too_big_to_keep_is_not_made_over_and_over() {
-        let mut cache = RenderCache::new(4, false);
+        let mut cache = RenderCache::new(4, false, false);
         cache.prefetch_for_test();
         let files = [file("a.rs"), file("b.rs")];
         cache.ensure(&request(0, &files[0], WIDTH, GitHubDark));

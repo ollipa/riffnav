@@ -264,7 +264,7 @@ fn render_help(
         ("y", "copy file path"),
         ("o", "open file in $EDITOR"),
         ("v / V", "mark viewed / jump to next unviewed"),
-        ("m", "jump to the other end of a moved line"),
+        ("m", "jump to the other end of a moved or copied line"),
     ];
     if comments {
         entries.push(("c", "comment on the line (or reply, inside a thread)"));

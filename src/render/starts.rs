@@ -25,11 +25,12 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use twox_hash::XxHash3_128;
 
 use super::highlight::{self, HunkStart, MAX_FILE_BYTES};
+use crate::autodiff::Tree;
 use crate::diff::{self, FileDiff, Hunk, Row, RowKind};
 
 /// How often a running git is checked on, to stop it if the job was cancelled.
@@ -84,7 +85,7 @@ impl StartReader {
 
 /// Lines of a side above a hunk. A hunk with no lines on a side names the line
 /// before it rather than its first, as `-U0` shows: `@@ -5,0 +6 @@` adds after 5.
-fn lines_above(start: u32, len: u32) -> usize {
+pub(super) fn lines_above(start: u32, len: u32) -> usize {
     let start = start as usize;
     if len == 0 {
         start
@@ -145,7 +146,7 @@ fn is_header(row: &Row) -> bool {
 /// agree, because the two can part ways: a `textconv` diff shows something other
 /// than the blob. Spacing doesn't count, since `-w` shows context from the new
 /// side on both.
-fn shows(old: &[&str], stops: &[usize], rows: &[Row]) -> bool {
+pub(super) fn shows(old: &[&str], stops: &[usize], rows: &[Row]) -> bool {
     let line = |number: u32| old.get((number as usize).checked_sub(1)?);
     let agrees = |row: &Row| {
         row.old
@@ -193,7 +194,7 @@ fn patched<'a>(
 /// The old side's id in an `index abc123..def456 100644` line, as abbreviated as
 /// git left it, which git can still resolve. `None` if the line is missing, or
 /// names the all-zero id of a file that wasn't there.
-fn old_blob(raw: &str) -> Option<&str> {
+pub(super) fn old_blob(raw: &str) -> Option<&str> {
     let (id, _) = raw
         .lines()
         .take_while(|line| !line.starts_with("@@"))
@@ -239,6 +240,173 @@ fn watch_git(git: &mut Child, cancelled: &AtomicBool, done: impl Fn() -> bool) {
     }
 }
 
+/// What each of `specs` names, in order, from one git. Each blob's size comes off
+/// `budget`, and once that's used up the rest come back as `None`, as does anything
+/// over the size limit, missing, or binary. `None` if `cancelled` was set first.
+pub(super) fn read_blobs(
+    repo: &Path,
+    specs: &[String],
+    budget: &mut usize,
+    cancelled: &AtomicBool,
+) -> Option<Vec<Option<String>>> {
+    if specs.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut git = Command::new("git")
+        .args(["cat-file", "--batch"])
+        .current_dir(repo)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let (stdin, stdout) = (git.stdin.take(), git.stdout.take());
+    let texts = thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut stdin = stdin?;
+            specs
+                .iter()
+                .try_for_each(|spec| writeln!(stdin, "{spec}"))
+                .ok()
+        });
+        let reading = scope.spawn(|| blob_texts(stdout?, specs.len(), budget));
+        watch_git(&mut git, cancelled, || reading.is_finished());
+        reading.join().ok().flatten()
+    });
+    let _ = git.kill();
+    let _ = git.wait();
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut texts = texts.unwrap_or_default();
+    texts.resize(specs.len(), None);
+    Some(texts)
+}
+
+/// Read `count` answers from `git cat-file --batch`, stopping short at the budget.
+fn blob_texts(
+    stdout: ChildStdout,
+    count: usize,
+    budget: &mut usize,
+) -> Option<Vec<Option<String>>> {
+    let mut out = BufReader::new(stdout);
+    let mut texts = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut header = String::new();
+        if out.read_line(&mut header).ok()? == 0 {
+            break;
+        }
+        // `<id> blob <size>`, or `<spec> missing`, where a spec can have spaces in.
+        let mut fields = header.split_whitespace().rev();
+        let (size, kind) = (fields.next()?, fields.next());
+        let Ok(size) = size.parse::<usize>() else {
+            texts.push(None);
+            continue;
+        };
+        if size > *budget {
+            break;
+        }
+        // The newline that ends every answer comes with the body.
+        let mut bytes = Vec::with_capacity(size + 1);
+        (&mut out)
+            .take(size as u64 + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        bytes.truncate(size);
+        let binary = bytes.iter().take(8000).any(|&byte| byte == 0);
+        if kind == Some("blob") && size <= MAX_FILE_BYTES && !binary {
+            *budget -= size;
+            texts.push(Some(String::from_utf8_lossy(&bytes).into_owned()));
+        } else {
+            texts.push(None);
+        }
+    }
+    Some(texts)
+}
+
+/// A line `git grep` found.
+pub(super) struct GrepHit {
+    pub path: String,
+    pub text: String,
+}
+
+/// Search `tree` for any of `patterns`, as fixed strings, in the files `pathspecs`
+/// allow. `limits` are how long it gets and how much output, and what it had found
+/// by then is the answer. `None` if `cancelled` was set first.
+pub(super) fn grep(
+    repo: &Path,
+    tree: &Tree,
+    patterns: &[String],
+    pathspecs: &[String],
+    limits: (Duration, u64),
+    cancelled: &AtomicBool,
+) -> Option<Vec<GrepHit>> {
+    let mut command = Command::new("git");
+    command
+        .args(["grep", "--no-color", "--no-column", "-F", "-I", "-n", "-z"])
+        .args(["--full-name", "-f", "-"]);
+    match tree {
+        Tree::Index => command.arg("--cached"),
+        Tree::Rev(rev) => command.arg(rev),
+    };
+    let mut git = command
+        .arg("--")
+        .args(pathspecs)
+        .current_dir(repo)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let (stdin, stdout) = (git.stdin.take(), git.stdout.take());
+    let (limit, max_bytes) = limits;
+    let deadline = Instant::now() + limit;
+    let output = thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut stdin = stdin?;
+            patterns
+                .iter()
+                .try_for_each(|line| writeln!(stdin, "{line}"))
+                .ok()
+        });
+        let reading = scope.spawn(|| {
+            let mut bytes = Vec::new();
+            stdout?.take(max_bytes).read_to_end(&mut bytes).ok()?;
+            Some(bytes)
+        });
+        watch_git(&mut git, cancelled, || {
+            reading.is_finished() || Instant::now() >= deadline
+        });
+        // Ends the read, which keeps what it has.
+        let _ = git.kill();
+        reading.join().ok().flatten()
+    });
+    let _ = git.kill();
+    let _ = git.wait();
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let output = output.unwrap_or_default();
+    let prefix = match tree {
+        Tree::Index => String::new(),
+        Tree::Rev(rev) => format!("{rev}:"),
+    };
+    let mut hits = Vec::new();
+    for line in String::from_utf8_lossy(&output).lines() {
+        let mut fields = line.splitn(3, '\0');
+        if let (Some(path), Some(_), Some(text)) = (fields.next(), fields.next(), fields.next()) {
+            let path = path.strip_prefix(&prefix).unwrap_or(path);
+            hits.push(GrepHit {
+                path: path.to_string(),
+                text: text.to_string(),
+            });
+        }
+    }
+    Some(hits)
+}
+
 fn blob_text(mut stdin: ChildStdin, stdout: ChildStdout, id: &str) -> Option<String> {
     writeln!(stdin, "{id}").ok()?;
     drop(stdin);
@@ -273,7 +441,7 @@ pub(super) mod tests {
     pub const PANIC_PATH: &str = "panics-reading-starts.rs";
 
     /// A throwaway repository.
-    struct Repo(PathBuf);
+    pub struct Repo(pub PathBuf);
 
     impl Drop for Repo {
         fn drop(&mut self) {
@@ -282,7 +450,7 @@ pub(super) mod tests {
     }
 
     impl Repo {
-        fn new() -> Self {
+        pub fn new() -> Self {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
             let id = NEXT.fetch_add(1, Ordering::Relaxed);
             let dir =
@@ -293,7 +461,7 @@ pub(super) mod tests {
             repo
         }
 
-        fn run(&self, args: &[&str]) -> Output {
+        pub fn run(&self, args: &[&str]) -> Output {
             Command::new("git")
                 .args(["-c", "user.name=t", "-c", "user.email=t@t"])
                 .args(["-c", "commit.gpgsign=false"])
@@ -303,18 +471,18 @@ pub(super) mod tests {
                 .unwrap()
         }
 
-        fn git(&self, args: &[&str]) {
+        pub fn git(&self, args: &[&str]) {
             let out = self.run(args);
             assert!(out.status.success(), "git {args:?}: {out:?}");
         }
 
-        fn write(&self, path: &str, text: &str) {
+        pub fn write(&self, path: &str, text: &str) {
             let path = self.0.join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         }
 
-        fn commit(&self, path: &str, text: &str) {
+        pub fn commit(&self, path: &str, text: &str) {
             self.write(path, text);
             self.git(&["add", "-A"]);
             self.git(&["commit", "-qm", "x"]);

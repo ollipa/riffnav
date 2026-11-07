@@ -1264,6 +1264,41 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_note_is_not_searched_and_a_landing_one_leaves_the_match_alone() {
+        let code = [
+            "fn load_settings(path: &Path) -> Result<Settings> {",
+            "    let text = fs::read_to_string(path).context(\"reading settings\")?;",
+            "    let parsed = toml::from_str(&text).context(\"parsing settings\")?;",
+            "    validate_settings(&parsed).context(\"checking settings\")?;",
+            "    Ok(apply_defaults(parsed))",
+        ];
+        let mut body: String = code.iter().map(|line| format!(" {line}\n")).collect();
+        body.push_str(" between();\n");
+        body.extend(code.iter().map(|line| format!("+{line}\n")));
+        body.push_str(" needle_after();\n");
+        let mut app = app(&hunk("a.rs", &body));
+        search_for(&mut app, "needle_after");
+        let found = app.cursor_anchor;
+
+        app.start_copies();
+        app.cache.wait_for_copies();
+        frame(&mut app);
+        frame(&mut app);
+        assert_eq!(app.cursor_anchor, found);
+        assert!(footer(&mut app).contains("1/1"));
+        assert_eq!(current(&mut app), ["needle_after"]);
+
+        search_for(&mut app, "copied");
+        assert!(!app.searching());
+        let lines = &app.current_render().unwrap().text.lines;
+        let note = lines.iter().flat_map(|line| &line.spans);
+        assert!(
+            note.into_iter()
+                .any(|span| span.content.contains("copied from line"))
+        );
+    }
+
+    #[test]
     fn side_by_side_steps_down_the_screen() {
         let raw = hunk(
             "f",

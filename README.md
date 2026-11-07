@@ -97,7 +97,7 @@ layout for one run with `-s` (side-by-side) or `-u` (unified).
 | `c` | [Comment](#review-comments) on the cursor's line, or reply when it's inside a thread |
 | `x` | Delete the comment under the cursor, and its replies (asks first) |
 | `]` / `[` | Jump to the next / previous comment, across files |
-| `m` | Jump to the other end of a moved line, across files; press again to come back |
+| `m` | Jump to the other end of a moved or copied line, across files; press again to come back. A copy's source that isn't in the diff is named in the status line |
 | `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
 | `?` | Toggle the help overlay |
 | `q` / `Esc` / `Ctrl-c` | Quit (`Esc` clears a search first) |
@@ -148,6 +148,7 @@ icon_style   = "nerd"    # nerd | unicode | ascii
 diff_theme   = "github-dark" # github-dark | github-light
 tab_width    = 4         # columns between tab stops in the diff
 detect_moves = true      # mute code that moved and say where it went
+detect_copies = true     # note added code that duplicates code that's still there
 tree_width   = 32        # columns for the file-tree pane
 show_tree    = true
 start_focus  = "diff"    # "diff": open in the first file (n/p between files) | "tree"
@@ -332,6 +333,19 @@ change. Removed and added lines are matched across the whole diff to find
 blocks that moved, then everything is drawn with [ratatui][ratatui] and cached per
 file/width/layout/theme. Because stdin may itself be the diff, key input is read
 from `/dev/tty`.
+
+An added block that duplicates code that's still there keeps its added colors and
+gets a `copied from path:line` note, since a pasted function is a reason to look
+harder rather than less. Lines are compared ignoring whitespace, a block that could
+be a move is one, and a note is meant to be rare: it takes four rare lines of real
+code, so license headers, imports, fields, match arms, tests, fixtures and generated
+files stay quiet. The source can be context in the diff, an unchanged line of a file
+in the diff, or, when riffnav ran git and knows the tree behind the diff, a file the
+diff doesn't touch. For those a few of the rarest lines go to one `git grep`, stopped
+after two seconds, and only the files it names are read. This all happens on its own
+thread after the first frame is drawn: a note that arrives late leaves the cursor and
+the view on the same code. A diff over 100,000 changed lines is skipped, and no more
+than 32 MiB of blobs are read for one diff.
 
 The lines between hunks aren't in a diff, so a hunk that opens inside a block
 comment or a multi-line string can't be colored from the diff alone. When riffnav

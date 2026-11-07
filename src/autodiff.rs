@@ -171,6 +171,24 @@ pub struct GitDiff {
     pub context: Option<u32>,
 }
 
+/// Where to read a file the diff doesn't touch, which is the same on both sides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tree {
+    /// The index, for a view that reaches past `HEAD`.
+    Index,
+    Rev(String),
+}
+
+impl Tree {
+    /// How `git cat-file` names `path` in this tree.
+    pub fn spec(&self, path: &str) -> String {
+        match self {
+            Self::Index => format!(":{path}"),
+            Self::Rev(rev) => format!("{rev}:{path}"),
+        }
+    }
+}
+
 impl GitDiff {
     /// `riffnav diff`, in one of the built-in views.
     pub fn diff(source: DiffSource, base: Option<String>, extra: Vec<String>) -> Self {
@@ -201,6 +219,28 @@ impl GitDiff {
         match self.view {
             View::Diff(source) if self.extra.is_empty() => Some(source),
             _ => None,
+        }
+    }
+
+    /// What holds the files this diff leaves alone, if that can be told. Arguments of
+    /// the user's own can name any revisions at all, so a diff with them doesn't say,
+    /// and `show` only does when it's of one thing.
+    pub fn tree(&self) -> Option<Tree> {
+        match self.view {
+            View::Show => {
+                let mut revs = self.extra.iter().take_while(|arg| *arg != "--");
+                let revs: Vec<&String> = revs.by_ref().filter(|a| !a.starts_with('-')).collect();
+                match revs[..] {
+                    [] => Some(Tree::Rev("HEAD".to_string())),
+                    [rev] => Some(Tree::Rev(rev.clone())),
+                    _ => None,
+                }
+            }
+            View::Diff(DiffSource::VsBase) if self.extra.is_empty() => {
+                Some(Tree::Rev("HEAD".to_string()))
+            }
+            View::Diff(_) if self.extra.is_empty() => Some(Tree::Index),
+            View::Diff(_) => None,
         }
     }
 

@@ -21,6 +21,10 @@
 # note saying where it went, rather than as a removal and an unrelated addition.
 # detect_moves = true
 
+# Add a note to an added block that duplicates code that still exists, saying where
+# that is. Independent of detect_moves.
+# detect_copies = true
+
 # Columns reserved for the file-tree pane, including its right border.
 # tree_width = 32
 

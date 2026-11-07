@@ -28,7 +28,7 @@ use crate::diff::{FileDiff, FileStatus};
 use crate::forge::{Forge, ReviewSync};
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
-use crate::render::{CommentLayer, RenderCache, Request, Target, WAIT};
+use crate::render::{CommentLayer, Jump, RenderCache, Request, Target, WAIT};
 use crate::review::ReviewStore;
 use crate::session::Session;
 use crate::theme::DiffTheme;
@@ -176,7 +176,7 @@ pub enum Focus {
 
 /// What a render looks like, as far as the line cursor's index into it goes. When
 /// this changes, the index is stale.
-type CursorToken = (usize, u16, bool, DiffTheme, u64);
+type CursorToken = (usize, u16, bool, DiffTheme, u64, u64);
 
 /// State of the fuzzy file-finder overlay.
 pub struct Finder {
@@ -263,6 +263,10 @@ pub struct App {
     /// A diff line an `m` jump is heading for, waiting on the event loop to render
     /// the file it's in, the same way `comment_landing` does.
     move_landing: Option<(usize, Anchor)>,
+    /// Where the last `m` onto a copy's other end came from, and where it landed, so
+    /// a second press comes back. A source can have several copies, so it can't
+    /// always say which one the reader was on.
+    copy_return: Option<(Target, Target)>,
     /// Keys that act on the render, pressed before it was there for them to act on,
     /// oldest first. They run in order once it lands, so a render only ever delays
     /// a key rather than swallowing it. See [`App::must_wait`].
@@ -366,7 +370,7 @@ impl App {
             .unwrap_or(0);
         let mut tree_state = ListState::default();
         tree_state.select(Some(first_file));
-        let mut cache = RenderCache::new(cfg.tab_width, cfg.detect_moves);
+        let mut cache = RenderCache::new(cfg.tab_width, cfg.detect_moves, cfg.detect_copies);
         cache.index_moves(&files);
 
         Self {
@@ -413,6 +417,7 @@ impl App {
             cursor_screen_row: None,
             comment_landing: None,
             move_landing: None,
+            copy_return: None,
             held_keys: VecDeque::new(),
             heading: Heading {
                 forward: true,
@@ -1014,6 +1019,7 @@ impl App {
 
             terminal.draw(|frame| crate::ui::draw(frame, self, diff_width))?;
             let last_draw = Instant::now();
+            self.start_copies();
 
             self.wait_for_event()?;
             // Cap the redraw rate: keep applying buffered input (so scroll
@@ -1072,6 +1078,14 @@ impl App {
         }
     }
 
+    /// Start the search for copied code, when there's a new diff to do it for.
+    fn start_copies(&mut self) {
+        if self.cache.wants_copies() {
+            let tree = self.git.as_ref().and_then(GitDiff::tree);
+            self.cache.start_copies(&self.files, tree);
+        }
+    }
+
     /// Put a question to the render cache about file `idx`, shown `width` wide.
     fn ask_cache(&mut self, idx: usize, width: u16, ask: fn(&mut RenderCache, &Request<'_>)) {
         let side_by_side = self.side_by_side_for(idx);
@@ -1103,6 +1117,7 @@ impl App {
             Some(idx) => self.ask_cache(idx, diff_width, RenderCache::ensure),
             None => self.cache.release(),
         }
+        self.keep_view_on_copies();
         // The render may have changed shape (new comments, new theme, new
         // width), so put the cursor back on the line it was on.
         self.resync_cursor();
@@ -1114,6 +1129,20 @@ impl App {
         self.land_on_match();
         self.run_change_jumps();
         self.replay_held_keys();
+    }
+
+    /// Notes on copies land whenever the search is done, which is no reason for the
+    /// code being read to shift down the screen.
+    fn keep_view_on_copies(&mut self) {
+        let Some(file) = self.selected_file() else {
+            return;
+        };
+        let (width, side_by_side) = (self.last_width, self.side_by_side_for(file));
+        let scroll = self.diff_scroll;
+        let kept = (self.cache).kept_scroll(file, width, side_by_side, self.diff_theme, scroll);
+        if let Some(scroll) = kept {
+            self.diff_scroll = scroll;
+        }
     }
 
     /// Whether a key that reads the render can act now: the one on show is there
@@ -1220,7 +1249,7 @@ impl App {
         let deadline = self.idle_timeout().map(|timeout| Instant::now() + timeout);
         loop {
             let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-            let busy = self.cache.busy().then_some(RENDER_POLL);
+            let busy = self.cache.expecting().then_some(RENDER_POLL);
             let slice = left.into_iter().chain(busy).min();
             let Some(slice) = slice else {
                 self.handle_event()?;
@@ -1294,6 +1323,7 @@ impl App {
         self.abandon_change_landing();
         self.comment_landing = None;
         self.move_landing = None;
+        self.copy_return = None;
         self.prefetch_asked = None;
 
         let target = prev_path
@@ -1482,12 +1512,14 @@ impl App {
         let (width, side_by_side, theme) =
             (self.last_width, self.side_by_side_for(idx), self.diff_theme);
         let rev = self.cache.rev(idx, width, side_by_side, theme);
+        let copies = self.cache.copies_rev(idx, width, side_by_side, theme);
         (
             idx,
             width,
             side_by_side,
             theme,
             rev.unwrap_or(self.comment_rev),
+            copies.unwrap_or(0),
         )
     }
 
@@ -1783,11 +1815,11 @@ impl App {
         }
     }
 
-    /// The other end of the move `m` should follow: the line under the cursor,
-    /// or the first moved line on screen when there's no cursor to aim with. On a
-    /// side-by-side row with a move on both sides, the new side wins, as it does
+    /// What `m` should follow, and from where: the line under the cursor, or the
+    /// first moved or copied line on screen when there's no cursor to aim with. On
+    /// a side-by-side row with a move on both sides, the new side wins, as it does
     /// for comments.
-    fn move_target(&self) -> Option<Target> {
+    fn jump_target(&self) -> Option<(Target, Jump)> {
         let file = self.selected_file()?;
         let render = self.current_render()?;
         let rows = if self.comments_on {
@@ -1806,19 +1838,43 @@ impl App {
                 side: Side::Old,
                 line,
             });
-            [new, old]
-                .into_iter()
-                .flatten()
-                .find_map(|anchor| self.cache.move_target(file, anchor))
+            [new, old].into_iter().flatten().find_map(|anchor| {
+                let jump = self.cache.jump(file, anchor)?;
+                Some((Target { file, anchor }, jump))
+            })
         })
     }
 
-    /// Jump to the other end of a moved line. Both ends point at each other, so
-    /// pressing `m` again comes straight back.
+    /// Whether the cursor is where the last jump onto a copy put it.
+    fn on_copy_landing(&self, landed: Target) -> bool {
+        let here = self.current_render().and_then(|render| {
+            let line = render.code_line(self.diff_cursor);
+            render.line_map.get(line).anchor()
+        });
+        self.selected_file() == Some(landed.file) && here == Some(landed.anchor)
+    }
+
+    /// Jump to the other end of a moved or copied line, or say where it is if the
+    /// diff doesn't show it. Both ends point at each other, so pressing `m` again
+    /// comes straight back.
     fn jump_move(&mut self) {
-        let Some(target) = self.move_target() else {
-            return self.set_status("Not on a moved line");
-        };
+        if let Some((from, landed)) = self.copy_return.take()
+            && self.on_copy_landing(landed)
+        {
+            return self.jump_to(from);
+        }
+        match self.jump_target() {
+            Some((_, Jump::Moved(target))) => self.jump_to(target),
+            Some((from, Jump::Copied(target))) => {
+                self.copy_return = Some((from, target));
+                self.jump_to(target);
+            }
+            Some((_, Jump::Elsewhere(place))) => self.set_status(place),
+            None => self.set_status("Not on a moved or copied line"),
+        }
+    }
+
+    fn jump_to(&mut self, target: Target) {
         if self.selected_file() != Some(target.file) {
             self.reveal_file(target.file);
         }
@@ -3543,6 +3599,7 @@ mod tests {
             theme: app.diff_theme,
             comments: CommentLayer::none(),
         });
+        app.keep_view_on_copies();
         app.resync_cursor();
         app.land_on_move();
     }
@@ -3556,6 +3613,282 @@ mod tests {
     fn cursor_line(app: &App) -> (Option<u32>, Option<u32>) {
         let numbers = app.current_render().unwrap().line_map.get(app.diff_cursor);
         (numbers.old, numbers.new)
+    }
+
+    const COPIED: [&str; 5] = [
+        "fn load_settings(path: &Path) -> Result<Settings> {",
+        "    let text = fs::read_to_string(path).context(\"reading settings\")?;",
+        "    let parsed = toml::from_str(&text).context(\"parsing settings\")?;",
+        "    validate_settings(&parsed).context(\"checking settings\")?;",
+        "    Ok(apply_defaults(parsed))",
+    ];
+
+    /// A file of 80 kept lines with a block at line 31 and a copy of it added at
+    /// line 61, and one more added at line 71 of the new side.
+    fn copies_diff(copies: usize) -> String {
+        let mut raw = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,80 +1,{} @@\n",
+            80 + 5 * copies
+        );
+        for line in 1..=80 {
+            match line {
+                31..=35 => raw.push_str(&format!(" {}\n", COPIED[line - 31])),
+                _ => raw.push_str(&format!(" kept_line({line});\n")),
+            }
+            if line == 60 || (line == 70 && copies > 1) {
+                COPIED
+                    .iter()
+                    .for_each(|code| raw.push_str(&format!("+{code}\n")));
+            }
+        }
+        raw
+    }
+
+    fn app_with_copies(copies: usize) -> App {
+        let mut app = app_with(crate::diff::parse(&copies_diff(copies)));
+        app.comments_on = true;
+        app.focus = Focus::Diff;
+        app.diff_height = 20;
+        app.reveal_file(0);
+        draw_for_move(&mut app);
+        app
+    }
+
+    fn land_copies(app: &mut App) {
+        app.start_copies();
+        app.cache.wait_for_copies();
+        // The event loop's first frame has it start the render, and later ones
+        // pick that up.
+        for _ in 0..3 {
+            draw_for_move(app);
+        }
+    }
+
+    fn lines_of(app: &App) -> Vec<String> {
+        let text = &app.current_render().unwrap().text;
+        let plain = |line: &ratatui::text::Line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        text.lines.iter().map(plain).collect()
+    }
+
+    #[test]
+    fn copies_arrive_after_the_first_draw_with_a_note() {
+        let mut app = app_with_copies(1);
+        assert!(!lines_of(&app).concat().contains("copied from"));
+        land_copies(&mut app);
+        let lines = lines_of(&app);
+        let note = lines
+            .iter()
+            .position(|l| l.contains("copied from"))
+            .unwrap();
+        assert!(
+            lines[note].contains("≡ copied from line 31"),
+            "{}",
+            lines[note]
+        );
+        assert!(lines[note + 1].contains("fn load_settings"));
+    }
+
+    #[test]
+    fn a_landing_note_leaves_the_cursor_and_the_view_on_the_same_code() {
+        let mut app = app_with_copies(1);
+        put_cursor_on(&mut app, Side::New, 75);
+        app.diff_scroll = app.current_render().unwrap().row_of(app.diff_cursor) - 5;
+        let screen = |app: &App| {
+            let render = app.current_render().unwrap();
+            render.row_of(app.diff_cursor) - app.diff_scroll
+        };
+        let before = screen(&app);
+        land_copies(&mut app);
+        assert_eq!(cursor_line(&app), (Some(70), Some(75)));
+        assert_eq!(screen(&app), before);
+    }
+
+    #[test]
+    fn a_landing_note_with_no_cursor_leaves_the_view_on_the_same_code() {
+        let mut app = app_with_copies(1);
+        app.comments_on = false;
+        let render = app.current_render().unwrap();
+        let line = render
+            .line_map
+            .row_for(Anchor {
+                side: Side::New,
+                line: 75,
+            })
+            .unwrap();
+        app.diff_scroll = render.row_of(line);
+        land_copies(&mut app);
+        let render = app.current_render().unwrap();
+        let top = render.line_at(app.diff_scroll);
+        assert_eq!(render.line_map.get(top).new, Some(75));
+    }
+
+    #[test]
+    fn a_landing_note_above_the_view_cant_scroll_the_top_of_the_file_away() {
+        let mut app = app_with_copies(1);
+        land_copies(&mut app);
+        assert_eq!(app.diff_scroll, 0);
+    }
+
+    #[test]
+    fn a_landing_note_leaves_an_open_composer_alone() {
+        let mut app = app_with_copies(1);
+        app.install_comments_for_test(CommentStore::disabled());
+        app.comments_on = true;
+        put_cursor_on(&mut app, Side::New, 75);
+        app.press_for_test(KeyCode::Char('c'), false);
+        app.press_for_test(KeyCode::Char('h'), false);
+        assert!(app.composer().is_some());
+        land_copies(&mut app);
+        assert_eq!(app.composer().map(Composer::body).as_deref(), Some("h"));
+        assert_eq!(cursor_line(&app), (Some(70), Some(75)));
+    }
+
+    #[test]
+    fn m_on_a_copy_jumps_to_its_source_and_back() {
+        let mut app = app_with_copies(1);
+        land_copies(&mut app);
+        put_cursor_on(&mut app, Side::New, 62);
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(cursor_line(&app), (Some(32), Some(32)));
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(cursor_line(&app), (None, Some(62)));
+    }
+
+    #[test]
+    fn m_comes_back_to_the_copy_it_left_when_a_source_has_two() {
+        let mut app = app_with_copies(2);
+        land_copies(&mut app);
+        put_cursor_on(&mut app, Side::New, 77);
+        let (_, here) = cursor_line(&app);
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(cursor_line(&app), (Some(32), Some(32)));
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(cursor_line(&app).1, here);
+    }
+
+    #[test]
+    fn m_on_a_note_goes_from_the_first_line_of_the_block() {
+        let mut app = app_with_copies(1);
+        land_copies(&mut app);
+        put_cursor_on(&mut app, Side::New, 61);
+        app.set_cursor(app.diff_cursor - 1);
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(cursor_line(&app), (Some(31), Some(31)));
+    }
+
+    #[test]
+    fn m_says_where_a_source_outside_the_diff_is() {
+        // Below a diff that only shows the added block and no context at all, the
+        // source only exists as far as a jump can't reach. A context-only diff can't
+        // know that, so the index stands in for what a blob would have found.
+        let mut app = app_with_copies(1);
+        land_copies(&mut app);
+        let new = |line| Anchor {
+            side: Side::New,
+            line,
+        };
+        let jump = Jump::Elsewhere("Copied from src/b.rs:40, not in this diff".to_string());
+        app.cache.set_jump_for_test(0, new(62), jump);
+        put_cursor_on(&mut app, Side::New, 62);
+        let line = app.diff_cursor;
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(
+            app.status.as_deref(),
+            Some("Copied from src/b.rs:40, not in this diff")
+        );
+        assert_eq!(app.diff_cursor, line);
+    }
+
+    #[test]
+    fn a_note_on_a_copy_is_no_stop_for_j_and_k() {
+        let mut app = app_with_copies(1);
+        land_copies(&mut app);
+        let render = app.current_render().unwrap();
+        let lines = lines_of(&app);
+        let note = lines
+            .iter()
+            .position(|l| l.contains("copied from"))
+            .unwrap();
+        assert_eq!(render.changes, [note + 1]);
+    }
+
+    #[test]
+    fn the_note_stands_for_its_block_when_a_comment_is_left_on_it() {
+        let mut app = app_with_copies(1);
+        land_copies(&mut app);
+        put_cursor_on(&mut app, Side::New, 61);
+        let code = app.diff_cursor;
+        let render = app.current_render().unwrap();
+        assert_eq!(render.code_line(code - 1), code);
+    }
+
+    #[test]
+    fn a_refresh_with_the_same_diff_keeps_the_copies() {
+        let mut app = app_with_copies(1);
+        land_copies(&mut app);
+        app.reload_files(crate::diff::parse(&copies_diff(1)));
+        draw_for_move(&mut app);
+        assert!(!app.cache.wants_copies());
+        assert!(lines_of(&app).concat().contains("copied from"));
+    }
+
+    #[test]
+    fn a_refresh_with_another_diff_forgets_the_copies() {
+        let mut app = app_with_copies(1);
+        land_copies(&mut app);
+        app.reload_files(crate::diff::parse(&copies_diff(2)));
+        draw_for_move(&mut app);
+        assert!(app.cache.wants_copies());
+        assert!(!lines_of(&app).concat().contains("copied from"));
+        land_copies(&mut app);
+        let notes = lines_of(&app).concat().matches("copied from").count();
+        assert_eq!(notes, 2);
+    }
+
+    #[test]
+    fn a_new_width_costs_the_render_and_not_the_search() {
+        let mut app = app_with_copies(1);
+        land_copies(&mut app);
+        app.last_width = 90;
+        app.cache.clear();
+        draw_for_move(&mut app);
+        assert!(!app.cache.wants_copies());
+        assert!(!app.cache.expecting());
+        assert!(lines_of(&app).concat().contains("copied from"));
+    }
+
+    #[test]
+    fn turning_copies_off_leaves_moves_alone_and_the_other_way_round() {
+        let mut config = Config {
+            detect_copies: false,
+            ..Config::default()
+        };
+        let files = crate::diff::parse(&copies_diff(1));
+        let mut app = App::new(files, false, &config);
+        assert!(!app.cache.wants_copies());
+        app.start_copies();
+        assert!(!app.cache.expecting());
+
+        config.detect_copies = true;
+        config.detect_moves = false;
+        let files = crate::diff::parse(&copies_diff(1));
+        let mut app = App::new(files, false, &config);
+        app.focus = Focus::Diff;
+        app.diff_height = 20;
+        draw_for_move(&mut app);
+        land_copies(&mut app);
+        assert!(lines_of(&app).concat().contains("copied from"));
     }
 
     #[test]
@@ -3599,7 +3932,7 @@ mod tests {
         draw_for_move(&mut app);
         assert_eq!(app.selected_file(), Some(0));
         assert_eq!(app.diff_cursor, row);
-        assert_eq!(app.status.as_deref(), Some("Not on a moved line"));
+        assert_eq!(app.status.as_deref(), Some("Not on a moved or copied line"));
     }
 
     #[test]
@@ -3709,7 +4042,7 @@ mod tests {
         app.press_for_test(KeyCode::Char('m'), false);
         draw_for_move(&mut app);
         assert_eq!(app.diff_cursor, header);
-        assert_eq!(app.status.as_deref(), Some("Not on a moved line"));
+        assert_eq!(app.status.as_deref(), Some("Not on a moved or copied line"));
     }
 
     #[test]
