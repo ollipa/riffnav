@@ -499,6 +499,74 @@ pub(super) mod tests {
         }
     }
 
+    fn read_all(repo: &Repo, specs: &[&str], budget: &mut usize) -> Vec<Option<String>> {
+        let specs: Vec<String> = specs.iter().map(|spec| spec.to_string()).collect();
+        read_blobs(&repo.0, &specs, budget, &AtomicBool::new(false)).unwrap()
+    }
+
+    #[test]
+    fn reading_blobs_gives_an_answer_for_every_spec() {
+        let repo = Repo::new();
+        repo.write("binary", "abc\0def");
+        repo.commit("a.rs", "first\n");
+        let got = read_all(
+            &repo,
+            &[
+                "HEAD:a.rs",
+                "HEAD:gone.rs",
+                "HEAD:binary",
+                "HEAD",
+                "HEAD:a.rs",
+            ],
+            &mut 100_000,
+        );
+        let text = Some("first\n".to_string());
+        assert_eq!(got, [text.clone(), None, None, None, text]);
+    }
+
+    #[test]
+    fn reading_blobs_stops_at_the_budget() {
+        let repo = Repo::new();
+        repo.write("b.rs", "second\n");
+        repo.commit("a.rs", "first\n");
+        let mut budget = 10;
+        let got = read_all(&repo, &["HEAD:a.rs", "HEAD:b.rs", "HEAD:a.rs"], &mut budget);
+        assert_eq!(got, [Some("first\n".to_string()), None, None]);
+        assert_eq!(budget, 4);
+    }
+
+    #[test]
+    fn reading_blobs_skips_one_over_the_size_limit() {
+        let repo = Repo::new();
+        repo.write("big.rs", &"x".repeat(MAX_FILE_BYTES + 1));
+        repo.commit("a.rs", "first\n");
+        let got = read_all(&repo, &["HEAD:big.rs", "HEAD:a.rs"], &mut (64 << 20));
+        assert_eq!(got, [None, Some("first\n".to_string())]);
+    }
+
+    #[test]
+    fn a_grep_out_of_time_keeps_what_it_has_and_a_cancelled_one_nothing() {
+        let repo = Repo::new();
+        repo.commit("a.rs", "needle\n");
+        let tree = Tree::Rev("HEAD".to_string());
+        let patterns = ["needle".to_string()];
+        let grep = |limits, cancelled: bool| {
+            grep(
+                &repo.0,
+                &tree,
+                &patterns,
+                &[],
+                limits,
+                &AtomicBool::new(cancelled),
+            )
+        };
+        let hits = grep((Duration::from_secs(30), 1 << 20), false).unwrap();
+        assert_eq!(hits[0].path, "a.rs");
+        assert_eq!(hits[0].text, "needle");
+        assert!(grep((Duration::ZERO, 1 << 20), false).is_some());
+        assert!(grep((Duration::from_secs(30), 1 << 20), true).is_none());
+    }
+
     /// A block comment over lines 1 to 40, then code to line 80.
     fn commented() -> String {
         let mut text = "/*\n".to_string();

@@ -1456,6 +1456,96 @@ mod tests {
     }
 
     #[test]
+    fn a_path_with_spaces_can_be_read() {
+        let repo = Repo::new();
+        repo.commit("src/some dir/un touched.rs", &source_file(&FUNCTION));
+        repo.commit("src/new.rs", &FUNCTION.join("\n"));
+        let tree = Some(Tree::Rev("HEAD".to_string()));
+        let got = git_notes(&repo, &["show", "HEAD"], tree);
+        assert_eq!(got, ["copied from src/some dir/un touched.rs:41"]);
+    }
+
+    #[test]
+    fn crlf_doesnt_stop_a_match() {
+        let repo = Repo::new();
+        let crlf = source_file(&FUNCTION).replace('\n', "\r\n");
+        repo.commit("src/untouched.rs", &crlf);
+        repo.commit("src/new.rs", &FUNCTION.join("\n"));
+        let tree = Some(Tree::Rev("HEAD".to_string()));
+        let got = git_notes(&repo, &["show", "HEAD"], tree);
+        assert_eq!(got, ["copied from src/untouched.rs:41"]);
+    }
+
+    #[test]
+    fn a_renamed_file_is_the_source_under_its_new_name() {
+        let repo = Repo::new();
+        let old = source_file(&FUNCTION) + &"const PAD: u32 = 1;\n".repeat(60);
+        repo.commit("a.rs", &old);
+        repo.git(&["mv", "a.rs", "b.rs"]);
+        let new = old.clone() + "\n" + &FUNCTION.join("\n") + "\n";
+        repo.commit("b.rs", &new);
+        let got = git_notes(&repo, &["show", "-M", "HEAD"], None);
+        assert_eq!(got, ["copied from line 41"]);
+    }
+
+    #[test]
+    fn a_renamed_files_old_path_isnt_read_from_the_index() {
+        let repo = Repo::new();
+        let old = source_file(&FUNCTION) + &"const PAD: u32 = 1;\n".repeat(60);
+        repo.commit("src/a.rs", &old);
+        repo.commit("src/c.rs", "const A: u32 = 1;\n");
+        repo.write(
+            "src/c.rs",
+            &format!("const A: u32 = 1;\n{}\n", FUNCTION.join("\n")),
+        );
+        // A rename in the work tree alone, with the old path still in the index,
+        // and the source removed in the new file: only the index has it now.
+        std::fs::rename(repo.0.join("src/a.rs"), repo.0.join("src/b.rs")).unwrap();
+        repo.git(&["add", "-N", "src/b.rs"]);
+        repo.write(
+            "src/b.rs",
+            &(source_file(&[]) + &"const PAD: u32 = 1;\n".repeat(60)),
+        );
+        let got = git_notes(&repo, &["diff", "-M", "HEAD"], Some(Tree::Index));
+        assert!(got.is_empty(), "{got:?}");
+    }
+
+    #[test]
+    fn a_diff_with_spaces_ignored_still_numbers_the_source() {
+        let repo = Repo::new();
+        let old = "const TOP: u32 = 1;\n".to_string()
+            + &source_file(&FUNCTION)
+            + &"const PAD: u32 = 1;\n".repeat(30);
+        repo.commit("a.rs", &old);
+        let new = old.replace("const TOP", "  const   TOP") + "\n" + &FUNCTION.join("\n") + "\n";
+        repo.commit("a.rs", &new);
+        let got = git_notes(&repo, &["show", "-w", "HEAD"], None);
+        assert_eq!(got, ["copied from line 42"]);
+    }
+
+    #[test]
+    fn a_blob_that_isnt_what_the_diff_shows_is_left_alone() {
+        let repo = Repo::new();
+        repo.commit("a.rs", &source_file(&FUNCTION));
+        repo.commit("a.rs", &(source_file(&FUNCTION) + &FUNCTION.join("\n")));
+        let out = repo.run(&["show", "HEAD"]);
+        // The same diff with a context line that isn't what the blob has.
+        let text = String::from_utf8_lossy(&out.stdout).replace(
+            "     Ok(apply_defaults(parsed))",
+            "     Ok(something_else(parsed))",
+        );
+        let files = parse(&text);
+        let moves = MoveIndex::build(&files);
+        let git = Git {
+            repo: repo.0.clone(),
+            tree: None,
+        };
+        let index = build(&files, &moves, Some(&git), &AtomicBool::new(false)).unwrap();
+        // The context is too short to find the source in, so nothing is claimed.
+        assert_eq!(index.notes().count(), 0);
+    }
+
+    #[test]
     fn cancelling_stops_it() {
         let repo = Repo::new();
         repo.commit("a.rs", &source_file(&FUNCTION));

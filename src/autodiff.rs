@@ -689,6 +689,23 @@ mod tests {
     }
 
     #[test]
+    fn the_tree_behind_a_diff_is_only_named_when_its_known() {
+        let rev = |rev: &str| Some(Tree::Rev(rev.to_string()));
+        let show = |args: &[&str]| GitDiff::show(args.iter().map(|a| a.to_string()).collect());
+        let diff = |source, args: &[&str]| {
+            GitDiff::diff(source, None, args.iter().map(|a| a.to_string()).collect())
+        };
+        assert_eq!(show(&[]).tree(), rev("HEAD"));
+        assert_eq!(show(&["abc123"]).tree(), rev("abc123"));
+        assert_eq!(show(&["-w", "abc123", "--", "src"]).tree(), rev("abc123"));
+        assert_eq!(show(&["a", "b"]).tree(), None);
+        assert_eq!(diff(DiffSource::Unstaged, &[]).tree(), Some(Tree::Index));
+        assert_eq!(diff(DiffSource::Staged, &[]).tree(), Some(Tree::Index));
+        assert_eq!(diff(DiffSource::VsBase, &[]).tree(), rev("HEAD"));
+        assert_eq!(diff(DiffSource::Unstaged, &["HEAD~3"]).tree(), None);
+    }
+
+    #[test]
     fn labels_name_the_view_or_the_command() {
         assert_eq!(
             GitDiff::diff(DiffSource::Staged, None, vec![]).label(),
