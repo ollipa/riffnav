@@ -84,8 +84,9 @@ impl App {
         result
     }
 
-    /// Whether something other than the panes is getting the keys.
-    fn keyboard_taken(&self) -> bool {
+    /// Whether something other than the panes is getting the keys, which holds
+    /// the mouse off the panes too.
+    pub(super) fn keyboard_taken(&self) -> bool {
         self.composer.is_some()
             || self.finder.is_some()
             || self.search_prompt().is_some()

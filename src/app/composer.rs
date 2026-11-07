@@ -415,6 +415,28 @@ mod tests {
         assert!(app.status.unwrap().starts_with("Deleted comment #"));
     }
 
+    /// While the prompt is up the mouse leaves the panes alone, as the keys do.
+    #[test]
+    fn the_delete_prompt_holds_the_mouse_off_too() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = app_on_a_saved_comment();
+        app.diff_area = Some(ratatui::layout::Rect::new(0, 0, 60, 10));
+        let on = app.diff_cursor;
+        app.press_for_test(KeyCode::Char('x'), false);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.diff_cursor, on, "the click went nowhere");
+        app.press_for_test(KeyCode::Char('y'), false);
+        assert!(
+            app.comments.all().is_empty(),
+            "and `y` deleted the note it asked about"
+        );
+    }
+
     /// The prompt counts the replies that would go with the note, since deleting
     /// a thread's root takes the whole thread.
     #[test]

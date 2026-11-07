@@ -10,8 +10,7 @@ impl App {
     /// Route a mouse event to the pane under the cursor. Overlays own the whole
     /// screen, so clicks and scrolls beneath them are ignored.
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
-        let prompt = self.search_prompt().is_some();
-        if self.finder.is_some() || self.show_help || self.composer.is_some() || prompt {
+        if self.keyboard_taken() {
             return;
         }
         let pos = Position::new(mouse.column, mouse.row);
