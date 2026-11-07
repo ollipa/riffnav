@@ -7,7 +7,7 @@
 //! second thread free for the moment the file on screen changes.
 //!
 //! A panic here must leave the app running, which takes more than catching it:
-//! see [`crate::app`]'s panic hook.
+//! see the panic hook in `app::terminal`.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -15,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const THREADS: usize = 2;
-/// What the main thread gets, which rendering used to run on. Parsers recurse.
+/// As much stack as the main thread gets, as parsers recurse.
 const STACK_BYTES: usize = 8 << 20;
 
 type Task = Box<dyn FnOnce() + Send>;

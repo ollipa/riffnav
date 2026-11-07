@@ -20,8 +20,7 @@
 //! Lines removed by the diff are never a source. Code that left and came back is a
 //! move, and code that left and came back twice has no original left to point at.
 //!
-//! This runs on a thread of its own, as reading blobs takes as long as it takes. See
-//! [`super::RenderCache::start_copies`].
+//! This runs on a thread of its own: see [`super::RenderCache::start_copies`].
 
 mod corpus;
 mod filter;
@@ -43,12 +42,12 @@ use crate::autodiff::Tree;
 use crate::comment::store::{Anchor, Side};
 use crate::diff::{self, FileDiff, Row};
 
-/// Lines of real code a block needs. See [`is_code`]. Much more than a move needs:
-/// two lines coming back after being removed is a coincidence worth checking, but
-/// two lines that happen to exist elsewhere are just how code looks.
+/// Lines of real code a block needs. See [`filter::is_code`]. Much more than a move
+/// needs: two lines coming back after being removed is a coincidence worth checking,
+/// but two lines that happen to exist elsewhere are just how code looks.
 const MIN_LINES: usize = 4;
 /// Different shapes of line they need, as a table's rows all have one or two. See
-/// [`shape_of`].
+/// [`filter::shape_of`].
 const MIN_SHAPES: usize = 3;
 /// Alphanumeric characters those lines need between them.
 const MIN_ALNUM: usize = 100;

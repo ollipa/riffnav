@@ -1,26 +1,21 @@
 //! Where each hunk's parser really starts.
 //!
 //! A hunk can begin inside a block comment or a multi-line string, and only the
-//! lines above it say so. When riffnav ran git itself those lines can be had, and
-//! one blob is enough: the `index` line names the old side, and the hunks turn
-//! that into the new side as far down as the last of them. That holds whichever
-//! view the diff is of, so the work tree is never read: its side rarely has a blob
-//! behind it, but it can change at any moment, and filters leave it in a form the
-//! diff doesn't show.
+//! lines above it say so. When riffnav ran git itself, one blob is enough: the
+//! `index` line names the old side, and the hunks turn that into the new side as
+//! far down as the last of them. The work tree is never read: it rarely has a blob,
+//! can change at any moment, and filters leave it in a form the diff doesn't show.
 //!
-//! Parsing is the expensive part, at roughly 20 lines of Rust a millisecond, so a
-//! 3,500-line file costs 200ms and a file at the size limit most of a second. It
-//! happens as the first step of rendering the file, off the UI thread, so the
-//! render that comes out of it is the right one and there's no second to make.
+//! Parsing runs at roughly 20 lines of Rust a millisecond, so a 3,500-line file
+//! costs 200ms and one at the size limit most of a second. It's the first step of
+//! a render, off the UI thread, so there's no second render to make.
 //!
 //! The same blob names the language of a file whose name doesn't and whose diff
-//! doesn't show its first line, such as a script with no extension changed far
-//! down: its `#!` line is the blob's first. That's why the language is worked
-//! out here, before the starts, and kept with them.
+//! doesn't show its first line, such as an extensionless script changed far down.
 //!
 //! The answer is kept by the hash of the diff text, which names the blob and every
 //! hunk, so resizing or changing theme costs nothing. A file the diff can't be
-//! matched to, for any reason, keeps its hunks starting afresh.
+//! matched to keeps its hunks starting afresh.
 
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
@@ -50,7 +45,6 @@ pub struct StartReader {
 }
 
 impl StartReader {
-    /// A reader running git in `repo`.
     pub fn new(repo: impl Into<PathBuf>) -> Self {
         Self {
             repo: repo.into(),

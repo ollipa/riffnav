@@ -49,8 +49,7 @@ pub fn warm_up() {
     thread::spawn(assets);
 }
 
-/// Decoding the bundled syntaxes takes real time, so it happens on first use and
-/// only once.
+/// The bundled syntaxes, decoded once: that takes real time.
 fn assets() -> &'static Assets {
     static ASSETS: OnceLock<Assets> = OnceLock::new();
     ASSETS.get_or_init(|| Assets {
@@ -282,7 +281,6 @@ pub fn seeds(
     out
 }
 
-/// The syntax theme painting a diff theme's code.
 fn syntax_theme(theme: DiffTheme) -> EmbeddedThemeName {
     match theme {
         DiffTheme::GitHubLight => EmbeddedThemeName::Github,

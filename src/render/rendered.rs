@@ -25,13 +25,8 @@ pub struct Rendered {
     pub height: u32,
     /// Unified only: cumulative wrapped-row offset before each source line, with
     /// a trailing total — `row_offsets[i]` is the first screen row of line `i`.
-    /// `None` for side-by-side, where lines map one-to-one to rows.
-    ///
-    /// This is what keeps scrolling cheap. ratatui's `Paragraph` re-wraps every
-    /// row from the top up to the scroll offset on each frame (`O(scroll)`), so
-    /// deep scrolling in a long diff slows to a crawl. With these offsets the
-    /// viewer seeks straight to the line under the scroll position and wraps only
-    /// the visible window — see [`Rendered::visible`].
+    /// `None` for side-by-side, where lines map one-to-one to rows. Lets
+    /// [`Rendered::visible`] wrap only the rows in view.
     pub(super) row_offsets: Option<Vec<u32>>,
     /// The diff line numbers behind each line of `text`, kept aligned through
     /// comment splicing. Drives the line cursor and comment anchoring.
@@ -39,7 +34,7 @@ pub struct Rendered {
     /// Where each spliced comment thread landed, in row order — what `]` and `[`
     /// step through, and how the cursor names the comment it's sitting on.
     pub comment_rows: Vec<CommentBlock>,
-    /// Per row of [`diff::rows`], the line it starts on and the side it's on, or
+    /// Per row of [`crate::diff::rows`], the line it starts on and the side it's on, or
     /// `None` for a row with no code. The way back from a search match to the line
     /// it's on, which is the other way round from `line_map`.
     pub(super) row_starts: Vec<Option<RowStart>>,
@@ -130,7 +125,6 @@ impl Rendered {
         Some((i64::from(here) - above).clamp(0, i64::from(u32::MAX)) as u32)
     }
 
-    /// The first screen row of line `line`, for scrolling a cursor into view.
     pub fn row_of(&self, line: usize) -> u32 {
         match &self.row_offsets {
             None => line.min(u32::MAX as usize) as u32,
@@ -151,7 +145,7 @@ impl Rendered {
         }
     }
 
-    /// Where `row` of [`diff::rows`] starts in this render.
+    /// Where `row` of [`crate::diff::rows`] starts in this render.
     pub fn row_start(&self, row: u32) -> Option<RowStart> {
         self.row_starts.get(row as usize).copied().flatten()
     }
@@ -202,9 +196,11 @@ impl Rendered {
     }
 
     /// A `Paragraph` showing just the rows visible at `scroll` for a viewport
-    /// `width` by `height`, so per-frame work is `O(height)` rather than
-    /// `O(scroll)`. The returned widget owns its (cloned) slice of lines, so it
-    /// outlives the borrow of `self`, and `marks` are painted on those copies.
+    /// `width` by `height`. ratatui's `Paragraph` re-wraps every row above its
+    /// scroll offset each frame, so a whole-text one is `O(scroll)` and crawls deep
+    /// in a long diff; this is `O(height)`. The returned widget owns its (cloned)
+    /// slice of lines, so it outlives the borrow of `self`, and `marks` are painted
+    /// on those copies.
     ///
     /// `scroll` must already be clamped to `self.height`.
     pub fn visible(
@@ -265,9 +261,7 @@ impl Rendered {
 }
 
 /// Measure a render at `width`: its scrollable height and, for unified output,
-/// the per-line wrapped-row offsets (see [`Rendered::row_offsets`]). Side-by-side
-/// is already wrapped, so each line is exactly one row. Stops short once
-/// `cancelled` is set.
+/// [`Rendered::row_offsets`]. Stops short once `cancelled` is set.
 pub(super) fn measure(
     text: &Text<'static>,
     width: u16,
@@ -342,10 +336,8 @@ mod tests {
     use crate::comment::LineMap;
     use crate::render::wrap::WRAP;
 
-    /// The windowed render (`Rendered::visible`) must be pixel-for-pixel identical
-    /// to the naive "wrap the whole text, then scroll" it replaces — at every
-    /// scroll offset. Equivalence here is what lets us swap the `O(scroll)` render
-    /// for an `O(viewport)` one without changing what the user sees.
+    /// The windowed render (`Rendered::visible`) must be cell-for-cell identical
+    /// to wrapping the whole text and scrolling it, at every scroll offset.
     #[test]
     fn visible_window_matches_full_wrap_at_every_scroll() {
         let (width, view_h) = (24u16, 6u16);

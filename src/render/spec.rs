@@ -23,11 +23,8 @@ use crate::comment::LineMap;
 use crate::comment::store::{Anchor, Comment};
 use crate::diff::{self, FileDiff, Row};
 
-/// The comments to draw into one file's render.
-///
-/// Bundled rather than passed loose so [`RenderCache::ensure`] keeps a readable
-/// signature, and so the borrow of the comment store stays separate from the
-/// mutable borrow of the cache.
+/// The comments to draw into one file's render. Bundled so the borrow of the
+/// comment store stays separate from the mutable borrow of the cache.
 pub struct CommentLayer<'a> {
     /// Threads for this file, from `CommentStore::threads`.
     pub threads: Vec<(Anchor, Vec<&'a Comment>)>,
@@ -107,7 +104,6 @@ pub(super) struct Made {
     /// render's own, and keeping a second copy would double what a file takes up.
     pub(super) base: Option<Arc<Base>>,
     pub(super) rendered: Rendered,
-    /// Whether any comments went in.
     pub(super) commented: bool,
     /// The comment revision it was spliced at.
     pub(super) rev: u64,
@@ -163,7 +159,6 @@ pub(super) enum Outcome {
     /// The file in its final shape without its syntax color, with the real render
     /// still to come.
     Preview(Made),
-    /// The render of the file.
     Final(Made),
     /// New comments in a render that already exists.
     Spliced(Made),
@@ -201,7 +196,6 @@ impl Ticket {
     }
 }
 
-/// What a panic said.
 fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     let text = panic.downcast_ref::<&str>().copied();
     let text = text.or_else(|| panic.downcast_ref::<String>().map(String::as_str));

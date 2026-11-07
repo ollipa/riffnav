@@ -8,6 +8,8 @@
 //! thread: a job works from its own copy of what it needs, and a result is only
 //! taken if the job is still wanted, so one that a resize or a reload has
 //! overtaken can't land.
+//!
+//! [`LineMap`]: crate::comment::LineMap
 
 mod blobs;
 mod cache;

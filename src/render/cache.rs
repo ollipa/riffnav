@@ -60,7 +60,6 @@ struct Entry {
     rendered: Arc<Rendered>,
     /// The comment revision `rendered` was spliced at.
     rev: u64,
-    /// Whether `rendered` has comments in it.
     commented: bool,
     /// Not the last word on this file, until the real render takes its place: it's
     /// without its syntax color, or from before the copies were known.
@@ -164,10 +163,9 @@ impl Request<'_> {
     }
 }
 
-/// Caches renders keyed by `(file, width, side_by_side, theme)` so revisiting a
-/// file — or redrawing at the same size and theme — never renders it again.
-/// Switching themes re-renders (and caches separately), so toggling back is
-/// instant. What's kept is bounded by [`MAX_CACHE_BYTES`].
+/// Caches renders keyed by `(file, width, side_by_side, theme)`, so revisiting a
+/// file or toggling a theme back never renders it again. What's kept is bounded by
+/// [`MAX_CACHE_BYTES`].
 pub struct RenderCache {
     entries: HashMap<Key, Entry>,
     tab_width: u8,
@@ -213,7 +211,6 @@ pub struct RenderCache {
     /// The files prefetched since they were last on screen, so one too big to stay
     /// in the cache isn't made over and over.
     prefetched: HashSet<Key>,
-    /// Whether to prefetch at all.
     prefetching: bool,
     #[cfg(test)]
     test: test_support::Hooks,
@@ -268,17 +265,14 @@ impl RenderCache {
         self.repo.get_or_insert_with(|| PathBuf::from("."));
     }
 
-    /// Set how long a render is waited for, from when it was asked for.
     pub fn wait(&mut self, wait: Duration) {
         self.wait = wait;
     }
 
-    /// How long a frame may wait for renders.
     pub fn waits(&self) -> Duration {
         self.wait
     }
 
-    /// Whether anything is being rendered.
     pub fn busy(&self) -> bool {
         !self.running.is_empty()
     }
@@ -781,7 +775,7 @@ impl RenderCache {
     }
 
     /// Drop the cached renders for a single file (every width/theme variant),
-    /// e.g. after its diff is refreshed in place. Other files stay cached.
+    /// e.g. after its diff is refreshed in place.
     pub fn invalidate(&mut self, file: usize) {
         self.cancel(|job| job.key.file == file);
         self.remove(|key| key.file == file);
