@@ -15,8 +15,6 @@ pub(super) struct CursorToken {
 impl App {
     pub(super) fn scroll_diff(&mut self, delta: i32) {
         self.diff_scroll = self.diff_scroll.saturating_add_signed(delta);
-        // Scrolling drags the cursor along so it never drifts off-screen; the
-        // cursor stays wherever it already is when that's still visible.
         self.park_cursor_in_view();
     }
 
@@ -53,9 +51,8 @@ impl App {
     }
 
     /// Re-resolve the cursor's line index after the render it pointed into was
-    /// rebuilt — a comment spliced in above it, a theme or width change, a switch
-    /// between unified and side-by-side. Anchoring to a diff line rather than a
-    /// row is what makes this recoverable at all.
+    /// rebuilt (a comment spliced in above it, a theme or width change, a layout
+    /// switch), going by the diff line it's anchored to.
     pub(super) fn resync_cursor(&mut self) {
         let Some(idx) = self.selected_file() else {
             return;
@@ -77,8 +74,7 @@ impl App {
         self.diff_cursor = match self.cursor_anchor.and_then(|a| render.line_map.row_for(a)) {
             Some(row) => row,
             // Opening a file for the first time: start on the first real diff
-            // line rather than the file header, so `c` works
-            // straight away instead of reporting there's nothing to comment on.
+            // line rather than the file header, so `c` works straight away.
             None if self.cursor_anchor.is_none() && self.diff_cursor == 0 => {
                 render.line_map.first_code_row().unwrap_or(0)
             }
@@ -101,7 +97,6 @@ impl App {
         }
     }
 
-    /// Move the line cursor by `delta` lines and scroll to keep it in view.
     pub(super) fn move_cursor(&mut self, delta: i32) {
         let Some(max) = self.current_render().map(|r| r.lines().saturating_sub(1)) else {
             return;
@@ -114,7 +109,6 @@ impl App {
         self.scroll_cursor_into_view();
     }
 
-    /// Put the cursor on a specific line and bring it on screen.
     pub(super) fn set_cursor(&mut self, line: usize) {
         let Some(max) = self.current_render().map(|r| r.lines().saturating_sub(1)) else {
             return;
@@ -125,10 +119,8 @@ impl App {
     }
 
     /// Land the cursor on the comment block starting at `line` and bring the
-    /// whole of it into view. A note is read as a unit, so stopping `]` with its
-    /// first line on the last row — the rest of the box below the fold — has
-    /// arrived at the comment without showing it. A block too tall for the pane
-    /// is aligned to its top, which is where reading starts.
+    /// whole of it into view, as a note is read as a unit. A block too tall for
+    /// the pane is aligned to its top, which is where reading starts.
     pub(super) fn set_cursor_on_block(&mut self, line: usize) {
         self.set_cursor(line);
         let height = u32::from(self.diff_height);
@@ -153,8 +145,7 @@ impl App {
     }
 
     /// Scroll the minimum needed to keep the cursor line — all of it, when it
-    /// wraps onto several rows — inside the viewport, with [`CURSOR_PADDING`]
-    /// rows of lead so the cursor never sits flush against an edge.
+    /// wraps onto several rows — inside the viewport, with [`CURSOR_PADDING`].
     fn scroll_cursor_into_view(&mut self) {
         let (Some(render), height) = (self.current_render(), u32::from(self.diff_height)) else {
             return;
@@ -200,8 +191,6 @@ impl App {
         i32::from(self.diff_height.saturating_sub(1)).max(1)
     }
 
-    /// Page through the focused pane — scroll the diff, or jump the tree
-    /// selection, by roughly one screenful.
     pub(super) fn page_move(&mut self, down: bool) {
         let delta = if down { self.page() } else { -self.page() };
         if self.focus == Focus::Tree {
@@ -240,7 +229,6 @@ mod tests {
         app.focus = Focus::Diff;
         app.diff_height = 20;
 
-        // PageDown advances by the viewport height less a line of overlap.
         app.page_move(true);
         assert_eq!(app.diff_scroll, 19);
 

@@ -105,13 +105,13 @@ impl App {
             return Ok(());
         }
 
-        // The fuzzy finder captures all input while open.
+        // So does the finder.
         if self.finder.is_some() {
             self.finder_key(key);
             return Ok(());
         }
 
-        // So does the search prompt.
+        // And the search prompt.
         if self.search_prompt().is_some() {
             self.prompt_key(key);
             return Ok(());
@@ -147,9 +147,8 @@ impl App {
             KeyCode::Esc if self.searching() => self.clear_search(),
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if ctrl => self.quit = true,
-            // In the diff pane j/k move the line cursor (scrolling the pane once
-            // it nears an edge), matching how the tree moves its selection. With
-            // comments off there's no cursor, so they scroll as they always did.
+            // In the diff pane j/k move the line cursor. With comments off there's
+            // no cursor, so they scroll.
             KeyCode::Char('j') | KeyCode::Down => match (self.focus, self.comments_on) {
                 (Focus::Tree, _) => self.move_selection(1),
                 (Focus::Diff, true) => self.move_cursor(1),
@@ -229,17 +228,13 @@ impl App {
             // Context around each change; re-runs the diff, so the same rule.
             KeyCode::Char('+') if self.can_refresh() => self.change_context(true),
             KeyCode::Char('-') if self.can_refresh() => self.change_context(false),
-            // Only bound inside herdr; an inert no-op elsewhere.
             KeyCode::Char('z') if self.herdr.is_some() => self.toggle_herdr_zoom(),
-            // Only bound when a supported forge (e.g. GitHub) is detected.
             KeyCode::Char('W') if self.forge.is_some() => self.open_web_diff(),
             KeyCode::Char('o') => {
                 if let Some(idx) = self.selected_file() {
                     self.pending_editor = Some(self.files[idx].path().to_string());
                 }
             }
-            // Comment keys, bound only when comments are on — like `d`/`z`/`W`,
-            // they're inert rather than misleading when the feature is off.
             KeyCode::Char('c') if self.comments_on => self.start_comment(),
             KeyCode::Char('x') if self.comments_on => self.delete_comment(),
             KeyCode::Char('m') if self.focus == Focus::Diff => self.jump_move(),

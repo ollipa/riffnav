@@ -50,11 +50,8 @@ fn strip_scissors(text: &str) -> String {
 }
 
 impl App {
-    /// Suspend the TUI, run `$VISUAL`/`$EDITOR` on `path`, then resume.
-    ///
-    /// Returns the editor's name and how it exited, so callers can decide what to
-    /// report — opening a file just says so, while composing a comment only reads
-    /// the buffer back on success.
+    /// Suspend the TUI, run `$VISUAL`/`$EDITOR` on `path`, then resume. Returns the
+    /// editor's name and how it exited, for the caller to report.
     fn run_editor(
         &mut self,
         terminal: &mut DefaultTerminal,
@@ -97,12 +94,8 @@ impl App {
         Ok(())
     }
 
-    /// Compose a comment body in `$EDITOR`, git-commit style.
-    ///
-    /// The buffer opens with an empty first line and everything explanatory below
-    /// a scissors marker, so a body containing `#` — a markdown heading, a shell
-    /// snippet — survives verbatim. That's why this doesn't use git's plain `#`
-    /// comment convention.
+    /// Compose a comment body in `$EDITOR`, with everything explanatory below
+    /// [`SCISSORS`] so a body containing `#` survives verbatim.
     pub(super) fn compose_comment(
         &mut self,
         terminal: &mut DefaultTerminal,
@@ -134,9 +127,8 @@ mod tests {
     use super::*;
     use crate::comment::{Anchor, PendingComment};
 
-    /// The editor buffer must round-trip a body containing `#`, which is why it
-    /// uses git's scissors convention rather than git's `#`-comment convention:
-    /// review notes routinely contain markdown headings and shell snippets.
+    /// The editor buffer must round-trip a body containing `#`: review notes
+    /// routinely contain markdown headings and shell snippets.
     #[test]
     fn the_editor_template_round_trips_a_body_containing_hashes() {
         let pending = PendingComment {

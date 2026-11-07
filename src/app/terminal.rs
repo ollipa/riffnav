@@ -5,21 +5,18 @@ use std::{panic, thread};
 
 use ratatui::DefaultTerminal;
 
-/// The only mouse reporting riffnav uses: button presses — which include wheel
-/// ticks — plus motion *while a button is held*, with SGR-encoded coordinates
-/// (`?1002` + `?1006`). Button-drag motion is what makes the pane divider
-/// draggable. Deliberately *not* crossterm's `EnableMouseCapture`, which also
-/// enables any-motion tracking (`?1003`): riffnav ignores unpressed pointer
-/// motion, so reporting it just wakes the loop to repaint the whole screen for
-/// every mouse twitch.
+/// Button presses (wheel ticks included) plus motion *while a button is held*,
+/// for dragging the divider, with SGR-encoded coordinates (`?1002` + `?1006`).
+/// Not crossterm's `EnableMouseCapture`, which also enables any-motion tracking
+/// (`?1003`): that would wake the loop to repaint the whole screen for every
+/// mouse twitch.
 const MOUSE_ON: &[u8] = b"\x1b[?1002h\x1b[?1006h";
 
 const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l";
 
-/// Best-effort terminal mouse reporting, toggled around screen ownership: on
-/// while the TUI runs so clicks and the wheel reach us, off whenever we hand the
-/// terminal back (teardown, or suspending for `$EDITOR`). Failures are ignored —
-/// a terminal without mouse support just keeps working off the keyboard.
+/// Best-effort: on while the TUI runs, off whenever we hand the terminal back
+/// (teardown, or `$EDITOR`). A terminal without mouse support just keeps working
+/// off the keyboard.
 pub(super) fn enable_mouse() {
     write_stdout(MOUSE_ON);
 }

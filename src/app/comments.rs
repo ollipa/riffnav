@@ -38,10 +38,9 @@ impl App {
         self.bump_comments();
     }
 
-    /// Publish what this window is showing, so `riffnav comment add` running in
-    /// another terminal can validate a `--file`/`--line` against the diff on
-    /// screen rather than guessing at one. Best-effort; the CLI falls back to
-    /// re-deriving the diff from git when there's no session to read.
+    /// Publish what this window is showing, so `riffnav comment add` in another
+    /// terminal can validate `--file`/`--line` against the diff on screen.
+    /// Best-effort; without a session the CLI re-derives the diff from git.
     pub(super) fn publish_session(&self) {
         if !self.comments_on {
             return;
@@ -55,8 +54,7 @@ impl App {
         self.comments_on
     }
 
-    /// How many comments are anchored in the file at `diff_index`, for the tree's
-    /// per-file badge.
+    /// Comments anchored in the file at `diff_index`, for the tree's badge.
     pub fn comment_count(&self, diff_index: usize) -> usize {
         if !self.comments_on {
             return 0;
@@ -66,7 +64,6 @@ impl App {
             .map_or(0, |f| self.comments.count_for_file(f.path()))
     }
 
-    /// Total comments across every file in the current diff.
     pub fn comment_total(&self) -> usize {
         if !self.comments_on {
             return 0;
@@ -80,11 +77,8 @@ impl App {
     }
 
     /// The comment layer for file `idx`, borrowed for one `RenderCache::ensure`.
-    ///
-    /// An associated function rather than a method: the layer borrows `files` and
-    /// `comments` for as long as the call, and taking `&self` would keep `cache`
-    /// borrowed too — which `ensure` needs mutably. Naming the fields lets the
-    /// borrow checker see the three are disjoint.
+    /// Not a method: `&self` would keep `cache` borrowed, which `ensure` needs
+    /// mutably.
     pub(super) fn comment_layer<'a>(
         files: &'a [FileDiff],
         comments: &'a CommentStore,
@@ -132,10 +126,9 @@ impl App {
             .find(|b| cursor >= b.start && cursor < b.start + b.len)
     }
 
-    /// Jump the cursor to the next or previous comment, walking off the end of
-    /// this file into the next commented one and wrapping around the whole diff,
-    /// so `]` held down visits every note in the review exactly once per lap.
-    /// Reports when there's nothing to jump to.
+    /// Jump to the next or previous comment, crossing into the next commented file
+    /// and wrapping around the whole diff, so `]` held down visits every note in
+    /// the review exactly once per lap.
     pub(crate) fn jump_comment(&mut self, dir: Direction) {
         self.head(dir, By::Comment);
         let starts: Vec<usize> = self
@@ -169,13 +162,10 @@ impl App {
         }
     }
 
-    /// Select the next/previous *other* file carrying comments, in tree order and
-    /// wrapping around, and arm the cursor to land on the comment nearest the
-    /// edge we entered from. Returns whether such a file was found.
-    ///
-    /// The landing is deferred because the target file isn't rendered yet: the
-    /// event loop renders whatever is selected, so the row a comment occupies is
-    /// only known on the next pass through it.
+    /// Select the next/previous *other* file carrying comments, wrapping around,
+    /// and arm the cursor to land on the comment nearest the edge we entered from.
+    /// The landing is deferred because the file isn't rendered until the event
+    /// loop's next pass.
     fn jump_commented_file(&mut self, dir: Direction) -> bool {
         let order = self.tree_order();
         let n = order.len();
@@ -295,9 +285,7 @@ mod tests {
         app
     }
 
-    /// One pass through the event loop: render, resync, then land a pending
-    /// cross-file jump. The render is already seeded, so only the last two steps
-    /// are left to do.
+    /// One pass through the event loop, with the render already seeded.
     fn settle(app: &mut App) {
         app.resync_cursor();
         app.land_on_comment();
@@ -354,7 +342,7 @@ mod tests {
     }
 
     /// With every note in the file that's open there's nowhere to cross to, so
-    /// the jump still wraps where it always did.
+    /// the jump wraps inside it.
     #[test]
     fn jumping_wraps_inside_the_file_when_no_other_file_has_notes() {
         let mut app = app_with_a_note_in_two_files();
@@ -370,8 +358,7 @@ mod tests {
         assert_eq!(app.diff_cursor, 1, "wrapped back onto the only note");
     }
 
-    /// Comments off means no line cursor, so j/k must scroll the pane exactly as
-    /// they did before the feature existed.
+    /// Comments off means no line cursor, so j/k scroll the pane.
     #[test]
     fn without_comments_the_diff_keys_still_scroll() {
         let mut app = app_with(vec![file("a.rs")]);

@@ -54,9 +54,8 @@ impl App {
         self.tree_width = (x.saturating_sub(tree.x) + 1).clamp(self.tree_width_min, max);
     }
 
-    /// Left-click: select the tree row under the cursor (folding/unfolding a
-    /// directory, like a file explorer), or focus the diff pane and put the line
-    /// cursor on the clicked line.
+    /// Left-click: select (or fold) the tree row under the cursor, or focus the
+    /// diff pane and put the line cursor on the clicked line.
     pub(crate) fn click(&mut self, pos: Position) {
         if let Some(area) = self.tree_area
             && area.contains(pos)
@@ -176,12 +175,10 @@ mod tests {
         app.tree_area = Some(Rect::new(0, 0, 30, 10));
         assert_eq!(app.rows.len(), 3);
 
-        // Clicking the directory row collapses it, hiding its children.
         app.click(Position::new(2, 0));
         assert_eq!(app.selected_index(), 0);
         assert_eq!(app.rows.len(), 1);
 
-        // Clicking it again expands it back.
         app.click(Position::new(2, 0));
         assert_eq!(app.rows.len(), 3);
     }

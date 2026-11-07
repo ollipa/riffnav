@@ -20,7 +20,6 @@ const SCAN_SLICE: Duration = Duration::from_millis(8);
 /// a view that flickers through files on the way to one is hard to read.
 const PREVIEW_DELAY: Duration = Duration::from_millis(150);
 
-/// Everything about the search, kept together.
 #[derive(Default)]
 pub(super) struct Find {
     search: Option<Search>,
@@ -183,7 +182,6 @@ impl App {
         };
     }
 
-    /// Whether the cursor is still on the line it reached the current match on.
     pub(super) fn holding_match(&self) -> bool {
         self.find.held.is_some() && self.find.held == self.cursor_anchor
     }
@@ -241,7 +239,7 @@ impl App {
         })
     }
 
-    /// A keypress while the prompt is open. It owns all input, like the finder.
+    /// A keypress while the prompt is open. It owns all input.
     pub(super) fn prompt_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);

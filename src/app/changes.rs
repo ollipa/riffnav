@@ -7,12 +7,11 @@ use crate::comment::Anchor;
 use crate::diff;
 use crate::render::Rendered;
 
-/// Jumps in progress.
 #[derive(Default)]
 pub(super) struct ChangeJumps {
-    /// Presses still to be acted on, oldest first. One has to wait
-    /// when the render it would read is out of date, so a burst of them is never
-    /// cut short by a file that's slow to render.
+    /// Presses still to be acted on, oldest first. One waits when the render it
+    /// would read is out of date, so a file that's slow to render never cuts a
+    /// burst short.
     queued: VecDeque<Direction>,
     /// A change waiting on the event loop to render the file it's in.
     landing: Option<Landing>,
@@ -92,7 +91,6 @@ impl App {
         }
     }
 
-    /// Whether there are presses left over, waiting on a render.
     pub(super) fn change_jumps_waiting(&self) -> bool {
         self.change_jumps.landing.is_some() || !self.change_jumps.queued.is_empty()
     }
@@ -1161,8 +1159,8 @@ mod tests {
         }
     }
 
-    /// The cursor's token used to be noted before the render was there, which would
-    /// leave the first look at a file with its cursor on the header.
+    /// Noting the cursor's token before the render is there would leave the first
+    /// look at a file with its cursor on the header.
     #[test]
     fn a_late_render_still_starts_the_cursor_on_the_first_line_of_code() {
         let raw = format!("{}{}", hunk("a", " x\n-y\n"), hunk("b", " p\n q\n"));

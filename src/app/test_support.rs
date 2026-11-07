@@ -70,9 +70,8 @@ pub(super) fn app_with(files: Vec<FileDiff>) -> App {
     App::new(files, false, &Config::default())
 }
 
-/// Like `file`, but with a distinct `raw` so each file hashes differently —
-/// the viewed state is keyed on diff content, and the bare `file` helper
-/// leaves `raw` empty (all-identical hashes).
+/// Like `file`, but with a distinct `raw`: viewed state is keyed on diff content,
+/// and `file` leaves `raw` empty.
 pub(super) fn file_with_raw(path: &str) -> FileDiff {
     FileDiff {
         raw: format!("diff --git a/{path} b/{path}\n@@ -1 +1 @@\n-old\n+new\n"),
@@ -80,8 +79,7 @@ pub(super) fn file_with_raw(path: &str) -> FileDiff {
     }
 }
 
-/// An app with auto-advance off, so `toggle_viewed` exercises only the
-/// mark/unmark logic without moving the selection out from under the test.
+/// An app with auto-advance off, so `toggle_viewed` leaves the selection put.
 pub(super) fn app_no_advance(files: Vec<FileDiff>) -> App {
     let cfg = Config {
         review_auto_advance: false,

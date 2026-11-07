@@ -58,16 +58,14 @@ const SYNC_POLL: Duration = Duration::from_millis(200);
 /// How long quitting waits for queued GitHub syncs to finish before giving up,
 /// so a just-marked file still reaches the PR without a stuck `gh` hanging exit.
 const SYNC_FLUSH_GRACE: Duration = Duration::from_secs(1);
-/// Minimum spacing between redraws (~60 fps). A fast wheel can emit input far
-/// quicker than a terminal can repaint a full-screen diff; redrawing once per
-/// event piles full-screen repaints onto the terminal until it falls behind and
-/// the view (and quitting) lag. We still apply every event to the scroll state —
-/// so scroll speed is unchanged — but coalesce a burst into a single repaint.
+/// Minimum spacing between redraws (~60 fps). A fast wheel emits input far quicker
+/// than a terminal can repaint a full-screen diff, and repainting per event makes
+/// the view (and quitting) lag. Every event is still applied, so scroll speed is
+/// unchanged; only the repaints are coalesced.
 const FRAME_MIN: Duration = Duration::from_micros(16_667);
 
 /// Rows of context kept between the diff cursor and the viewport edge, so moving
-/// the cursor scrolls before it reaches the very top or bottom. Matches the file
-/// tree's `SCROLL_PADDING`.
+/// the cursor scrolls before it reaches the very top or bottom.
 const CURSOR_PADDING: u32 = 4;
 
 /// Lines of context `+`/`-` add or take away around each change, per press.
@@ -90,7 +88,6 @@ pub enum Focus {
     Diff,
 }
 
-/// Which way a jump goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Forward,
@@ -122,11 +119,10 @@ pub struct App {
     /// The tree width the session started with, which dragging the divider
     /// never shrinks below.
     tree_width_min: u16,
-    /// Whether a mouse drag of the tree/diff divider is in progress.
     dragging_divider: bool,
-    /// Screen rects of the tree and diff panes from the last render, so mouse
-    /// clicks and wheel scrolls map back to a row or a pane. `None` before the
-    /// first draw; `tree_area` is also `None` whenever the tree is hidden.
+    /// Screen rects of the panes from the last render, for mapping mouse events.
+    /// `None` before the first draw; `tree_area` is also `None` while the tree is
+    /// hidden.
     pub tree_area: Option<Rect>,
     pub diff_area: Option<Rect>,
     pub focus: Focus,
@@ -146,7 +142,6 @@ pub struct App {
     /// One content hash per file in `files`, parallel by index, used to look up
     /// viewed state. Recomputed whenever `files` changes.
     file_hashes: Vec<u128>,
-    /// Whether marking a file viewed advances to the next unviewed file.
     review_auto_advance: bool,
     /// Inline review comments for this repo+branch. Session-only until
     /// [`App::enable_comments`] runs, or when not in a repo.
@@ -194,18 +189,16 @@ pub struct App {
     /// oldest first. They run in order once it lands, so a render only ever delays
     /// a key rather than swallowing it. See [`App::must_wait`].
     held_keys: VecDeque<KeyEvent>,
-    /// Which way the reader is working through the files.
     heading: Heading,
     /// What the files to prefetch were worked out from, as they only change with
     /// these, and the files.
     prefetch_asked: Option<Prefetched>,
-    /// The id `x` has asked about deleting, waiting on the y/N answer. Holds the
-    /// next keypress hostage, which is the whole point of it.
+    /// The id `x` has asked about deleting, waiting on the y/N answer.
     confirm_delete: Option<String>,
     /// The comment being typed, if any. While it's open it owns every keypress.
     composer: Option<Composer>,
     /// A comment handed off from the composer to `$EDITOR` (`Ctrl-O`), run once
-    /// the event loop regains the terminal — next to `pending_editor`.
+    /// the event loop regains the terminal.
     pending_comment: Option<PendingComment>,
     matcher: SkimMatcherV2,
     nodes: Vec<Node>,
@@ -218,8 +211,7 @@ pub struct App {
     /// which can only be read once.
     git: Option<GitDiff>,
     herdr: Option<Herdr>,
-    /// The detected source-code forge (e.g. GitHub), enabling the `W` web-diff
-    /// key; `None` when no supported forge backs this repo.
+    /// Enables the `W` web-diff key; `None` when no supported forge backs this repo.
     forge: Option<Forge>,
     /// One-way "viewed" sync to the branch's GitHub PR, when armed via config
     /// (and a GitHub forge is present). `None` leaves marks purely local.
@@ -227,7 +219,6 @@ pub struct App {
     /// Whether we've zoomed our own herdr pane, so we can restore it on exit
     /// rather than leaving herdr maximized behind us.
     zoomed: bool,
-    /// When set, the current `status` clears itself once this instant passes.
     status_deadline: Option<Instant>,
 }
 
@@ -319,8 +310,7 @@ impl App {
         }
     }
 
-    /// Detect whether riffnav is running inside herdr, enabling the `z` zoom key.
-    /// A no-op (leaves `herdr` as `None`) when not inside herdr.
+    /// Enables the `z` zoom key when running inside herdr.
     pub fn enable_herdr(&mut self) {
         self.herdr = Herdr::detect();
     }
@@ -329,9 +319,7 @@ impl App {
         self.herdr.is_some()
     }
 
-    /// Detect a supported source-code forge (currently GitHub via `gh`), enabling
-    /// the `W` key to open the branch's PR diff in the browser. Leaves `forge` as
-    /// `None` — and the key inert — when none is available.
+    /// Enables the `W` key when a supported forge (GitHub via `gh`) is available.
     pub fn enable_forge(&mut self) {
         self.forge = Forge::detect();
     }
@@ -357,7 +345,6 @@ impl App {
         self.status_deadline = None;
     }
 
-    /// Drop a timed status message once its display window has elapsed.
     fn expire_status(&mut self) {
         if let Some(deadline) = self.status_deadline
             && Instant::now() >= deadline
@@ -366,8 +353,6 @@ impl App {
         }
     }
 
-    /// Ask herdr to toggle zoom on our pane, reporting the outcome in the status
-    /// line. Only reachable when running inside herdr.
     fn toggle_herdr_zoom(&mut self) {
         let Some(herdr) = &mut self.herdr else { return };
         let msg = match herdr.toggle_zoom() {
@@ -382,22 +367,19 @@ impl App {
         self.set_status(msg);
     }
 
-    /// Open the current branch's PR diff on the detected forge in the browser,
-    /// reporting the outcome in the status line. Only reachable when a forge was
-    /// detected. The forge's CLI launches the browser, so this returns promptly.
+    /// Open the branch's PR diff in the browser. The forge's CLI launches the
+    /// browser, so this returns promptly.
     fn open_web_diff(&mut self) {
         let Some(forge) = &self.forge else { return };
         let msg = match forge.open_web_diff() {
             Ok(()) => format!("Opened {} PR diff in browser", forge.name()),
-            // `{e:#}` includes the cause chain (e.g. gh's own message).
             Err(e) => format!("{}: {e:#}", forge.name()),
         };
         self.set_status(msg);
     }
 
-    /// Undo a zoom we toggled on, so closing riffnav leaves herdr's layout the
-    /// way we found it. Best-effort: we're shutting down, so a herdr error is
-    /// ignored rather than surfaced.
+    /// Undo a zoom we toggled on, so herdr's layout is left as we found it.
+    /// Best-effort: we're shutting down, so errors are ignored.
     fn restore_herdr_zoom(&mut self) {
         if !self.zoomed {
             return;
@@ -440,11 +422,8 @@ impl App {
             self.start_copies();
 
             self.wait_for_event()?;
-            // Cap the redraw rate: keep applying buffered input (so scroll
-            // distance is preserved) until this frame's budget elapses or the
-            // input goes quiet, then loop back to a single redraw. Without this a
-            // fast wheel triggers a full-screen repaint per event and the
-            // terminal can't keep up. Quitting/editor break out at once.
+            // Apply buffered input until the frame budget (`FRAME_MIN`) elapses or
+            // input goes quiet, then redraw once. Quitting/editor break out at once.
             while !self.quit && self.pending_editor.is_none() {
                 let remaining = FRAME_MIN.saturating_sub(last_draw.elapsed());
                 if remaining.is_zero() || !event::poll(remaining)? {
@@ -456,7 +435,6 @@ impl App {
             // Suspending the TUI to run an editor needs the owned terminal.
             if let Some(path) = self.pending_editor.take() {
                 self.open_editor(terminal, &path)?;
-                // The file may have changed; re-read its diff from git.
                 self.refresh_file(&path);
             }
             if let Some(pending) = self.pending_comment.take() {
@@ -546,7 +524,7 @@ impl App {
         self.resync_cursor();
         self.restore_cursor_screen_row();
         self.follow_change();
-        // A `]`/`[` jump into this file has been waiting for that render.
+        // Jumps into this file have been waiting for that render.
         self.land_on_comment();
         self.land_on_move();
         self.land_on_match();
@@ -576,11 +554,8 @@ impl App {
             && self.render_ready()
     }
 
-    /// Input wait. Normally blocks for the next event, but bounds the wait when something needs servicing without a keypress: a
-    /// timed status that must expire, or an in-flight GitHub sync whose result
-    /// should be surfaced. Both are handled after the wait returns. While a render
-    /// is running it looks for that between keys too, and a redraw comes of it only
-    /// when one lands.
+    /// Blocks for the next event, bounded by [`App::idle_timeout`]. While a render
+    /// is running it also looks for that between keys, and returns when one lands.
     fn wait_for_event(&mut self) -> Result<()> {
         let deadline = self.idle_timeout().map(|timeout| Instant::now() + timeout);
         loop {
@@ -605,9 +580,9 @@ impl App {
         Ok(())
     }
 
-    /// How long the interactive wait may block, or `None` to block until a key.
-    /// Bounded by a showing status's remaining lifetime and, while a sync is in
-    /// flight, by [`SYNC_POLL`] — whichever is sooner — so both self-service.
+    /// How long the input wait may block, or `None` to block until a key: work that
+    /// needs servicing without a keypress (status expiry, sync results, comment
+    /// watching, search, an unsettled view) bounds it.
     fn idle_timeout(&self) -> Option<Duration> {
         let status = self
             .status_deadline
@@ -639,9 +614,8 @@ impl App {
         total.saturating_sub(used).max(MIN_DIFF_WIDTH)
     }
 
-    /// Cycle the diff color theme and report it. The render cache is keyed by
-    /// theme, so the next draw re-renders (and caches) the new look; cycling back
-    /// to a theme already seen is instant.
+    /// The render cache is keyed by theme, so cycling back to a theme already seen
+    /// is instant.
     fn cycle_theme(&mut self) {
         self.diff_theme = self.diff_theme.next();
         self.set_status(format!("Diff theme: {}", self.diff_theme.name()));
@@ -659,11 +633,9 @@ mod tests {
         app.set_status("hi");
         assert!(app.status.is_some());
 
-        // Still within the display window: the message stays.
         app.expire_status();
         assert!(app.status.is_some());
 
-        // Past the deadline: the message clears itself.
         app.status_deadline = Some(Instant::now());
         app.expire_status();
         assert!(app.status.is_none());

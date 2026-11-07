@@ -10,11 +10,8 @@ impl App {
     /// `(top, bottom)`, bottom exclusive, counted from the pane's top edge — or
     /// `None` when they're off-screen or nothing is rendered yet.
     ///
-    /// Normally that's the line the note will hang on. Inside a thread — where
-    /// `c` writes a reply — it's the whole box instead: the reply belongs under
-    /// the comment it answers, and a field pinned to the one row the cursor sits
-    /// on would open through the middle of it, hiding the very note being
-    /// replied to.
+    /// Normally that's the line the note will hang on. Inside a thread it's the
+    /// whole box, or the field would open through the note being replied to.
     pub fn composer_rows(&self) -> Option<(u16, u16)> {
         let render = self.current_render()?;
         let (first, past) = match self.block_at_cursor() {
@@ -30,12 +27,8 @@ impl App {
     }
 
     /// Start composing a note on whatever the cursor is over: a comment on the
-    /// diff line, or — when the cursor is inside a thread, which is exactly where
-    /// `]` parks it — a reply to the comment it's sitting on. What the cursor is
-    /// on already says which was meant, so there's no second key for it.
-    ///
-    /// The note is typed into the composer drawn over the diff pane; `$EDITOR` is
-    /// a `Ctrl-O` away from there.
+    /// diff line, or a reply when the cursor is inside a thread (where `]` parks
+    /// it).
     pub(super) fn start_comment(&mut self) {
         let Some(idx) = self.selected_file() else {
             self.set_status("No file selected to comment on");
@@ -78,13 +71,11 @@ impl App {
         }));
     }
 
-    /// The composer, for the draw path.
     pub fn composer(&self) -> Option<&Composer> {
         self.composer.as_ref()
     }
 
-    /// Store what's in the composer and close it. An empty body aborts, exactly
-    /// like an empty commit message.
+    /// Store what's in the composer and close it. An empty body aborts.
     fn finish_comment(&mut self) {
         let Some(composer) = self.composer.take() else {
             return;
@@ -93,7 +84,6 @@ impl App {
         self.save_composed(composer.pending, body);
     }
 
-    /// Abandon the note being typed.
     fn cancel_comment(&mut self) {
         if self.composer.take().is_some() {
             self.set_status("Comment discarded");
@@ -102,15 +92,15 @@ impl App {
 
     /// `Ctrl-O` from the composer: reopen the same note in `$EDITOR`, carrying
     /// whatever has been typed so far. The editor runs once the event loop
-    /// regains the terminal, next to the `o` key's editor handling.
+    /// regains the terminal.
     fn comment_to_editor(&mut self) {
         if let Some(composer) = self.composer.take() {
             self.pending_comment = Some(composer.into_draft());
         }
     }
 
-    /// Route a keypress into the open composer. It owns all input while it's up,
-    /// so every key either edits the body or ends the note.
+    /// The composer owns all input while it's up, so every key either edits the
+    /// body or ends the note.
     pub(super) fn composer_key(&mut self, key: crossterm::event::KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -118,8 +108,7 @@ impl App {
         match key.code {
             // A bare Enter posts the note; any modifier on it breaks the line
             // instead (Shift-Enter where the terminal reports it, Alt-Enter
-            // everywhere else). Ctrl-S stays as it was, for the fingers that
-            // learned it.
+            // everywhere else).
             KeyCode::Enter if !(shift || alt || ctrl) => self.finish_comment(),
             KeyCode::Char('s') if ctrl => self.finish_comment(),
             KeyCode::Esc => self.cancel_comment(),
@@ -168,11 +157,10 @@ impl App {
             .collect()
     }
 
-    /// `x`: ask before deleting the comment the cursor is on. A note takes real
-    /// thought to write and nothing here can bring one back — the store is
-    /// rewritten on the spot — so the key arms a prompt instead of deleting, and
-    /// the next keypress answers it. The CLI's `comment rm` is unaffected: a
-    /// script naming an id has already made the decision.
+    /// `x`: ask before deleting the comment the cursor is on, as the store is
+    /// rewritten on the spot and nothing can bring it back. The next keypress
+    /// answers. The CLI's `comment rm` doesn't ask: a script naming an id has
+    /// already decided.
     pub(super) fn delete_comment(&mut self) {
         let Some(id) = self
             .block_at_cursor()
@@ -212,8 +200,7 @@ impl App {
         });
     }
 
-    /// Turn the text an author typed into a stored comment. Empty means abort,
-    /// exactly like an empty commit message.
+    /// Turn the text an author typed into a stored comment. Empty means abort.
     pub(super) fn save_composed(&mut self, pending: PendingComment, body: String) {
         let body = body.trim();
         if body.is_empty() {
@@ -268,8 +255,7 @@ mod tests {
         }
     }
 
-    /// The point of the composer: a note is typed and saved without the screen
-    /// ever being handed to `$EDITOR`.
+    /// A note is typed and saved without the screen being handed to `$EDITOR`.
     #[test]
     fn a_comment_is_typed_and_saved_in_place() {
         let mut app = app_ready_to_comment();
@@ -334,15 +320,14 @@ mod tests {
         assert!(app.comments.all().is_empty());
         assert!(!app.quit, "Esc closed the composer, not riffnav");
 
-        // An empty note is an abort too, exactly like an empty commit message.
+        // An empty note is an abort too.
         app.press_for_test(KeyCode::Char('c'), false);
         app.press_for_test(KeyCode::Char('s'), true);
         assert!(app.comments.all().is_empty());
     }
 
-    /// There's one comment key, not two: on a diff line `c` starts a note, and
-    /// inside a thread — where `]` parks the cursor — it replies to the comment
-    /// it's sitting on, which is the only thing it could sensibly mean there.
+    /// On a diff line `c` starts a note, and inside a thread it replies to the
+    /// comment it's sitting on.
     #[test]
     fn c_inside_a_thread_replies_to_the_comment_under_the_cursor() {
         let mut app = app_ready_to_comment();
@@ -402,8 +387,7 @@ mod tests {
         app
     }
 
-    /// `x` is one keystroke away from throwing away a written note that nothing
-    /// can bring back, so it asks first and the answer is the next key.
+    /// `x` asks first, and the answer is the next key.
     #[test]
     fn deleting_a_comment_asks_before_it_goes() {
         let mut app = app_on_a_saved_comment();

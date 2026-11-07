@@ -32,19 +32,15 @@ impl App {
 
     /// Load persistent "viewed" review state for the current repo+branch (and
     /// garbage-collect stale state). A no-op outside a git repo, where the store
-    /// stays session-only. Called once at startup, after `files` are in place.
+    /// stays session-only. Call after `files` are in place.
     pub fn enable_review(&mut self, retention_days: u64) {
         self.review = ReviewStore::load(retention_days);
-        // With viewed state now loaded, resume on the first file still needing
-        // review instead of the top of the list. Opening straight onto already-
-        // reviewed files would just make the user scroll past them.
+        // Resume on the first file still needing review, not the top of the list.
         self.select_first_unviewed();
     }
 
-    /// Move the selection to the first unviewed file, scanning from the top. A
-    /// no-op when there are no files or every file is already viewed, so the
-    /// initial first-file selection stands. Run once at startup, after viewed
-    /// state loads.
+    /// Move the selection to the first unviewed file. When every file is viewed
+    /// the initial first-file selection stands.
     fn select_first_unviewed(&mut self) {
         if let Some(i) = self.rows.iter().position(
             |r| matches!(r.kind, RowKind::File { diff_index } if !self.is_viewed(diff_index)),
@@ -53,20 +49,16 @@ impl App {
         }
     }
 
-    /// Whether the file at `diff_index` is marked viewed.
     pub fn is_viewed(&self, diff_index: usize) -> bool {
         self.file_hashes
             .get(diff_index)
             .is_some_and(|h| self.review.is_viewed(*h))
     }
 
-    /// How many of the current files are marked viewed.
     pub fn viewed_count(&self) -> usize {
         self.review.count_viewed(&self.file_hashes)
     }
 
-    /// Toggle the selected file's viewed mark, persisting the change and
-    /// reporting the new state plus overall progress.
     pub(super) fn toggle_viewed(&mut self) {
         let Some(idx) = self.selected_file() else {
             self.set_status("No file selected to mark viewed");
@@ -76,9 +68,6 @@ impl App {
         let now_viewed = self.review.toggle(self.file_hashes[idx], &path);
         self.review.save();
         let progress = format!("{}/{}", self.viewed_count(), self.files.len());
-        // Queue a GitHub sync when armed and in the PR view; it runs in the
-        // background, so show the mark's success now and let the event loop
-        // replace it only if the sync later fails. The local mark always stands.
         self.queue_sync(&path, now_viewed);
         self.set_status(if now_viewed {
             format!("✓ Viewed {path}  ({progress})")
@@ -97,9 +86,9 @@ impl App {
     }
 
     /// Queue a GitHub sync of `path`'s viewed mark when armed and in the PR view
-    /// (see [`App::syncs_viewed_marks`]); a no-op otherwise. The `gh` round trip
-    /// runs on a background thread, so this returns immediately — the mark's
-    /// optimistic status stands until [`App::drain_review_sync`] reports a failure.
+    /// (see [`App::syncs_viewed_marks`]). The `gh` round trip runs on a background
+    /// thread, so the mark's optimistic status stands until
+    /// [`App::drain_review_sync`] reports a failure. The local mark always stands.
     fn queue_sync(&mut self, path: &str, viewed: bool) {
         if !self.syncs_viewed_marks() {
             return;
@@ -110,9 +99,7 @@ impl App {
             .enqueue(path, viewed);
     }
 
-    /// Surface any GitHub sync that finished failing since the last tick. With
-    /// the optimistic mark already shown, only a real `gh` failure replaces it —
-    /// and the local viewed mark stands regardless. A no-op when sync isn't armed.
+    /// Surface any GitHub sync that failed since the last tick.
     pub(super) fn drain_review_sync(&mut self) {
         let errors = match self.review_sync.as_mut() {
             Some(sync) => sync.drain(),
@@ -125,9 +112,7 @@ impl App {
         }
     }
 
-    /// On shutdown, give queued GitHub syncs a brief, bounded chance to finish so
-    /// a file marked moments before quitting still reaches the PR — without a slow
-    /// `gh` hanging exit. A no-op when sync isn't armed or nothing is in flight.
+    /// On shutdown, give queued GitHub syncs up to [`SYNC_FLUSH_GRACE`] to finish.
     pub(super) fn flush_review_sync(&mut self) {
         if let Some(sync) = self.review_sync.as_mut() {
             sync.flush(SYNC_FLUSH_GRACE);
@@ -254,7 +239,6 @@ mod tests {
             file_with_raw("b.rs"),
             file_with_raw("c.rs"),
         ]);
-        // Fresh: selection sits on the first file.
         assert_eq!(app.selected_file(), Some(0));
 
         // Mark a.rs viewed (auto-advance off keeps the cursor put), then re-run
@@ -270,7 +254,6 @@ mod tests {
     #[test]
     fn startup_holds_on_first_file_when_all_viewed() {
         let mut app = app_no_advance(vec![file_with_raw("a.rs"), file_with_raw("b.rs")]);
-        // Mark both files viewed.
         app.toggle_viewed();
         app.jump_unviewed();
         app.toggle_viewed();

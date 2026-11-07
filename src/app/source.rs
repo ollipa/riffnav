@@ -7,8 +7,7 @@ use crate::tree::{self, RowKind};
 
 impl App {
     /// Record the git command behind the diff (`riffnav diff|show`), so the
-    /// header can label the view and the refresh key can run it again. The diff
-    /// text itself was already loaded and parsed into `files`.
+    /// header can label the view and the refresh key can run it again.
     pub fn enable_git_diff(&mut self, git: GitDiff) {
         self.git = Some(git);
         self.cache.read_starts();
@@ -37,9 +36,8 @@ impl App {
     }
 
     /// Jump straight to the view at 1-based position `n` in the cycle (the number
-    /// keys). Out-of-range digits are inert; a view that needs a base branch when
-    /// none was detected says so rather than silently leaving the screen as it
-    /// was, since nothing else would explain the keypress doing nothing.
+    /// keys). Out-of-range digits are inert; a view that needs a missing base
+    /// branch says so, as nothing else would explain the key doing nothing.
     pub(super) fn select_diff_source(&mut self, n: usize) {
         let Some(git) = &self.git else { return };
         let Some(source) = DiffSource::nth(n) else {
@@ -87,24 +85,17 @@ impl App {
         }
     }
 
-    /// Whether there's a git command that can be run again, which is what makes
-    /// the `r` refresh key worth binding. A diff piped in on stdin can only be
-    /// read once.
+    /// Whether there's a git command for `r` to re-run. A diff piped in on stdin
+    /// can only be read once.
     pub fn can_refresh(&self) -> bool {
         self.git.is_some()
     }
 
-    /// The `r` key: re-run the diff and reload it, so work done since launch
-    /// shows up without restarting. Notes written elsewhere are re-read with it:
-    /// they're part of "what has changed since", and the filesystem watcher that
-    /// normally brings them in isn't always there — no watch can be established
-    /// on some filesystems, and none exists at all outside a repo scope. `r` is
-    /// the key you press when the screen looks stale, so it re-reads everything
-    /// rather than leaving one half to a watcher that may be missing.
+    /// The `r` key: re-run the diff and reload it. Notes written elsewhere are
+    /// re-read too, as the filesystem watcher isn't always there: some filesystems
+    /// can't be watched, and outside a repo scope there's no watch at all.
     pub(super) fn refresh_diff(&mut self) {
         let Some(git) = &self.git else { return };
-        // The immutable borrow of `self.git` ends here (the text is owned),
-        // freeing `self` for the mutable reload below.
         let loaded = git.load();
         match loaded {
             Ok(text) => self.reload_in_place(crate::diff::parse(&text)),
@@ -182,12 +173,9 @@ impl App {
         self.cursor_screen_row = None;
     }
 
-    /// Swap in a freshly loaded file set the way a refresh wants it: as
-    /// [`App::reload_files`], but holding the scroll and the line cursor when the
-    /// same file is still selected afterwards. Reloading rebuilds every render,
-    /// yet the file on screen is usually the one you were just reading — only
-    /// longer or shorter — and being thrown back to its top on every refresh is
-    /// what would make `r` unusable mid-review.
+    /// As [`App::reload_files`], but holding the scroll and the line cursor when
+    /// the same file is still selected afterwards, so `r` doesn't throw the reader
+    /// back to the top mid-review.
     pub(super) fn reload_in_place(&mut self, files: Vec<FileDiff>) {
         let (scroll, anchor) = (self.diff_scroll, self.cursor_anchor);
         let before = self
@@ -265,8 +253,6 @@ impl App {
             Some(_) => return self.refresh_diff(),
             None => return,
         };
-        // The immutable borrow of `self.git` ends here (the text is owned),
-        // freeing `self` for the mutable splice below.
         let text = match git.load_file(path) {
             Ok(text) => text,
             // Keep the stale diff rather than blanking it on a transient error.
@@ -296,11 +282,9 @@ impl App {
     /// derived from the old text: its hash, its cached render, and the line
     /// cursor's index into that render.
     ///
-    /// Clearing `cursor_token` is what makes the cursor recover. `last_width = 0`
-    /// forces the re-render, but the next frame sets it straight back to the same
-    /// width — so the token [`App::resync_cursor`] compares would be unchanged and
-    /// the cursor would keep an index into a render that no longer exists, leaving
-    /// it on a different line (or past the end) of the new diff.
+    /// `cursor_token` must be cleared: the re-render is at the same width, so the
+    /// token [`App::resync_cursor`] compares wouldn't change and the cursor would
+    /// keep an index into a render that no longer exists.
     fn swap_file_diff(&mut self, i: usize, file: FileDiff) {
         let resume = self.search_resume();
         self.file_hashes[i] = crate::review::file_hash(&file.raw);
@@ -351,9 +335,7 @@ mod tests {
     #[test]
     fn a_number_key_for_an_unreachable_view_says_why() {
         // Without a detected base the base-relative views can't be produced, so
-        // their digits report that instead of appearing to do nothing. Both of
-        // these stop before any git command runs — the test shells out to
-        // nothing, which is also why it can assert on the status at all.
+        // their digits report that. Both stop before any git command runs.
         let mut app = app_with(vec![file("a.rs")]);
         app.enable_git_diff(GitDiff::diff(DiffSource::Unstaged, None, vec![]));
 
@@ -395,8 +377,7 @@ mod tests {
         );
     }
 
-    /// `r` is for re-reading the diff mid-review, so it must not throw the reader
-    /// back to the top of the file they were in the middle of.
+    /// `r` must not throw the reader back to the top of the file they're in.
     #[test]
     fn refreshing_holds_the_scroll_when_the_same_file_is_still_selected() {
         let mut app = app_with(vec![file_with_raw("a.rs"), file_with_raw("b.rs")]);
@@ -426,11 +407,9 @@ mod tests {
         );
     }
 
-    /// Re-reading one file's diff (the `o` key, via `refresh_file`) rebuilds its
-    /// render at the same width and theme, so nothing in `resync_cursor`'s token
-    /// changes on its own — only dropping the token keeps the cursor off a row
-    /// index that means nothing in the new render. Left stale, `c` would anchor
-    /// the next note to whatever line happens to sit at that row.
+    /// Re-reading one file's diff (`refresh_file`) rebuilds its render at the same
+    /// width and theme, so only dropping the cursor's token keeps it off a stale
+    /// row index, where `c` would anchor the next note to the wrong line.
     #[test]
     fn a_re_read_file_puts_the_cursor_back_on_its_diff_line() {
         // Comments stay off: this is the line cursor's own bookkeeping, and it
@@ -447,9 +426,9 @@ mod tests {
         app.swap_file_diff(0, file_with_raw("a.rs"));
         assert!(app.cursor_token.is_none(), "the token is dropped");
 
-        // The re-read diff carries two header rows ahead of the
-        // code, so diff line 3 now sits two rows further down. Seeded the way the
-        // event loop would, leaving the cursor state alone.
+        // The re-read diff carries two header rows ahead of the code, so diff line
+        // 3 now sits two rows further down. Seeded the way the event loop would,
+        // leaving the cursor state alone.
         let text = ratatui::text::Text::from(
             ["a.rs".to_string(), "────".to_string()]
                 .into_iter()

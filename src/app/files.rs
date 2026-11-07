@@ -33,8 +33,7 @@ impl App {
     }
 
     /// The view mode actually used to render `idx`. Added files always render
-    /// unified: side-by-side would just show an empty left pane and waste the
-    /// scarce horizontal space, so they ignore the global toggle.
+    /// unified, as side by side would waste half the width on an empty pane.
     pub fn side_by_side_for(&self, idx: usize) -> bool {
         self.side_by_side && self.files[idx].status != FileStatus::Added
     }
@@ -172,7 +171,6 @@ impl App {
         }
     }
 
-    /// Recompute finder matches after the query changes.
     fn finder_recompute(&mut self) {
         let query = match &self.finder {
             Some(f) => f.query.clone(),
@@ -197,7 +195,7 @@ impl App {
     }
 
     /// Select a file by diff index, expanding any collapsed ancestor folders so
-    /// its row is visible. Used when jumping from the finder.
+    /// its row is visible.
     pub(super) fn reveal_file(&mut self, diff_index: usize) {
         let path = self.files[diff_index].path().to_string();
         let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
@@ -291,7 +289,6 @@ mod tests {
         app.collapsed.insert("src/diff".to_string());
         app.rows = tree::flatten(&app.nodes, &app.collapsed);
         app.reveal_file(0);
-        // The file's row is now visible and selected.
         assert!(matches!(
             app.rows[app.selected_index()].kind,
             RowKind::File { diff_index: 0 }
