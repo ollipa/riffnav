@@ -10,6 +10,8 @@ use crate::render::Key;
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
     // Record the viewport height so PageUp/PageDown can jump by a screenful.
     app.diff_height = area.height;
+    // A new width can have pushed the line cursor off a pane this tall.
+    app.keep_cursor_in_view();
 
     let Some(idx) = app.selected_file() else {
         placeholder(
@@ -39,14 +41,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
             .diff_scroll
             .min(r.height.saturating_sub(area.height.into()));
         let shown = r.visible(scroll, area.width, area.height, marks.as_ref());
-        (shown, scroll)
+        let rows = scroll..scroll.saturating_add(area.height.into());
+        (shown, scroll, rows.contains(&r.row_of(app.diff_cursor)))
     });
 
-    let Some((paragraph, scroll)) = built else {
+    let Some((paragraph, scroll, cursor_on_screen)) = built else {
         placeholder(frame, area, "  rendering…");
         return;
     };
     app.diff_scroll = scroll;
+    app.cursor_on_screen = cursor_on_screen;
 
     frame.render_widget(paragraph, area);
 

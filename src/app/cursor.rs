@@ -144,16 +144,19 @@ impl App {
         }
     }
 
-    /// Scroll the cursor line into view if it has left it, as a new width can push
-    /// it off the foot of the pane. One still in view stays where it is.
-    pub(super) fn keep_cursor_in_view(&mut self) {
-        let (Some(render), height) = (self.current_render(), u32::from(self.diff_height)) else {
+    /// Scroll the line cursor back into view if a new width or layout has pushed
+    /// it off the pane. One still in view, even partly, stays where it is.
+    pub fn keep_cursor_in_view(&mut self) {
+        if !std::mem::take(&mut self.keep_cursor) {
+            return;
+        }
+        let Some(render) = self.current_render() else {
             return;
         };
+        let height = u32::from(self.diff_height);
         let top = render.row_of(self.diff_cursor);
-        let bottom = render.row_of(self.diff_cursor + 1).max(top + 1);
         let scroll = self.diff_scroll.min(render.height.saturating_sub(height));
-        if top < scroll || bottom > scroll.saturating_add(height) {
+        if !(scroll..scroll.saturating_add(height)).contains(&top) {
             self.scroll_cursor_into_view();
         }
     }
@@ -324,6 +327,45 @@ mod tests {
         let row = render.row_of(app.diff_cursor);
         assert_eq!(top_and_cursor(&app).1, cursor);
         assert!(row >= app.diff_scroll && row < app.diff_scroll + u32::from(app.diff_height));
+    }
+
+    /// The pane can get shorter as well as narrower, and a frame with no render
+    /// yet can be drawn at the new size before the view is carried over.
+    #[test]
+    fn a_cursor_a_shorter_pane_would_hide_stays_in_view() {
+        for late in [false, true] {
+            let mut app = wrapping("a.txt", 3000);
+            frame_at(&mut app, 120, 40);
+            scroll_to_line(&mut app, 1994);
+            // Low in the pane, where a shorter one won't reach.
+            let render = app.current_render().unwrap();
+            let low = app.diff_scroll + 30;
+            let line = (app.diff_cursor..)
+                .find(|&l| render.row_of(l) >= low)
+                .unwrap();
+            app.set_cursor(line);
+            frame_at(&mut app, 120, 40);
+            let cursor = top_and_cursor(&app).1;
+            if late {
+                let gate = Gate::default();
+                app.cache.wait(std::time::Duration::ZERO);
+                app.cache.hooks().start = Some(gate.clone());
+                frame_at(&mut app, 100, 20);
+                assert!(app.current_render().is_none());
+                gate.open();
+                app.cache.finish();
+            }
+            frame_at(&mut app, 100, 20);
+            let render = app.current_render().unwrap();
+            let row = render.row_of(app.diff_cursor);
+            assert_eq!(top_and_cursor(&app).1, cursor);
+            let scroll = app.diff_scroll;
+            let bottom = scroll + u32::from(app.diff_height);
+            assert!(
+                row >= scroll && row < bottom,
+                "{row} {scroll}, late: {late}"
+            );
+        }
     }
 
     #[test]

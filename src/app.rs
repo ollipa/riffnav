@@ -175,6 +175,11 @@ pub struct App {
     /// The render the scroll was last measured against, to carry the view over
     /// to the next one when the width or the layout changes.
     view_render: Option<(Key, Arc<Rendered>)>,
+    /// Set when the view was carried over to a new render with the line cursor in
+    /// view, for the draw to keep it there.
+    keep_cursor: bool,
+    /// Whether the line cursor was on screen the last time a render was drawn.
+    pub cursor_on_screen: bool,
     /// A `]`/`[` jump that crossed into another file, waiting for that file to be
     /// rendered before the cursor can be put on the comment it was aimed at:
     /// coming in forward lands on its first comment, back on its last.
@@ -287,6 +292,8 @@ impl App {
             cursor_token: None,
             cursor_screen_row: None,
             view_render: None,
+            keep_cursor: false,
+            cursor_on_screen: false,
             comment_landing: None,
             move_landing: None,
             copy_return: None,
@@ -523,13 +530,10 @@ impl App {
             None => self.cache.release(),
         }
         self.keep_view_on_copies();
-        let cursor_shown = self.carry_view();
+        self.carry_view();
         // The render may have changed shape (new comments, new theme, new
         // width), so put the cursor back on the line it was on.
         self.resync_cursor();
-        if cursor_shown {
-            self.keep_cursor_in_view();
-        }
         self.restore_cursor_screen_row();
         self.follow_change();
         // Jumps into this file have been waiting for that render.
@@ -554,31 +558,29 @@ impl App {
 
     /// A new width or layout wraps the file onto other rows, so the scroll is
     /// moved to keep the same code at the top. Waits until the new render is
-    /// there, scrolling from the one the view was on. Whether the line cursor was
-    /// in view on that one, to be kept in view on this.
-    fn carry_view(&mut self) -> bool {
+    /// there, scrolling from the one the view was on. A line cursor that was in
+    /// view on that one is kept in view on this, once the pane's height is known.
+    fn carry_view(&mut self) {
         let Some(file) = self.selected_file() else {
-            return false;
+            return;
         };
         let key = self.render_key(file);
         let Some(now) = self.cache.shared(key) else {
-            return false;
+            return;
         };
         let Some((was, old)) = self.view_render.replace((key, now.clone())) else {
-            return false;
+            return;
         };
-        let carried = was.file == file && was != key;
-        let mut cursor_shown = false;
-        if carried {
-            let top = old.row_of(self.diff_cursor);
-            let bottom = self.diff_scroll.saturating_add(self.diff_height.into());
-            cursor_shown = self.comments_enabled() && (self.diff_scroll..bottom).contains(&top);
+        if was.file == file && was != key {
+            // A cursor parked on a header or a note goes back to the last numbered
+            // line it was on, which needn't be in view, so it's left where that is.
+            let anchored = old.line_map.get(self.diff_cursor).anchor() == self.cursor_anchor;
+            self.keep_cursor = self.comments_enabled() && anchored && self.cursor_on_screen;
             if let Some(scroll) = now.scroll_like(&old, self.diff_scroll) {
                 self.diff_scroll = scroll;
             }
         }
         self.forget_render(old);
-        cursor_shown
     }
 
     /// A reloaded diff keeps the scroll it had, rather than have it carried by line
