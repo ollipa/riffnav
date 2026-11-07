@@ -403,9 +403,10 @@ mod tests {
     /// real render keeps it.
     #[test]
     fn a_late_render_and_its_preview_land_on_the_same_line() {
-        let mut app = wrapping("a.rs", 3000);
+        // Highlighting is slow in a debug build, so the file is kept short.
+        let mut app = wrapping("a.rs", 400);
         frame_at(&mut app, 120, 40);
-        scroll_to_line(&mut app, 1994);
+        scroll_to_line(&mut app, 300);
         frame_at(&mut app, 120, 40);
         let kept = top_and_cursor(&app);
         let (start, real) = (Gate::default(), Gate::default());
