@@ -85,9 +85,11 @@ layout for one run with `-s` (side-by-side) or `-u` (unified).
 | `J` / `K` | Next / previous [change](#moving-between-changes), across files |
 | `Ctrl-d` / `Ctrl-u` | Scroll diff half a page |
 | `PgDn` / `PgUp` | Page down / up (scroll diff or move tree, per focus) |
+| `Space` / `b` | Page the diff down / up (diff focus) |
 | `g` / `G` | Top / bottom of the diff |
-| `Enter` / `Space` | Expand / collapse the selected folder |
+| `Enter` | Expand / collapse the selected folder |
 | `Tab` | Switch focus between tree and diff |
+| `←` / `→` | Focus the tree / the diff |
 | `/` | [Search](#searching-the-diff) the text of the whole diff |
 | `t` | Fuzzy-find a file |
 | `s` | Toggle side-by-side / unified |
@@ -104,10 +106,23 @@ layout for one run with `-s` (side-by-side) or `-u` (unified).
 | `c` | [Comment](#review-comments) on the cursor's line, or reply when it's inside a thread |
 | `x` | Delete the comment under the cursor, and its replies (asks first) |
 | `]` / `[` | Jump to the next / previous comment, across files |
-| `m` | Jump to the other end of a moved or copied line, across files; press again to come back. On a side-by-side row with one on each side, the new side goes first and further presses take turns, with the status line saying which (`Moved line 1 of 2`). A copy's source that isn't in the diff is named in the status line |
+| `m` | Jump to the other end of a moved or copied line, across files; press again to come back. See [moved and copied code](#moved-and-copied-code) |
 | `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
+| `W` | Open the branch's pull request diff in the browser (GitHub, with `gh` installed) |
 | `?` | Toggle the help overlay |
 | `q` / `Esc` / `Ctrl-c` | Quit (`Esc` clears a search first) |
+
+## Moved and copied code
+
+Code that moved, within a file or between files, is drawn muted with a note saying
+where it went, rather than as a removal and an unrelated addition. An added block
+that duplicates code that's still there keeps its added colors and gets a
+`≡ copied from path:line` note. `detect_moves` and `detect_copies` turn each off.
+
+`m` on such a line jumps to its other end, across files, and pressing it again comes
+back. On a side-by-side row with an end on each side, the new side goes first and
+further presses take turns, with the status line saying which (`Moved line 1 of 2`).
+A copy's source that isn't in the diff is named in the status line.
 
 ## Moving between changes
 
@@ -167,6 +182,9 @@ review_auto_advance = true # jump to next unviewed file after marking viewed
 review_sync_github = false # push "viewed" marks to the matching GitHub PR (needs `gh`)
 # base_branch = "main"     # base for the base-relative views; omit to auto-detect
 # diff_source = "all"      # default view: all|all-uncommitted|staged|unstaged|vs-base
+show_comments = true     # show review comments, and the keys that write them
+comment_retention_days = 90 # days to keep comments before GC
+# comment_author = "me"    # author of comments written here; omit for $USER
 ```
 
 See [`config.example.toml`](config.example.toml) for the annotated version.
@@ -348,8 +366,7 @@ blocks that moved, then everything is drawn with [ratatui][ratatui] and cached p
 file/width/layout/theme. Because stdin may itself be the diff, key input is read
 from `/dev/tty`.
 
-An added block that duplicates code that's still there keeps its added colors and
-gets a `copied from path:line` note, since a pasted function is a reason to look
+Copied code keeps its added colors, since a pasted function is a reason to look
 harder rather than less. Lines are compared ignoring whitespace, a block that could
 be a move is one, and a note is meant to be rare: it takes four rare lines of real
 code, so license headers, imports, fields, match arms, tests, fixtures and generated
