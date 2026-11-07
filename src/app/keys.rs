@@ -107,56 +107,7 @@ impl App {
 
         // The fuzzy finder captures all input while open.
         if self.finder.is_some() {
-            match key.code {
-                KeyCode::Esc => self.finder = None,
-                KeyCode::Enter => {
-                    let target = self
-                        .finder
-                        .as_ref()
-                        .and_then(|f| f.matches.get(f.selected).copied());
-                    self.finder = None;
-                    if let Some(idx) = target {
-                        self.reveal_file(idx);
-                    }
-                }
-                KeyCode::Backspace => {
-                    if let Some(f) = self.finder.as_mut() {
-                        f.query.pop();
-                    }
-                    self.finder_recompute();
-                }
-                KeyCode::Up => {
-                    if let Some(f) = self.finder.as_mut() {
-                        f.selected = f.selected.saturating_sub(1);
-                    }
-                }
-                KeyCode::Down => {
-                    if let Some(f) = self.finder.as_mut()
-                        && f.selected + 1 < f.matches.len()
-                    {
-                        f.selected += 1;
-                    }
-                }
-                KeyCode::Char('p') if ctrl => {
-                    if let Some(f) = self.finder.as_mut() {
-                        f.selected = f.selected.saturating_sub(1);
-                    }
-                }
-                KeyCode::Char('n') if ctrl => {
-                    if let Some(f) = self.finder.as_mut()
-                        && f.selected + 1 < f.matches.len()
-                    {
-                        f.selected += 1;
-                    }
-                }
-                KeyCode::Char(c) if !ctrl => {
-                    if let Some(f) = self.finder.as_mut() {
-                        f.query.push(c);
-                    }
-                    self.finder_recompute();
-                }
-                _ => {}
-            }
+            self.finder_key(key);
             return Ok(());
         }
 

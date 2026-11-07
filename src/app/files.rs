@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fuzzy_matcher::FuzzyMatcher;
 
 use super::prefetch::By;
@@ -128,8 +129,51 @@ impl App {
         });
     }
 
+    /// A key while the file finder is open, which takes them all.
+    pub(super) fn finder_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (key.code, ctrl) {
+            (KeyCode::Esc, _) => self.finder = None,
+            (KeyCode::Enter, _) => {
+                let target = self
+                    .finder
+                    .as_ref()
+                    .and_then(|f| f.matches.get(f.selected).copied());
+                self.finder = None;
+                if let Some(idx) = target {
+                    self.reveal_file(idx);
+                }
+            }
+            (KeyCode::Backspace, _) => {
+                if let Some(f) = self.finder.as_mut() {
+                    f.query.pop();
+                }
+                self.finder_recompute();
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
+                if let Some(f) = self.finder.as_mut() {
+                    f.selected = f.selected.saturating_sub(1);
+                }
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
+                if let Some(f) = self.finder.as_mut()
+                    && f.selected + 1 < f.matches.len()
+                {
+                    f.selected += 1;
+                }
+            }
+            (KeyCode::Char(c), false) => {
+                if let Some(f) = self.finder.as_mut() {
+                    f.query.push(c);
+                }
+                self.finder_recompute();
+            }
+            _ => {}
+        }
+    }
+
     /// Recompute finder matches after the query changes.
-    pub(super) fn finder_recompute(&mut self) {
+    fn finder_recompute(&mut self) {
         let query = match &self.finder {
             Some(f) => f.query.clone(),
             None => return,
