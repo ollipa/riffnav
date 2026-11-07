@@ -222,11 +222,10 @@ impl App {
 
     pub(super) fn copy_path(&mut self) {
         let Some(idx) = self.selected_file() else {
-            self.status = Some("No file selected to copy".into());
-            return;
+            return self.set_status("No file selected to copy");
         };
         let path = self.files[idx].path().to_string();
-        self.status = Some(
+        self.set_status(
             match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(path.clone())) {
                 Ok(()) => format!("Copied {path}"),
                 Err(e) => format!("Copy failed: {e}"),

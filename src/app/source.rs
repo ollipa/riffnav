@@ -238,7 +238,7 @@ impl App {
         self.diff_scroll = 0;
         self.reset_cursor();
         self.publish_session(); // the file set changed; keep the CLI's view current
-        self.status = Some(format!("↻ refreshed · {} files", self.files.len()));
+        self.set_status(format!("↻ refreshed · {} files", self.files.len()));
     }
 
     /// After a file is opened in `$EDITOR` (the `o` key), re-run git for just

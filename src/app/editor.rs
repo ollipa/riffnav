@@ -86,7 +86,7 @@ impl App {
     /// The `o` key: edit the selected file in place.
     pub(super) fn open_editor(&mut self, terminal: &mut DefaultTerminal, path: &str) -> Result<()> {
         let (editor, status) = self.run_editor(terminal, path);
-        self.status = Some(match status {
+        self.set_status(match status {
             Ok(s) if s.success() => format!("Edited {path}"),
             Ok(s) => format!("{editor} exited: {s}"),
             Err(e) => format!("Couldn't launch {editor}: {e}"),

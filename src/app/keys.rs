@@ -210,7 +210,7 @@ impl App {
             KeyCode::Char('/') => self.open_search(),
             KeyCode::Char('i') => {
                 self.icon_style = self.icon_style.next();
-                self.status = Some(format!("Icons: {}", self.icon_style.name()));
+                self.set_status(format!("Icons: {}", self.icon_style.name()));
             }
             KeyCode::Char('T') => self.cycle_theme(),
             KeyCode::Char('y') => self.copy_path(),

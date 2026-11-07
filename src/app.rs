@@ -642,6 +642,24 @@ mod tests {
         assert!(app.status_deadline.is_none());
     }
 
+    /// A passing message sets its own deadline: with none it would stay up for
+    /// good, or go at one an earlier message left behind.
+    #[test]
+    fn each_passing_message_sets_its_own_deadline() {
+        let mut app = app_with(vec![file("a.rs")]);
+        app.press_for_test(crossterm::event::KeyCode::Char('i'), false);
+        assert!(
+            app.status.is_some() && app.status_deadline.is_some(),
+            "icons"
+        );
+        app.clear_status();
+        app.reload_files(vec![file("a.rs")]);
+        assert!(
+            app.status.is_some() && app.status_deadline.is_some(),
+            "refresh"
+        );
+    }
+
     #[test]
     fn start_focus_follows_config_but_yields_when_tree_hidden() {
         let diff_first = App::new(vec![file("a.rs")], false, &Config::default());
