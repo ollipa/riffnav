@@ -33,7 +33,7 @@ pub use self::cache::{Key, Prefetch, RenderCache, Request};
 pub use self::highlight::warm_up;
 pub use self::jump::{Jump, Target};
 pub use self::marks::Marks;
-pub use self::rendered::Rendered;
+pub use self::rendered::{Rendered, ViewTop};
 pub use self::spec::CommentLayer;
 
 /// How long a frame waits for a render before going ahead without it. Long enough

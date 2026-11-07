@@ -47,7 +47,7 @@ pub struct Rendered {
 /// The code at the top of a view, kept as diff line numbers so another render of
 /// the file, at a new width or in the other layout, can be scrolled to show it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ViewTop {
+pub struct ViewTop {
     numbers: LineNumbers,
     /// The rows of the line above the top of the view, when it starts partway in.
     into: u32,
@@ -150,7 +150,7 @@ impl Rendered {
     /// What this render shows at the top when scrolled to `scroll`, in terms that
     /// hold for any render of the file: the first numbered line in view, or the one
     /// the view starts partway into.
-    fn top_at(&self, scroll: u32) -> Option<ViewTop> {
+    pub fn top_at(&self, scroll: u32) -> Option<ViewTop> {
         let at = self.line_at(scroll);
         let line = match self.code_line(at) {
             line if self.numbered(line) => line,
@@ -167,7 +167,7 @@ impl Rendered {
 
     /// Where to scroll this render to show `top` at the top. A line wrapped onto a
     /// different number of rows is started as far into as it was, in proportion.
-    fn scroll_to(&self, top: ViewTop) -> Option<u32> {
+    pub fn scroll_to(&self, top: ViewTop) -> Option<u32> {
         let find = |side, line| self.line_map.row_for(Anchor { side, line });
         let old = top.numbers.old.and_then(|line| find(Side::Old, line));
         let new = top.numbers.new.and_then(|line| find(Side::New, line));
@@ -183,7 +183,7 @@ impl Rendered {
 
     /// Where to scroll this render to show what `old` shows at `scroll`. The top of
     /// the file stays the top.
-    pub fn scroll_like(&self, old: &Rendered, scroll: u32) -> Option<u32> {
+    pub(super) fn scroll_like(&self, old: &Rendered, scroll: u32) -> Option<u32> {
         if scroll == 0 {
             return None;
         }

@@ -34,7 +34,7 @@ use crate::diff::FileDiff;
 use crate::forge::{Forge, ReviewSync};
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
-use crate::render::{Key, RenderCache, Rendered, Request, WAIT};
+use crate::render::{Key, RenderCache, Rendered, Request, ViewTop, WAIT};
 use crate::review::ReviewStore;
 use crate::session::Session;
 use crate::theme::DiffTheme;
@@ -105,6 +105,13 @@ impl Direction {
     }
 }
 
+/// What the view was on: the render, or once that's gone, what it showed.
+enum ViewFrom {
+    Render(Arc<Rendered>),
+    /// The code at the top, and whether the cursor was on its anchored line.
+    Top(Option<ViewTop>, bool),
+}
+
 pub struct App {
     pub files: Vec<FileDiff>,
     pub rows: Vec<Row>,
@@ -172,9 +179,9 @@ pub struct App {
     /// it back there once the new render exists. Widening the context pushes the
     /// cursor's line down the render; without this it would slide off screen.
     cursor_screen_row: Option<u32>,
-    /// The render the scroll was last measured against, to carry the view over
-    /// to the next one when the width or the layout changes.
-    view_render: Option<(Key, Arc<Rendered>)>,
+    /// What the scroll was last measured against, to carry the view over to the
+    /// next render when the width or the layout changes.
+    view_from: Option<(Key, ViewFrom)>,
     /// Set when the view was carried over to a new render with the line cursor in
     /// view, for the draw to keep it there.
     keep_cursor: bool,
@@ -291,7 +298,7 @@ impl App {
             cursor_anchor: None,
             cursor_token: None,
             cursor_screen_row: None,
-            view_render: None,
+            view_from: None,
             keep_cursor: false,
             cursor_on_screen: false,
             comment_landing: None,
@@ -461,6 +468,7 @@ impl App {
         // On resize, drop renders made at the old width so the cache stays
         // bounded and the current file re-renders to the new width.
         if diff_width != self.last_width {
+            self.let_go_of_view_render();
             self.cache.clear();
             self.last_width = diff_width;
         }
@@ -568,25 +576,52 @@ impl App {
         let Some(now) = self.cache.shared(key) else {
             return;
         };
-        let Some((was, old)) = self.view_render.replace((key, now.clone())) else {
+        let Some((was, from)) = self.view_from.replace((key, ViewFrom::Render(now.clone()))) else {
             return;
         };
         if was.file == file && was != key {
-            // A cursor parked on a header or a note goes back to the last numbered
-            // line it was on, which needn't be in view, so it's left where that is.
-            let anchored = old.line_map.get(self.diff_cursor).anchor() == self.cursor_anchor;
+            let (top, anchored) = match &from {
+                ViewFrom::Render(old) => self.view_on(old),
+                ViewFrom::Top(top, anchored) => (*top, *anchored),
+            };
             self.keep_cursor = self.comments_enabled() && anchored && self.cursor_on_screen;
-            if let Some(scroll) = now.scroll_like(&old, self.diff_scroll) {
+            if let Some(scroll) = top.and_then(|top| now.scroll_to(top)) {
                 self.diff_scroll = scroll;
             }
         }
-        self.forget_render(old);
+        if let ViewFrom::Render(old) = from {
+            self.forget_render(old);
+        }
+    }
+
+    /// What `render` shows at the top at the current scroll, if not the top of the
+    /// file, and whether the line cursor is on the line it's anchored to. A cursor
+    /// parked on a header or a note goes back to the last numbered line it was on,
+    /// which needn't be in view, so it isn't kept in view.
+    fn view_on(&self, render: &Rendered) -> (Option<ViewTop>, bool) {
+        let top = (self.diff_scroll > 0)
+            .then(|| render.top_at(self.diff_scroll))
+            .flatten();
+        let anchored = render.line_map.get(self.diff_cursor).anchor() == self.cursor_anchor;
+        (top, anchored)
+    }
+
+    /// Keep only what the render the view is on shows, as a resize is about to
+    /// drop it from the cache and it can be big.
+    fn let_go_of_view_render(&mut self) {
+        let Some((key, ViewFrom::Render(render))) = &self.view_from else {
+            return;
+        };
+        let (key, render) = (*key, render.clone());
+        let (top, anchored) = self.view_on(&render);
+        self.view_from = Some((key, ViewFrom::Top(top, anchored)));
+        self.forget_render(render);
     }
 
     /// A reloaded diff keeps the scroll it had, rather than have it carried by line
     /// numbers that may now be other code.
     fn forget_view_render(&mut self) {
-        if let Some((_, render)) = self.view_render.take() {
+        if let Some((_, ViewFrom::Render(render))) = self.view_from.take() {
             self.forget_render(render);
         }
     }
