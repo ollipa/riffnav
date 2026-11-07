@@ -9,6 +9,7 @@
 //! taken if the job is still wanted, so one that a resize or a reload has
 //! overtaken can't land.
 
+mod blobs;
 mod cache;
 mod copies;
 mod highlight;

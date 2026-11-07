@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use twox_hash::XxHash3_128;
 
+use super::blobs;
 use super::moves::{MoveIndex, Target};
 use super::starts::{self, lines_above};
 use super::words::change_runs;
@@ -58,7 +59,7 @@ const MAX_CHANGED_LINES: u64 = 100_000;
 /// Blob bytes read for one diff, across every file.
 const MAX_BLOB_BYTES: usize = 32 << 20;
 /// A line this long is data, whatever it looks like.
-const MAX_LINE_BYTES: usize = 300;
+pub(super) const MAX_LINE_BYTES: usize = 300;
 /// Lines given to `git grep`, which reads each file once however many there are
 /// but compares each of its lines against all of them.
 const MAX_PATTERNS: usize = 256;
@@ -771,7 +772,7 @@ struct Reading<'a> {
 
 impl Reading<'_> {
     fn blobs(&mut self, specs: &[String]) -> Option<Vec<Option<String>>> {
-        starts::read_blobs(&self.git.repo, specs, &mut self.budget, self.cancelled)
+        blobs::read_blobs(&self.git.repo, specs, &mut self.budget, self.cancelled)
     }
 }
 
@@ -865,7 +866,7 @@ fn add_outside_files(
         .collect();
     let limits = (GREP_LIMIT, MAX_GREP_BYTES);
     let repo = &reading.git.repo;
-    let hits = starts::grep(repo, tree, patterns, &globs, limits, reading.cancelled)?;
+    let hits = blobs::grep(repo, tree, patterns, &globs, limits, reading.cancelled)?;
 
     let mut buffer = String::new();
     let mut counts: HashMap<Key, usize> = HashMap::new();
