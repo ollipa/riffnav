@@ -5,9 +5,6 @@
 //! shade for the exact changed words. The values below are GitHub's actual diff
 //! colors — the dark ones are its translucent overlays flattened over its
 //! `#0d1117` canvas.
-//!
-//! Set a default with `diff_theme` in the config, or cycle at runtime with the
-//! `T` key.
 
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
@@ -112,8 +109,8 @@ impl DiffTheme {
     }
 
     /// Background of a search match. Like the cursor it replaces only the
-    /// background, so the code keeps its syntax colors: this has to read behind
-    /// them, and stand out from the tints of a changed line.
+    /// background, so it has to read behind syntax colors and stand out from the
+    /// tints of a changed line.
     pub fn match_bg(self) -> Color {
         match self {
             DiffTheme::GitHubDark => rgb(0x3f3400),

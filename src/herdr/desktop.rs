@@ -14,9 +14,8 @@ use serde::Deserialize;
 
 use super::{TIMEOUT, config_base};
 
-/// How long to wait for `view.json` to show a toggle. The app saved it within
-/// 8ms in testing; a lone pane never changes it, so this is also what `z` costs
-/// there.
+/// How long to wait for `view.json` to show a toggle. A lone pane never changes
+/// it, so this is also what `z` costs there.
 const VIEW_WAIT: Duration = Duration::from_millis(100);
 
 /// riffnav's terminal in the herdr desktop app.

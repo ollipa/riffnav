@@ -52,9 +52,7 @@ fn parse_one(raw: &str) -> FileDiff {
             continue;
         }
         if in_hunk {
-            // Within a hunk, a leading '+'/'-' marks an added/removed line. The
-            // `+++`/`---` file headers live before the first `@@`, so they can't
-            // be miscounted here.
+            // Within a hunk, a leading '+'/'-' marks an added/removed line.
             match line.as_bytes().first() {
                 Some(b'+') => additions += 1,
                 Some(b'-') => deletions += 1,
@@ -125,9 +123,6 @@ fn parse_one(raw: &str) -> FileDiff {
 }
 
 /// Parse the `@@` headers out of one file's verbatim diff text (`FileDiff::raw`).
-///
-/// Computed on demand rather than during [`parse`], since only the comment CLI
-/// needs it — the TUI works from [`super::rows`].
 /// A combined (merge) diff's old side is its first parent, as it is on its rows.
 pub fn hunks(raw: &str) -> Vec<Hunk> {
     if is_combined(raw) {
@@ -221,9 +216,7 @@ fn parse_range(s: &str) -> Option<(u32, u32)> {
 }
 
 /// Remove ANSI CSI escape sequences (SGR color codes and friends) from `input`,
-/// borrowing it unchanged when there are none — the common case of a plain diff
-/// piped in. git emits these only when it thinks it's writing to a terminal,
-/// which includes feeding its configured pager.
+/// borrowing it unchanged when there are none.
 fn strip_ansi(input: &str) -> Cow<'_, str> {
     if !input.contains('\x1b') {
         return Cow::Borrowed(input);
@@ -426,8 +419,7 @@ mod tests {
 
     #[test]
     fn strips_mnemonic_prefixes_from_piped_diff() {
-        // What a `diff.mnemonicPrefix = true` user pipes in: `c/` (commit) and
-        // `w/` (working tree) prefixes instead of `a/`/`b/`. The path must come
+        // What a `diff.mnemonicPrefix = true` user pipes in. The path must come
         // out clean so the `o` key opens the real file.
         let diff = "diff --git c/src/file.rs w/src/file.rs\n\
                     index 1..2 100644\n--- c/src/file.rs\n+++ w/src/file.rs\n\

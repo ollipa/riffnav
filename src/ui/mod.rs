@@ -193,8 +193,7 @@ mod tests {
     }
 
     /// Unified diffs are left unwrapped, so a line wider than the pane must
-    /// be wrapped by the viewer rather than truncated at the edge. Regression
-    /// test for long markdown lines losing their tail.
+    /// be wrapped by the viewer rather than truncated at the edge.
     #[test]
     fn unified_long_line_wraps_not_truncated() {
         let cfg = Config {
@@ -395,9 +394,8 @@ mod tests {
         assert_eq!(app.comment_total(), 1, "the note was stored\n{out}");
     }
 
-    /// A reply's field opens under the *whole* thread, not under the one row the
-    /// cursor happens to sit on: pinned to that row it would open through the
-    /// middle of the box, hiding the very note being replied to.
+    /// A reply's field opens under the *whole* thread, not under the cursor's row,
+    /// which would hide the very note being replied to.
     #[test]
     fn a_replys_field_opens_below_the_thread_it_answers() {
         use ratatui::crossterm::event::KeyCode;
@@ -455,9 +453,8 @@ mod tests {
         );
     }
 
-    /// Arriving at a comment has to show the comment: `]` scrolls the whole box
-    /// into view, not just the row the cursor lands on, or a note anchored near
-    /// the foot of the pane is jumped to and still unreadable.
+    /// `]` scrolls the whole comment box into view, not just the row the cursor
+    /// lands on.
     #[test]
     fn jumping_brings_the_whole_comment_box_into_view() {
         // A short pane, and a thread deep enough that landing the cursor on its

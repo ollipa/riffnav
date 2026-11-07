@@ -35,21 +35,15 @@ struct Input {
 }
 
 /// Build the git command `riffnav diff` asks for. The view resolves as
-/// unstaged < config < flag, and the base as detect < config < `--base`, so a
-/// bare `riffnav diff` matches `git diff` unless the user says otherwise.
+/// unstaged < config < flag, and the base as detect < config < `--base`.
 ///
-/// Pass-through arguments name their own revisions, so a `diff_source` set in
-/// the config file is skipped once there are any: stacking a configured
-/// selector onto the user's would quietly turn `riffnav diff HEAD~1` into
-/// `git diff --staged HEAD~1`. A view flag still wins — that one was typed
-/// alongside the arguments, so it was meant.
+/// A configured `diff_source` is skipped once there are pass-through arguments,
+/// or `riffnav diff HEAD~1` would become `git diff --staged HEAD~1`. A view flag
+/// still wins, as it was typed alongside them.
 ///
-/// The flag returned alongside says whether the view was riffnav's own default
-/// rather than the user's choice, which is what licenses the empty-diff fallback
-/// in [`diff_input`].
-///
-/// The base is resolved for every view, not just the base-relative ones, so `d`
-/// and the number keys can reach those without re-detecting it mid-session.
+/// The returned flag says the view was riffnav's own default, which allows the
+/// empty-diff fallback in [`diff_input`]. The base is resolved for every view so
+/// `d` and the number keys can reach the base-relative ones.
 fn diff_command(args: cli::DiffArgs, config: &config::Config) -> (GitDiff, bool) {
     let configured = args.args.is_empty().then_some(config.diff_source).flatten();
     let chosen = args.view().or(configured);
@@ -65,17 +59,10 @@ fn diff_command(args: cli::DiffArgs, config: &config::Config) -> (GitDiff, bool)
     )
 }
 
-/// Load the diff for `riffnav diff`, stepping to another view when the defaulted
-/// one is empty.
-///
-/// A bare `riffnav diff` means `git diff`: unstaged work. On a clean tree that
-/// is nothing at all, and printing "no changes to display" in a repo whose
-/// branch is full of commits is unhelpful — what the user wants to read there is
-/// what the branch adds over its base, the same diff `riffnav diff --vs-base`
-/// shows. So an *empty* default steps on to the narrowest view that shows
-/// everything there is (see [`autodiff::fallback_view`]). A view the user named
-/// is left alone, empty or not: `riffnav diff --unstaged` on a clean tree
-/// correctly shows nothing.
+/// Load the diff for `riffnav diff`. A bare `riffnav diff` shows unstaged work,
+/// which is empty on a clean tree even when the branch has commits, so an empty
+/// default steps on to [`autodiff::fallback_view`]. A view the user named is
+/// left alone, empty or not.
 fn diff_input(args: cli::DiffArgs, config: &config::Config) -> Result<Input> {
     if let Some((old, new)) = args.renamed_flag() {
         anyhow::bail!("{old} was renamed to {new} in riffnav 1.1");
@@ -141,8 +128,7 @@ fn main() -> Result<()> {
     }
 
     let input = match cli.command {
-        // `diff`/`show` are just another way to *source* the diff — they still
-        // open the TUI, so they fall through to the app below.
+        // `diff`/`show` only source the diff; they still open the TUI below.
         Some(cli::Command::Diff(args)) => diff_input(args, &config)?,
         Some(cli::Command::Show { args }) => {
             let git = GitDiff::show(cli::git_args(args));
@@ -151,12 +137,9 @@ fn main() -> Result<()> {
                 git: Some(git),
             }
         }
-        // The `comment`/`skill` subcommands are plain CLI tools: no TUI, no diff
-        // on stdin. They talk to the same on-disk state a running window does.
+        // The other subcommands are plain CLI tools: no TUI, no diff on stdin.
         Some(command) => return cmd::run(command),
-        // No subcommand: either a diff is being piped in, or the user typed
-        // `riffnav` with nothing to show it — in which case show them what they
-        // can ask for.
+        // No subcommand and nothing piped in: show what can be asked for.
         None if std::io::stdin().is_terminal() => {
             cli::Cli::command().print_help()?;
             println!();
@@ -267,9 +250,7 @@ mod tests {
 
     #[test]
     fn a_configured_view_never_stacks_onto_pass_through_args() {
-        // `riffnav diff HEAD~1` has to mean `git diff HEAD~1`; a configured
-        // `diff_source` would otherwise add `--staged` (or `HEAD`) in front of
-        // the user's revision and render a diff they never asked for.
+        // `riffnav diff HEAD~1` has to mean `git diff HEAD~1`.
         for line in ["riffnav diff HEAD~1", "riffnav diff -w -- src/"] {
             assert_eq!(
                 view(line, DiffSource::Staged),

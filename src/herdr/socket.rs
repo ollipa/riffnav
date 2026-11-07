@@ -84,8 +84,7 @@ struct Response {
 
 #[derive(Deserialize)]
 struct ZoomResult {
-    /// herdr nests the zoom payload one level down under `zoom`; absent on
-    /// responses that don't carry one.
+    /// Absent on responses that don't carry one.
     zoom: Option<ZoomState>,
 }
 
@@ -112,8 +111,8 @@ fn socket_path() -> PathBuf {
     )
 }
 
-/// Pure socket-path resolution, split out so it can be tested without touching
-/// the process environment. `config_base` is the XDG config directory.
+/// Split out so it can be tested without the process environment. `config_base`
+/// is the XDG config directory.
 fn resolve_socket(
     socket_env: Option<&str>,
     session_env: Option<&str>,
@@ -198,8 +197,7 @@ mod socket_tests {
 
     #[test]
     fn toggle_zoom_parses_pretty_printed_response() {
-        // herdr's real reply spans multiple lines (it carries a nested `layout`),
-        // which a line-at-a-time read would mangle. Parsing by structure handles it.
+        // herdr's real reply spans multiple lines (it carries a nested `layout`).
         let dir = temp_dir("multiline");
         let herdr = fake_herdr(
             &dir,

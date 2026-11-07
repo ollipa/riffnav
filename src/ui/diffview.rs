@@ -24,11 +24,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, diff_width: u16) {
     // resolve the effective mode once to key the cache lookup.
     let side_by_side = app.side_by_side_for(idx);
 
-    // Build a widget covering just the visible window, clamping the scroll to the
-    // render's height. `visible` only ever lays out a viewport's worth of rows —
-    // not the whole prefix up to the scroll offset — so deep scrolling stays
-    // cheap. The returned paragraph owns its lines, so the cache borrow ends here
-    // and we can write the clamped scroll back below.
+    // `visible` lays out only a viewport's worth of rows, so deep scrolling stays
+    // cheap. The paragraph owns its lines, so the cache borrow ends here and the
+    // clamped scroll can be written back below.
     let marks = app.search_marks(idx, area.width);
     let key = Key {
         file: idx,

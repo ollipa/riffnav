@@ -12,13 +12,12 @@ use crate::autodiff::DiffSource;
 use crate::icons::IconStyle;
 use crate::theme::DiffTheme;
 
-/// User configuration, loaded from `config.toml`. Every field is optional in the
-/// file; anything omitted falls back to [`Config::default`] (via `serde(default)`).
+/// User configuration, loaded from `config.toml`. Anything omitted falls back to
+/// [`Config::default`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Start in side-by-side view rather than unified (CLI `-s`/`-u` win over
-    /// this).
+    /// Start in side-by-side view rather than unified (CLI `-s`/`-u` win).
     pub side_by_side: bool,
     /// File-tree glyphs: `nerd` | `unicode` | `ascii`.
     pub icon_style: IconStyle,
@@ -40,7 +39,7 @@ pub struct Config {
     pub show_tree: bool,
     /// Where keyboard focus starts: `diff` reads the first file right away (a
     /// single-file view — move between files with n/p), `tree` starts in the
-    /// file list. Ignored when the tree is hidden (focus is forced to the diff).
+    /// file list. Ignored when the tree is hidden.
     pub start_focus: Focus,
     /// Show the top summary bar.
     pub show_header: bool,

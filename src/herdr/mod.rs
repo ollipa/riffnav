@@ -4,8 +4,7 @@
 //! own pane; elsewhere the feature is absent and the key does nothing.
 //!
 //! The multiplexer sets `HERDR_ENV=1`. We send it `pane.zoom` over its control
-//! socket as newline-delimited JSON, omitting `pane_id` so it targets the focused
-//! pane (us) and `mode` so it toggles. See <https://herdr.dev/docs/socket-api/>.
+//! socket as newline-delimited JSON. See <https://herdr.dev/docs/socket-api/>.
 //!
 //! The app gives its terminals `HC_TERMINAL_ID`. That names a terminal, not a
 //! pane, so each toggle first finds our pane with `herdr-app ls`, then runs
@@ -37,8 +36,6 @@ pub enum Herdr {
 impl Herdr {
     /// Detect a herdr session. The multiplexer wins when both are present: it is
     /// the nearer of the two, as its panes inherit the app terminal's environment.
-    /// Detection reads the environment once at startup; these variables don't
-    /// change while riffnav runs.
     pub fn detect() -> Option<Self> {
         TuiSocket::detect()
             .map(Self::Tui)

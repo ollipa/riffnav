@@ -49,11 +49,8 @@ impl FileDiff {
     }
 }
 
-/// One `@@ -old_start,old_len +new_start,new_len @@` region of a file's diff.
-///
-/// Parsed on demand from [`FileDiff::raw`] (see `diff::hunks`) rather than stored
-/// on `FileDiff`: only the comment CLI needs it, and keeping it out of the struct
-/// leaves every existing `FileDiff` construction site untouched.
+/// One `@@ -old_start,old_len +new_start,new_len @@` region of a file's diff,
+/// parsed on demand from [`FileDiff::raw`] by [`super::hunks`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hunk {
     pub old_start: u32,

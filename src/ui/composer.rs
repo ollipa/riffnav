@@ -29,10 +29,8 @@ fn composer_hint(width: u16) -> &'static str {
     .unwrap_or("")
 }
 
-/// The note being typed, as a bordered field pinned to what it will hang on:
-/// below it where there's room, otherwise above, so the code — or, for a reply,
-/// the thread — under discussion stays on screen while it's written. A no-op
-/// when nothing is being composed.
+/// The note being typed, as a bordered field below what it will hang on, or above
+/// when there's no room, so the code or thread under discussion stays on screen.
 pub(super) fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
     let Some(composer) = app.composer() else {
         return;
@@ -65,8 +63,7 @@ pub(super) fn render_composer(frame: &mut Frame, area: Rect, app: &App) {
         height,
     };
 
-    // Framed like the box this note will become once it's saved, in the same
-    // theme accent, so the field reads as the comment taking shape in place.
+    // Framed like the saved comment box, so it reads as the comment taking shape.
     let accent = Style::new().fg(crate::comment::render::accent(app.diff_theme));
     let block = Block::bordered()
         .border_set(border::ROUNDED)

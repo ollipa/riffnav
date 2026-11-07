@@ -63,12 +63,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                         notes.chars().count() + 1
                     };
                     let badge = notes_w + adds.len() + 1 + dels.len();
-                    // The badge gets its columns before the name does. A name too
-                    // long for the pane is cut short rather than shoving the
-                    // counts off the right edge, where the widget would simply
-                    // clip them — those counts, and the note badge especially, are
-                    // what the tree is scanned for, and a hidden one reads as no
-                    // comments at all.
+                    // The badge gets its columns first: a clipped note count would
+                    // read as no comments at all.
                     let fixed = row.depth * 2 + 2 + icon_w + badge + 1;
                     let name = truncate(&shown(&row.name), inner.saturating_sub(fixed));
                     let left = row.depth * 2 + 2 + icon_w + name.width();
@@ -125,9 +121,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                 .borders(Borders::RIGHT)
                 .border_style(border_style),
         )
-        // Keep a few rows visible past the selection (like vim's `scrolloff`) so
-        // the list scrolls before the cursor hits the edge and you can always see
-        // what's coming next. Ratatui shrinks the padding on a short pane.
+        // Like vim's `scrolloff`. Ratatui shrinks the padding on a short pane.
         .scroll_padding(SCROLL_PADDING)
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
 
@@ -135,9 +129,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
 }
 
 /// `name` cut to `room` columns, ending in an ellipsis when anything was
-/// dropped so a truncated name doesn't read as the whole one. The tail is what
-/// goes: file names are told apart by their beginnings far more often than by
-/// their ends, and the extension is usually already given by the icon.
+/// dropped. The tail goes: names differ more often at their start, and the icon
+/// usually gives the extension.
 fn truncate(name: &str, room: usize) -> String {
     if name.width() <= room {
         return name.to_string();
