@@ -965,8 +965,8 @@ pub(super) mod tests {
         );
         let file = repo.diff(&["show", "HEAD"]);
         let parsing = repo.parsing(&file);
-        // The rows' first line 1 is the removed one, as before.
-        assert_eq!(language(&parsing), Some("Bourne Again Shell (bash)"));
+        // The new side's first line is the file as it is now.
+        assert_eq!(language(&parsing), Some("Ruby"));
         assert!(!reads_language(&file, &diff::rows(&file)));
     }
 

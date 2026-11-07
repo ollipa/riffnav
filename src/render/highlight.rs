@@ -291,14 +291,17 @@ fn syntax_theme(theme: DiffTheme) -> EmbeddedThemeName {
 }
 
 /// The file's language from its name, then its extension, then a `#!` first
-/// line. `None` for anything else, including plain text, which has nothing to
-/// color and isn't worth parsing.
+/// line: the new side's, as the file is now, then the old side's, which still
+/// names it when a line went in above. `None` for anything else, including plain
+/// text, which has nothing to color and isn't worth parsing.
 fn find_syntax<'a>(set: &'a SyntaxSet, path: &str, rows: &[Row]) -> Option<&'a SyntaxReference> {
+    let first_line = |side: fn(&Row) -> Option<u32>| {
+        let row = rows.iter().find(|row| side(row) == Some(1))?;
+        set.find_syntax_by_first_line(&row.text)
+    };
     named(set, path)
-        .or_else(|| {
-            let first = rows.iter().find(|r| r.old == Some(1) || r.new == Some(1))?;
-            set.find_syntax_by_first_line(&first.text)
-        })
+        .or_else(|| first_line(|row| row.new))
+        .or_else(|| first_line(|row| row.old))
         .filter(|syntax| syntax.name != "Plain Text")
 }
 
@@ -386,6 +389,26 @@ mod tests {
     fn a_shebang_names_the_language_of_a_file_with_no_extension() {
         let (_, runs) = highlighted("run", "@@ -0,0 +1,2 @@\n+#!/bin/sh\n+echo hi\n");
         assert!(!runs[2].is_empty());
+    }
+
+    fn language_of(path: &str, hunk: &str) -> Option<&'static str> {
+        let file = file(path, hunk);
+        language(&file, &rows(&file)).map(|syntax| syntax.name.as_str())
+    }
+
+    #[test]
+    fn a_changed_shebang_names_the_file_as_it_is_now() {
+        let hunk = "@@ -1,2 +1,2 @@\n-#!/bin/sh\n+#!/usr/bin/env ruby\n puts 1\n";
+        assert_eq!(language_of("run", hunk), Some("Ruby"));
+        // A new first line that names nothing leaves it to the old one.
+        let hunk = "@@ -1,2 +1,2 @@\n-#!/usr/bin/env ruby\n+hello\n puts 1\n";
+        assert_eq!(language_of("run", hunk), Some("Ruby"));
+    }
+
+    #[test]
+    fn a_line_put_above_the_shebang_leaves_the_old_one_to_name_it() {
+        let hunk = "@@ -1,2 +1,3 @@\n+# added\n #!/usr/bin/env python3\n x = 1\n";
+        assert_eq!(language_of("run", hunk), Some("Python"));
     }
 
     #[test]
