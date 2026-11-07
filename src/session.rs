@@ -19,6 +19,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::diff::path::shown;
+
 use crate::comment::Side;
 use crate::diff::{FileDiff, Hunk};
 use crate::state;
@@ -98,11 +100,14 @@ impl Session {
     }
 
     /// The file matching `path` by either its post- or pre-image name, so a
-    /// rename can be commented on under whichever name the agent knows.
+    /// rename can be commented on under whichever name the agent knows. A name
+    /// that printed escaped can also be given as it printed.
     pub fn file(&self, path: &str) -> Option<&SessionFile> {
-        self.files
-            .iter()
-            .find(|f| f.path == path || f.old_path.as_deref() == Some(path))
+        let find = |same: &dyn Fn(&str) -> bool| {
+            let has = |f: &&SessionFile| same(&f.path) || f.old_path.as_deref().is_some_and(same);
+            self.files.iter().find(has)
+        };
+        find(&|name| name == path).or_else(|| find(&|name| shown(name) == path))
     }
 
     /// Where this scope's session file lives, or `None` outside a repo.
@@ -160,6 +165,18 @@ mod tests {
              @@ -10,3 +12,4 @@\n ctx\n-gone\n+one\n+two\n",
         );
         Session::new(&files, "stdin", None)
+    }
+
+    #[test]
+    fn a_file_is_found_by_its_name_or_as_it_printed() {
+        let files = crate::diff::parse(
+            "diff --git \"a/t\\tx\" \"b/t\\tx\"\n--- \"a/t\\tx\"\n+++ \"b/t\\tx\"\n\
+             @@ -1 +1 @@\n-a\n+b\n",
+        );
+        let s = Session::new(&files, "stdin", None);
+        assert!(s.file("t\tx").is_some());
+        assert_eq!(s.file(r"t\tx").map(|f| f.path.as_str()), Some("t\tx"));
+        assert!(s.file("tx").is_none());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use super::model::{FileDiff, FileStatus, Hunk};
+use super::path;
 use super::rows::count_changes;
 
 /// Split a unified diff into per-file sections. Anything before the first file
@@ -63,16 +64,16 @@ fn parse_one(raw: &str) -> FileDiff {
         }
 
         if let Some(p) = line.strip_prefix("rename from ") {
-            old_path = Some(p.to_string());
+            old_path = Some(whole_path(p).into_owned());
             status = FileStatus::Renamed;
         } else if let Some(p) = line.strip_prefix("rename to ") {
-            new_path = Some(p.to_string());
+            new_path = Some(whole_path(p).into_owned());
             status = FileStatus::Renamed;
         } else if let Some(p) = line.strip_prefix("copy from ") {
-            old_path = Some(p.to_string());
+            old_path = Some(whole_path(p).into_owned());
             status = FileStatus::Copied;
         } else if let Some(p) = line.strip_prefix("copy to ") {
-            new_path = Some(p.to_string());
+            new_path = Some(whole_path(p).into_owned());
             status = FileStatus::Copied;
         } else if line.starts_with("new file mode") {
             status = FileStatus::Added;
@@ -253,13 +254,26 @@ fn strip_ansi(input: &str) -> Cow<'_, str> {
 }
 
 /// Parse the path from a `--- `/`+++ ` header side, stripping the leading path
-/// prefix and any trailing tab-timestamp. `/dev/null` becomes `None`.
+/// prefix and anything after the name: git ends a name holding a space with a tab,
+/// and other tools add a timestamp after one. `/dev/null` becomes `None`.
 fn side_path(s: &str) -> Option<String> {
-    let s = s.split('\t').next().unwrap_or(s).trim_end();
-    if s == "/dev/null" {
-        return None;
+    match path::unquote(s) {
+        Some((name, _)) => named_path(&name),
+        None => named_path(s.split_once('\t').map_or(s.trim_end(), |(name, _)| name)),
     }
-    Some(strip_path_prefix(s).to_string())
+}
+
+/// A side's name without its prefix. `/dev/null` becomes `None`.
+fn named_path(name: &str) -> Option<String> {
+    (name != "/dev/null").then(|| strip_path_prefix(name).to_string())
+}
+
+/// `s` as a name that's all of it, quoted or not.
+fn whole_path(s: &str) -> Cow<'_, str> {
+    match path::unquote(s) {
+        Some((name, "")) => Cow::Owned(name),
+        _ => Cow::Borrowed(s),
+    }
 }
 
 /// Strip git's leading path prefix. The default is `a/`/`b/`, but a diff piped
@@ -283,21 +297,52 @@ fn binary_paths(line: &str) -> Option<(Option<String>, Option<String>)> {
     let rest = line
         .strip_prefix("Binary files ")?
         .strip_suffix(" differ")?;
-    let (a, b) = rest.split_once(" and ")?;
-    Some((side_path(a), side_path(b)))
+    let (a, b) = split_sides(rest, " and ").or_else(|| {
+        let (a, b) = rest.split_once(" and ")?;
+        Some((a.into(), b.into()))
+    })?;
+    Some((named_path(&a), named_path(&b)))
 }
 
-/// Heuristic fallback: split `diff --git a/<old> b/<new>` at the ` b/` boundary.
-/// Good enough for paths without spaces; quoted/spaced paths are a known gap.
+/// Split `<old><sep><new>`, where either side may be quoted, into its two names,
+/// which keep their prefixes. Only a name with no quotes can hold `sep`, and a name
+/// with no quotes can't hold `"`. When neither side is quoted the split is the one
+/// that gives both sides the same path, as they have unless the file moved, or else
+/// the one that leaves a side as `/dev/null`. `None` if there's no telling.
+fn split_sides<'a>(rest: &'a str, sep: &str) -> Option<(Cow<'a, str>, Cow<'a, str>)> {
+    if let Some((old, tail)) = path::unquote(rest) {
+        return Some((old.into(), whole_path(tail.strip_prefix(sep)?)));
+    }
+    if rest.ends_with('"')
+        && let Some(at) = rest.find(&format!("{sep}\""))
+        && let Some((new, "")) = path::unquote(&rest[at + sep.len()..])
+    {
+        return Some((rest[..at].into(), new.into()));
+    }
+    let splits = || {
+        let at = rest.match_indices(sep);
+        at.map(|(at, _)| (&rest[..at], &rest[at + sep.len()..]))
+    };
+    let (old, new) = splits()
+        .find(|(old, new)| strip_path_prefix(old) == strip_path_prefix(new))
+        .or_else(|| splits().find(|sides| sides.0 == "/dev/null" || sides.1 == "/dev/null"))?;
+    Some((old.into(), new.into()))
+}
+
+/// The two paths of a file's first line, for a side with no `---`/`+++` header. A
+/// file that moved has its names on lines of their own, so this mostly sees a
+/// file with the same path on both sides, and otherwise splits at the ` b/`.
 fn diff_git_paths(line: &str) -> Option<(String, String)> {
-    if let Some(path) = combined_path(line) {
-        return Some((path.to_string(), path.to_string()));
+    if let Some(name) = combined_path(line) {
+        let name = whole_path(name).into_owned();
+        return Some((name.clone(), name));
     }
     let rest = line.strip_prefix("diff --git ")?;
-    let idx = rest.find(" b/")?;
-    let a = strip_ab(&rest[..idx]);
-    let b = strip_ab(rest[idx + 1..].trim_end());
-    Some((a, b))
+    let (a, b) = split_sides(rest, " ").or_else(|| {
+        let idx = rest.find(" b/")?;
+        Some((rest[..idx].into(), rest[idx + 1..].trim_end().into()))
+    })?;
+    Some((strip_ab(&a), strip_ab(&b)))
 }
 
 fn strip_ab(s: &str) -> String {
@@ -515,6 +560,129 @@ mod tests {
     fn a_length_git_wrapped_below_zero_reads_as_none() {
         let parsed = parse_combined_header("@@@ -13,1 -11,1 +9,18446744073709551615 @@@").unwrap();
         assert_eq!((parsed.hunk.new_start, parsed.hunk.new_len), (9, 0));
+    }
+
+    /// One file's paths, as (old, new).
+    fn paths(raw: &str) -> (Option<String>, Option<String>) {
+        let f = parse(raw).remove(0);
+        (f.old_path, f.new_path)
+    }
+
+    fn same(path: &str) -> (Option<String>, Option<String>) {
+        (Some(path.to_string()), Some(path.to_string()))
+    }
+
+    #[test]
+    fn quoted_paths_are_read_from_every_header() {
+        let modified = "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\n\
+                        --- \"a/caf\\303\\251.txt\"\n+++ \"b/caf\\303\\251.txt\"\n@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(paths(modified), same("café.txt"));
+
+        let added = "diff --git \"a/t\\tn\" \"b/t\\tn\"\nnew file mode 100644\n--- /dev/null\n\
+                     +++ \"b/t\\tn\"\n@@ -0,0 +1 @@\n+x\n";
+        assert_eq!(paths(added), (None, Some("t\tn".to_string())));
+
+        let renamed = "diff --git \"a/q\\\"1\" b/plain\nsimilarity index 100%\n\
+                       rename from \"q\\\"1\"\nrename to plain\n";
+        let f = &parse(renamed)[0];
+        assert_eq!(f.status, FileStatus::Renamed);
+        assert_eq!(f.old_path.as_deref(), Some("q\"1"));
+        assert_eq!(f.path(), "plain");
+
+        let copied = "diff --git a/plain \"b/n\\nl\"\nsimilarity index 100%\n\
+                      copy from plain\ncopy to \"n\\nl\"\n";
+        let f = &parse(copied)[0];
+        assert_eq!(f.status, FileStatus::Copied);
+        assert_eq!(f.path(), "n\nl");
+    }
+
+    #[test]
+    fn a_quoted_name_with_a_space_still_ends_at_its_quote() {
+        // git follows a name holding a space with a tab, quoted or not.
+        let raw = "diff --git \"a/q\\\" r\" \"b/q\\\" r\"\n--- \"a/q\\\" r\"\t\n+++ \"b/q\\\" r\"\t\n\
+                   @@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(paths(raw), same("q\" r"));
+    }
+
+    #[test]
+    fn a_name_keeps_the_space_it_ends_in() {
+        let raw = "diff --git a/x  b/x \n--- a/x \t\n+++ b/x \t\n@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(paths(raw), same("x "));
+        assert_eq!(
+            paths("diff --git a/x  b/x \nold mode 1\nnew mode 2\n"),
+            same("x ")
+        );
+    }
+
+    #[test]
+    fn the_first_line_splits_where_both_sides_agree() {
+        let line = |rest: &str| diff_git_paths(&format!("diff --git {rest}"));
+        let both = |path: &str| Some((path.to_string(), path.to_string()));
+        assert_eq!(line("a/x b/y.txt b/x b/y.txt"), both("x b/y.txt"));
+        assert_eq!(line("a/sp ace.txt b/sp ace.txt"), both("sp ace.txt"));
+        assert_eq!(line("c/m n w/m n"), both("m n"));
+        assert_eq!(line(r#""a/t\tx" "b/t\tx""#), both("t\tx"));
+        assert_eq!(
+            line(r#""a/t\tx" b/plain y"#),
+            Some(("t\tx".to_string(), "plain y".to_string()))
+        );
+        assert_eq!(
+            line(r#"a/plain y "b/t\tx""#),
+            Some(("plain y".to_string(), "t\tx".to_string()))
+        );
+        // A rename's sides differ, and its own lines settle it.
+        assert_eq!(
+            line("a/one b/two"),
+            Some(("one".to_string(), "two".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_mode_change_finds_its_path_on_the_first_line() {
+        let raw = "diff --git a/x b/y.txt b/x b/y.txt\nold mode 100644\nnew mode 100755\n";
+        assert_eq!(paths(raw), same("x b/y.txt"));
+    }
+
+    #[test]
+    fn binary_lines_split_around_names_holding_the_word_and() {
+        let binary = |sides: &str| binary_paths(&format!("Binary files {sides} differ")).unwrap();
+        let some = |path: &str| Some(path.to_string());
+        assert_eq!(
+            binary("a/x and y and b/x and y"),
+            (some("x and y"), some("x and y"))
+        );
+        assert_eq!(binary("/dev/null and b/x and y"), (None, some("x and y")));
+        assert_eq!(binary("a/x and y and /dev/null"), (some("x and y"), None));
+        assert_eq!(
+            binary(r#""a/q\" and r" and "b/q\" and r""#),
+            (some("q\" and r"), some("q\" and r"))
+        );
+        assert_eq!(
+            binary(r#"/dev/null and "b/caf\303\251""#),
+            (None, some("café"))
+        );
+        assert_eq!(binary(r#""a/t\tx" and /dev/null"#), (some("t\tx"), None));
+        assert_eq!(
+            binary(r#"a/x and y and "b/t\tx""#),
+            (some("x and y"), some("t\tx"))
+        );
+        assert_eq!(binary("a/one and b/two"), (some("one"), some("two")));
+    }
+
+    #[test]
+    fn a_merge_quotes_its_one_path_too() {
+        let raw = "diff --cc \"caf\\303\\251.txt\"\nindex 1,2..3\nBinary files differ\n";
+        assert_eq!(paths(raw), same("café.txt"));
+        assert_eq!(
+            paths("diff --combined \"t\\tx\"\nindex 1,2..3\n"),
+            same("t\tx")
+        );
+    }
+
+    #[test]
+    fn a_name_that_only_starts_with_a_quote_is_left_alone() {
+        assert_eq!(whole_path(r#""not closed"#), r#""not closed"#);
+        assert_eq!(whole_path(r#""a" and more"#), r#""a" and more"#);
     }
 
     #[test]

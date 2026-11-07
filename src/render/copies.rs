@@ -36,7 +36,7 @@ use super::starts::{self, lines_above};
 use super::words::change_runs;
 use crate::autodiff::Tree;
 use crate::comment::store::{Anchor, Side};
-use crate::diff::{self, FileDiff, Row, RowKind};
+use crate::diff::{self, FileDiff, Row, RowKind, path};
 
 /// Lines of real code a block needs. See [`is_code`]. Much more than a move needs:
 /// two lines coming back after being removed is a coincidence worth checking, but
@@ -881,7 +881,8 @@ fn add_outside_files(
         let key = key_of(&hit.text, &mut buffer);
         let rare = counts.get(&key).is_some_and(|&count| count <= MAX_PLACES);
         let path = hit.path.as_str();
-        if rare && is_source(path) && !touched.contains(path) {
+        // `git cat-file` takes a name a line, so one with a newline can't be read.
+        if rare && is_source(path) && !touched.contains(path) && !path.contains('\n') {
             *matched.entry(path).or_insert(0) += 1;
         }
     }
@@ -987,7 +988,7 @@ fn index_of(blocks: &[Block], runs: &[Run], corpus: &Corpus, files: &[FileDiff])
         let kept = &stretch.lines[block.at..block.at + block.len];
         let place = |line: u32| match origin.file == Some(run.file) {
             true => format!("line {line}"),
-            false => format!("{}:{line}", origin.path),
+            false => format!("{}:{line}", path::shown(&origin.path)),
         };
         index[run.file].notes.insert(
             added[0].row,
@@ -1504,6 +1505,58 @@ mod tests {
         let tree = Some(Tree::Rev("HEAD".to_string()));
         let got = git_notes(&repo, &["show", "HEAD"], tree);
         assert_eq!(got, ["copied from src/some dir/un touched.rs:41"]);
+    }
+
+    /// What `git show` finds for a copy of an outside file, under each given name.
+    fn notes_with_origins(names: &[&str], tree: Tree) -> Vec<String> {
+        let repo = Repo::new();
+        for name in names {
+            let at = repo.0.join(path::to_os(name));
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, source_file(&FUNCTION)).unwrap();
+        }
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-qm", "x"]);
+        repo.commit("src/new.rs", &FUNCTION.join("\n"));
+        git_notes(&repo, &["show", "HEAD"], Some(tree))
+    }
+
+    #[test]
+    fn a_quoted_name_can_be_read_and_shows_as_itself() {
+        let head = || Tree::Rev("HEAD".to_string());
+        assert_eq!(
+            notes_with_origins(&["日本語/ファイル.rs"], head()),
+            ["copied from 日本語/ファイル.rs:41"]
+        );
+        assert_eq!(
+            notes_with_origins(&["t\tb.rs"], head()),
+            [r"copied from t\tb.rs:41"]
+        );
+        let latin1 = path::from_bytes(b"caf\xe9.rs");
+        assert_eq!(
+            notes_with_origins(&[&latin1], head()),
+            [r"copied from caf\351.rs:41"]
+        );
+    }
+
+    #[test]
+    fn a_name_like_an_index_stage_is_read_from_the_index() {
+        assert_eq!(
+            notes_with_origins(&["1:x.rs"], Tree::Index),
+            ["copied from 1:x.rs:41"]
+        );
+    }
+
+    #[test]
+    fn a_name_with_a_newline_cant_be_mistaken_for_another_file() {
+        let head = || Tree::Rev("HEAD".to_string());
+        let lone = notes_with_origins(&["a\nb.rs"], head());
+        assert!(lone.is_empty(), "{lone:?}");
+        // The other answers from `git cat-file` stay in step without it.
+        assert_eq!(
+            notes_with_origins(&["a\nb.rs", "z.rs"], head()),
+            ["copied from z.rs:41"]
+        );
     }
 
     #[test]

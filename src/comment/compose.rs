@@ -13,6 +13,7 @@
 use unicode_width::UnicodeWidthChar;
 
 use super::store::Anchor;
+use crate::diff::path::shown;
 
 /// Everything a composed note needs to become a stored comment, carried from the
 /// keypress that started it through to the save.
@@ -88,11 +89,13 @@ impl Composer {
         match &self.pending.reply_to {
             Some(id) => format!(
                 " Reply to #{id} · {}:{} ",
-                self.pending.file, self.pending.anchor.line
+                shown(&self.pending.file),
+                self.pending.anchor.line
             ),
             None => format!(
                 " Comment on {}:{} ",
-                self.pending.file, self.pending.anchor.line
+                shown(&self.pending.file),
+                self.pending.anchor.line
             ),
         }
     }

@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragra
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Focus};
+use crate::diff::path::shown;
 
 /// Tallest the comment composer grows before it scrolls internally, so a long
 /// note never swallows the diff it's about.
@@ -138,7 +139,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_diff_title(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
     let title = match app.selected_file() {
-        Some(idx) => format!(" {} ", app.files[idx].path()),
+        Some(idx) => format!(" {} ", shown(app.files[idx].path())),
         None => " (directory) ".to_string(),
     };
     let mut style = Style::new().add_modifier(Modifier::BOLD);
@@ -185,7 +186,10 @@ fn search_summary(app: &App) -> Option<String> {
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(summary) = search_summary(app) {
         let (text, style) = match &app.status {
-            Some(status) => (format!("· {status} "), Style::new().fg(Color::Yellow)),
+            Some(status) => (
+                format!("· {} ", shown(status)),
+                Style::new().fg(Color::Yellow),
+            ),
             None => (
                 "· n/N: next/previous match · Esc: clear search ".to_string(),
                 Style::new().add_modifier(Modifier::DIM),
@@ -199,7 +203,10 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let (text, style) = match &app.status {
-        Some(status) => (format!(" {status} "), Style::new().fg(Color::Yellow)),
+        Some(status) => (
+            format!(" {} ", shown(status)),
+            Style::new().fg(Color::Yellow),
+        ),
         None => {
             let src = if app.can_cycle_source() {
                 "d: source · "
@@ -440,7 +447,7 @@ fn render_finder(frame: &mut Frame, area: Rect, app: &App) {
                     format!("{} ", file.status.sigil()),
                     Style::new().fg(filetree::status_color(file.status)),
                 ),
-                Span::raw(file.path().to_string()),
+                Span::raw(shown(file.path()).into_owned()),
             ]))
         })
         .collect();

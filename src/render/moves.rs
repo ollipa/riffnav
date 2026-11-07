@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::words::change_runs;
 use crate::comment::store::{Anchor, Side};
-use crate::diff::{self, FileDiff, Row};
+use crate::diff::{self, FileDiff, Row, path};
 
 /// Substantial lines a block needs. See [`Line::is_anchor`].
 const MIN_LINES: usize = 2;
@@ -361,7 +361,7 @@ fn hints(old: &Line, new: &Line, files: &[FileDiff]) -> (String, String) {
         if old.file == new.file {
             format!("moved {verb} line {}", line.number)
         } else {
-            let path = files[line.file].path();
+            let path = path::shown(files[line.file].path());
             format!("moved {verb} {path}:{}", line.number)
         }
     };

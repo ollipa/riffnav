@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::autodiff::DiffSource;
 use crate::diff::FileDiff;
+use crate::diff::path::shown;
 
 #[derive(Parser, Debug)]
 #[command(name = "riffnav", version, about = "A git diff pager with a file tree")]
@@ -242,7 +243,7 @@ pub fn print_list(files: &[FileDiff]) {
         println!(
             "  {} {:<48} +{} -{}",
             f.status.sigil(),
-            f.path(),
+            shown(f.path()),
             f.additions,
             f.deletions
         );

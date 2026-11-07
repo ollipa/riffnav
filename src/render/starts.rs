@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::mem;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -31,7 +32,7 @@ use twox_hash::XxHash3_128;
 
 use super::highlight::{self, HunkStart, MAX_FILE_BYTES};
 use crate::autodiff::Tree;
-use crate::diff::{self, FileDiff, Hunk, Row, RowKind};
+use crate::diff::{self, FileDiff, Hunk, Row, RowKind, path};
 
 /// How often a running git is checked on, to stop it if the job was cancelled.
 const GIT_POLL: Duration = Duration::from_millis(2);
@@ -269,7 +270,10 @@ pub(super) fn read_blobs(
             let mut stdin = stdin?;
             specs
                 .iter()
-                .try_for_each(|spec| writeln!(stdin, "{spec}"))
+                .try_for_each(|spec| {
+                    stdin.write_all(path::to_os(spec).as_encoded_bytes())?;
+                    stdin.write_all(b"\n")
+                })
                 .ok()
         });
         let reading = scope.spawn(|| blob_texts(stdout?, specs.len(), budget));
@@ -396,17 +400,24 @@ pub(super) fn grep(
         Tree::Rev(rev) => format!("{rev}:"),
     };
     let mut hits = Vec::new();
-    for line in String::from_utf8_lossy(&output).lines() {
-        let mut fields = line.splitn(3, '\0');
-        if let (Some(path), Some(_), Some(text)) = (fields.next(), fields.next(), fields.next()) {
-            let path = path.strip_prefix(&prefix).unwrap_or(path);
-            hits.push(GrepHit {
-                path: path.to_string(),
-                text: text.to_string(),
-            });
-        }
+    let mut rest = output.as_slice();
+    // `-z` gives names as they are, so one can hold a newline.
+    while let (Some(name), Some(_)) = (field(&mut rest, 0), field(&mut rest, 0)) {
+        let line = field(&mut rest, b'\n').unwrap_or_else(|| mem::take(&mut rest));
+        let name = name.strip_prefix(prefix.as_bytes()).unwrap_or(name);
+        hits.push(GrepHit {
+            path: path::from_bytes(name),
+            text: String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(line)).into_owned(),
+        });
     }
     Some(hits)
+}
+
+/// Take the bytes before the next `end` off the front of `bytes`, and `end` itself.
+fn field<'a>(bytes: &mut &'a [u8], end: u8) -> Option<&'a [u8]> {
+    let (field, rest) = bytes.split_at(bytes.iter().position(|byte| *byte == end)?);
+    *bytes = &rest[1..];
+    Some(field)
 }
 
 fn blob_text(mut stdin: ChildStdin, stdout: ChildStdout, id: &str) -> Option<String> {

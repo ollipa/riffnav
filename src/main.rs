@@ -117,10 +117,12 @@ fn nothing_to_display(text: &str) -> String {
 
 /// Read the unified diff piped or redirected in on stdin (the pager path).
 fn read_stdin() -> Result<Input> {
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     std::io::stdin()
-        .read_to_string(&mut text)
+        .read_to_end(&mut bytes)
         .context("failed to read diff from stdin")?;
+    // Like a diff from git, as a name or a line needn't be UTF-8.
+    let text = String::from_utf8_lossy(&bytes).into_owned();
     Ok(Input { text, git: None })
 }
 

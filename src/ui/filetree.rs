@@ -4,8 +4,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem};
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::app::App;
 use crate::diff::FileStatus;
+use crate::diff::path::shown;
 use crate::icons;
 use crate::tree::RowKind;
 
@@ -27,7 +30,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                     ListItem::new(Line::from(vec![
                         Span::raw(indent),
                         Span::styled(
-                            format!("{marker} {}/", row.name),
+                            format!("{marker} {}/", shown(&row.name)),
                             Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
                         ),
                     ]))
@@ -67,8 +70,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
                     // what the tree is scanned for, and a hidden one reads as no
                     // comments at all.
                     let fixed = row.depth * 2 + 2 + icon_w + badge + 1;
-                    let name = truncate(&row.name, inner.saturating_sub(fixed));
-                    let left = row.depth * 2 + 2 + icon_w + name.chars().count();
+                    let name = truncate(&shown(&row.name), inner.saturating_sub(fixed));
+                    let left = row.depth * 2 + 2 + icon_w + name.width();
                     let pad = inner.saturating_sub(left + badge).max(1);
 
                     // A reviewed file shows a green ✓ in place of its A/M/D sigil
@@ -136,15 +139,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App, focused: bool) {
 /// goes: file names are told apart by their beginnings far more often than by
 /// their ends, and the extension is usually already given by the icon.
 fn truncate(name: &str, room: usize) -> String {
-    if name.chars().count() <= room {
+    if name.width() <= room {
         return name.to_string();
     }
     // Below two columns there's no room for a name *and* the mark that says it
     // was cut, so all that's left is the mark itself — or nothing.
-    name.chars()
-        .take(room.saturating_sub(1))
-        .chain("…".chars().take(room.min(1)))
-        .collect()
+    let keep = room.saturating_sub(1);
+    let ends = name.char_indices().map(|(at, c)| at + c.len_utf8());
+    let end = ends.take_while(|end| name[..*end].width() <= keep).last();
+    let kept = &name[..end.unwrap_or(0)];
+    kept.chars().chain("…".chars().take(room.min(1))).collect()
 }
 
 pub(super) fn status_color(status: FileStatus) -> Color {
@@ -159,6 +163,8 @@ pub(super) fn status_color(status: FileStatus) -> Color {
 
 #[cfg(test)]
 mod tests {
+    use unicode_width::UnicodeWidthStr;
+
     use super::truncate;
 
     #[test]
@@ -174,6 +180,23 @@ mod tests {
         assert_eq!(truncate("main.rs", 0), "");
         for room in 0..10 {
             assert!(truncate("a_long_file_name.rs", room).chars().count() <= room);
+        }
+    }
+
+    #[test]
+    fn truncation_counts_columns_not_characters() {
+        assert_eq!(truncate("日本語.rs", 9), "日本語.rs");
+        assert_eq!(truncate("日本語.rs", 8), "日本語.…");
+        // A wide character that won't fit whole isn't split: the name comes up short.
+        assert_eq!(truncate("日本語.rs", 4), "日…");
+        assert_eq!(truncate("日本語.rs", 2), "…");
+        // A combining mark stays with its letter.
+        assert_eq!(truncate("cafe\u{301}s.txt", 5), "cafe\u{301}…");
+        for room in 0..12 {
+            for name in ["日本語/ファイル.rs", "👩‍💻👩‍💻👩‍💻.txt", "cafe\u{301}.txt"]
+            {
+                assert!(truncate(name, room).width() <= room, "{name} in {room}");
+            }
         }
     }
 }

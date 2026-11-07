@@ -1,5 +1,6 @@
 mod model;
 mod parser;
+pub mod path;
 mod rows;
 
 pub use model::{FileDiff, FileStatus, Hunk};

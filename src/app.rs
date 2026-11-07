@@ -24,7 +24,7 @@ use serde::Deserialize;
 use crate::autodiff::{DiffSource, GitDiff};
 use crate::comment::{Anchor, Comment, CommentStore, CommentWatch, Composer, PendingComment, Side};
 use crate::config::Config;
-use crate::diff::{FileDiff, FileStatus};
+use crate::diff::{FileDiff, FileStatus, path};
 use crate::forge::{Forge, ReviewSync};
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
@@ -2301,7 +2301,7 @@ impl App {
             .or_else(|_| std::env::var("EDITOR"))
             .unwrap_or_else(|_| "vi".to_string());
         let mut cmd = Command::new(&editor);
-        cmd.arg(path);
+        cmd.arg(path::to_os(path));
         // A piped diff (`git diff | riffnav`) leaves our stdin a spent pipe; the
         // editor would inherit it and complain that input isn't a terminal. The
         // TUI already talks to /dev/tty, so hand the editor the same.

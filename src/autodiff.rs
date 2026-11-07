@@ -14,15 +14,22 @@
 //! in explicitly (see [`untracked_diff`]) — otherwise a brand-new file would be
 //! invisible until staged. A diff piped in on stdin never reaches this module.
 
+use std::ffi::OsStr;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+
+use crate::diff::path;
 
 /// Pin the `a/`…`b/` diff path prefixes the parser strips, overriding whatever
 /// `diff.mnemonicPrefix` / `diff.noprefix` the user's git config sets. Without
 /// this, a machine with `diff.mnemonicPrefix = true` emits `i/`/`w/`/`c/`
 /// prefixes, leaving a stray prefix on each path so the `o` key opens nothing.
 const PREFIX_ARGS: [&str; 2] = ["--src-prefix=a/", "--dst-prefix=b/"];
+
+/// Have git quote every name that isn't ASCII, whatever `core.quotePath` says, as a
+/// name that isn't UTF-8 only reaches us intact in its quoted form.
+const QUOTE_ARGS: [&str; 2] = ["-c", "core.quotePath=on"];
 
 /// Which slice of the branch / working tree to render as a diff. The runtime
 /// toggle (`d`) cycles through these in [`DiffSource::CYCLE`] order, and the
@@ -180,10 +187,11 @@ pub enum Tree {
 }
 
 impl Tree {
-    /// How `git cat-file` names `path` in this tree.
+    /// How `git cat-file` names `path` in this tree. The index's stage is spelled
+    /// out, as a file named `1:x` would otherwise read as stage 1 of `x`.
     pub fn spec(&self, path: &str) -> String {
         match self {
-            Self::Index => format!(":{path}"),
+            Self::Index => format!(":0:{path}"),
             Self::Rev(rev) => format!("{rev}:{path}"),
         }
     }
@@ -290,8 +298,10 @@ impl GitDiff {
             View::Diff(source) => source.rev_args(""),
             View::Show => vec![],
         };
-        let mut argv: Vec<String> = ["--no-pager", "-c", "color.ui=never", self.sub()]
+        let mut argv: Vec<String> = ["--no-pager", "-c", "color.ui=never"]
             .into_iter()
+            .chain(QUOTE_ARGS)
+            .chain([self.sub()])
             .chain(PREFIX_ARGS)
             .map(str::to_string)
             .collect();
@@ -329,11 +339,11 @@ impl GitDiff {
     /// no diff rather than showing up as fully added).
     pub fn load_file(&self, path: &str) -> Result<String> {
         if self.includes_untracked() && is_untracked(path) {
-            return Ok(diff_against_devnull(path).unwrap_or_default());
+            return Ok(diff_against_devnull(&path::to_os(path)).unwrap_or_default());
         }
         let mut argv = self.argv()?;
         argv.push("--".to_string());
-        argv.push(path.to_string());
+        argv.push(literal_pathspec(path));
         match run_git(&argv) {
             Ok(text) => Ok(text),
             // An unborn branch makes `git diff HEAD -- path` fail; for the
@@ -432,10 +442,18 @@ fn load(source: DiffSource, base: Option<&str>) -> Result<String> {
     GitDiff::diff(source, base.map(str::to_string), vec![]).load()
 }
 
+/// The pathspec for exactly the file `path`, so that a name like `*.txt` or `:x`
+/// means itself.
+fn literal_pathspec(path: &str) -> String {
+    format!(":(literal){path}")
+}
+
 /// Whether `path` is an untracked, non-ignored file (so `git diff` omits it).
 fn is_untracked(path: &str) -> bool {
-    git_raw(&["ls-files", "--others", "--exclude-standard", "--", path])
-        .is_some_and(|s| !s.trim().is_empty())
+    let pathspec = path::to_os(&literal_pathspec(path));
+    let flags = ["ls-files", "--others", "--exclude-standard", "--"].map(OsStr::new);
+    git_raw(flags.iter().copied().chain([pathspec.as_os_str()]))
+        .is_some_and(|list| !list.trim_ascii().is_empty())
 }
 
 /// The view to show when the one asked for renders nothing: the narrowest one
@@ -516,7 +534,7 @@ fn git_ok(args: &[&str]) -> bool {
 /// verbatim — leading/trailing whitespace can be significant).
 fn run_git(args: &[String]) -> Result<String> {
     let out = Command::new("git")
-        .args(args)
+        .args(args.iter().map(|arg| path::to_os(arg)))
         .output()
         .with_context(|| format!("running `git {}`", args.join(" ")))?;
     if !out.status.success() {
@@ -533,13 +551,14 @@ fn run_git(args: &[String]) -> Result<String> {
 /// working-tree views show brand-new files that `git diff` omits by design.
 /// `.gitignore`d files are excluded (`--exclude-standard`).
 fn untracked_diff() -> String {
-    let Some(list) = git_raw(&["ls-files", "--others", "--exclude-standard", "-z"]) else {
+    let flags = ["ls-files", "--others", "--exclude-standard", "-z"].map(OsStr::new);
+    let Some(list) = git_raw(flags) else {
         return String::new();
     };
-    // `-z` is NUL-separated, so paths with spaces/newlines stay intact.
+    // `-z` is NUL-separated and unquoted, so paths with spaces/newlines stay intact.
     let mut out = String::new();
-    for path in list.split('\0').filter(|p| !p.is_empty()) {
-        if let Some(diff) = diff_against_devnull(path) {
+    for name in list.split(|byte| *byte == 0).filter(|p| !p.is_empty()) {
+        if let Some(diff) = diff_against_devnull(&path::to_os(&path::from_bytes(name))) {
             out.push_str(&diff);
         }
     }
@@ -550,11 +569,13 @@ fn untracked_diff() -> String {
 /// added. `--no-index` exits non-zero whenever the inputs differ (always the
 /// case here), so success is judged by whether it produced output, not by the
 /// exit status.
-fn diff_against_devnull(path: &str) -> Option<String> {
+fn diff_against_devnull(path: &OsStr) -> Option<String> {
     let out = Command::new("git")
+        .args(QUOTE_ARGS)
         .args(["diff", "--no-index"])
         .args(PREFIX_ARGS)
-        .args(["--", "/dev/null", path])
+        .args(["--", "/dev/null"])
+        .arg(path)
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -562,13 +583,11 @@ fn diff_against_devnull(path: &str) -> Option<String> {
 }
 
 /// Run `git` and return raw, untrimmed stdout on success (or `None` on failure).
-/// Used where output framing matters — e.g. NUL-separated lists — unlike [`git`],
+/// Used where the bytes matter — e.g. NUL-separated lists of names — unlike [`git`],
 /// which trims.
-fn git_raw(args: &[&str]) -> Option<String> {
+fn git_raw<'a>(args: impl IntoIterator<Item = &'a OsStr>) -> Option<Vec<u8>> {
     let out = Command::new("git").args(args).output().ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    out.status.success().then_some(out.stdout)
 }
 
 #[cfg(test)]
@@ -591,7 +610,14 @@ mod tests {
         // Every view pins `a/`…`b/` prefixes so the parser resolves paths
         // regardless of the user's `diff.mnemonicPrefix` config, and disables the
         // pager so `pager.diff = riffnav` can't recurse.
-        let head = ["--no-pager", "-c", "color.ui=never", "diff"];
+        let head = [
+            "--no-pager",
+            "-c",
+            "color.ui=never",
+            "-c",
+            "core.quotePath=on",
+            "diff",
+        ];
         let pre = ["--src-prefix=a/", "--dst-prefix=b/"];
         let expect = |tail: &[&str]| -> Vec<String> {
             head.iter()

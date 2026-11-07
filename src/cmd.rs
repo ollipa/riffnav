@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 use crate::cli::{AddArgs, Command, CommentCmd};
 use crate::comment::{Comment, CommentStore, Side};
+use crate::diff::path::shown;
 use crate::session::Session;
 use crate::state;
 
@@ -104,7 +105,7 @@ fn add(args: AddArgs) -> Result<()> {
 
     let id = store.add(build(&resolved, body, args.author, args.reply_to));
     store.save();
-    println!("#{id}  {}:{}", resolved.file, resolved.line);
+    println!("#{id}  {}:{}", shown(&resolved.file), resolved.line);
     Ok(())
 }
 
@@ -154,7 +155,7 @@ fn apply(stdin: bool) -> Result<()> {
 
     for (r, item) in resolved.iter().zip(batch.comments) {
         let id = store.add(build(r, item.body, item.author, item.reply_to));
-        println!("#{id}  {}:{}", r.file, r.line);
+        println!("#{id}  {}:{}", shown(&r.file), r.line);
     }
     store.save();
     Ok(())
@@ -167,7 +168,12 @@ fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> 
         .iter()
         // Selected by the file the note renders in, which for a reply is its
         // thread's — the same file the window would list it under.
-        .filter(|c| file.as_deref().is_none_or(|f| store.root_of(c).file == f))
+        .filter(|c| {
+            file.as_deref().is_none_or(|f| {
+                let root = &store.root_of(c).file;
+                root == f || shown(root) == f
+            })
+        })
         .filter(|c| author.as_deref().is_none_or(|a| c.author == a))
         .collect();
 
@@ -191,13 +197,13 @@ fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> 
             if store.get(p).is_none() {
                 reply.push_str(" (gone — renders as its own thread)");
             } else if (&root.file, root.side, root.line) != (&c.file, c.side, c.line) {
-                reply.push_str(&format!(" (stored at {}:{})", c.file, c.line));
+                reply.push_str(&format!(" (stored at {}:{})", shown(&c.file), c.line));
             }
         }
         println!(
             "#{}  {}:{} ({}){reply}  — {}",
             c.id,
-            root.file,
+            shown(&root.file),
             root.line,
             root.side.as_str(),
             c.author
@@ -243,7 +249,7 @@ fn context(json: bool) -> Result<()> {
         println!(
             "  {} {}  +{} -{}   new: {}   old: {}",
             f.status,
-            f.path,
+            shown(&f.path),
             f.additions,
             f.deletions,
             f.ranges(Side::New),
@@ -326,7 +332,7 @@ fn anchor(
             "{where_}: a reply carries no anchor of its own — it inherits #{id}'s \
              ({}:{} on the {} side)\n  \
              drop the file and line: a reply always sits with the note it answers",
-            parent.file,
+            shown(&parent.file),
             parent.line,
             parent.side.as_str(),
         );
@@ -353,7 +359,8 @@ fn resolve(
 ) -> Result<Resolved> {
     let Some(entry) = session.file(file) else {
         bail!(
-            "{where_}: no file `{file}` in this diff\n{}",
+            "{where_}: no file `{}` in this diff\n{}",
+            shown(file),
             file_hint(session)
         );
     };
@@ -367,7 +374,7 @@ fn resolve(
         bail!(
             "{where_}: line {line} is not in {}'s diff on the {} side\n  \
              commentable {} lines: {}\n{}",
-            entry.path,
+            shown(&entry.path),
             side.as_str(),
             side.as_str(),
             entry.ranges(side),
@@ -448,19 +455,19 @@ fn read_body(arg: &str) -> Result<String> {
 
 /// The first few paths in the diff, to orient an agent that guessed wrong.
 fn file_hint(session: &Session) -> String {
-    let shown: Vec<&str> = session
+    let names: Vec<_> = session
         .files
         .iter()
         .take(5)
-        .map(|f| f.path.as_str())
+        .map(|f| shown(&f.path))
         .collect();
-    let more = session.files.len().saturating_sub(shown.len());
+    let more = session.files.len().saturating_sub(names.len());
     let suffix = if more > 0 {
         format!("\n  … and {more} more — see `riffnav comment context`")
     } else {
         String::new()
     };
-    format!("  files in this diff: {}{suffix}", shown.join(", "))
+    format!("  files in this diff: {}{suffix}", names.join(", "))
 }
 
 #[cfg(test)]

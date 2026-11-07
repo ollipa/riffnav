@@ -13,7 +13,7 @@ use super::moves::FileMoves;
 use super::words::{Changes, change_runs};
 use crate::comment::LineMap;
 use crate::comment::anchor::{LineNumbers, Source};
-use crate::diff::{self, FileDiff, FileStatus, Row, RowKind};
+use crate::diff::{self, FileDiff, FileStatus, Row, RowKind, path};
 use crate::theme::{DiffPalette, DiffTheme};
 
 /// Width of a line-number field.
@@ -443,12 +443,12 @@ fn wrap(spans: Vec<Span<'static>>, cols: usize, palette: &DiffPalette) -> Vec<Wr
 /// The file's name, how it changed, and anything else git said about it, over a
 /// rule. A file with no hunks shows only this, so it has to say enough on its own.
 fn file_header(file: &FileDiff, width: usize, palette: &DiffPalette) -> Vec<Line<'static>> {
-    let path = file.path();
+    let path = path::shown(file.path());
     let mut title = match (file.status, &file.old_path) {
         (FileStatus::Added, _) => format!("added: {path}"),
         (FileStatus::Deleted, _) => format!("removed: {path}"),
-        (FileStatus::Renamed, Some(old)) => format!("renamed: {old} ⟶ {path}"),
-        (FileStatus::Copied, Some(old)) => format!("copied: {old} ⟶ {path}"),
+        (FileStatus::Renamed, Some(old)) => format!("renamed: {} ⟶ {path}", path::shown(old)),
+        (FileStatus::Copied, Some(old)) => format!("copied: {} ⟶ {path}", path::shown(old)),
         _ => path.to_string(),
     };
     let notes = diff::notes(file);
