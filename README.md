@@ -316,12 +316,19 @@ nothing to show.
 
 ## herdr integration
 
-When riffnav runs inside [herdr](https://herdr.dev) (detected via `HERDR_ENV=1`),
-the `z` key toggles **zoom** on riffnav's pane — maximizing it to fill the window,
-or restoring it. riffnav talks to herdr's [socket API][herdr-socket] over its Unix
-control socket (found via `HERDR_SOCKET_PATH` / `HERDR_SESSION`, or the default
-session socket). Outside herdr the key does nothing and isn't shown in the footer
-or help.
+When riffnav runs inside [herdr](https://herdr.dev), the `z` key toggles **zoom**
+on riffnav's pane — maximizing it to fill the window, or restoring it. Closing
+riffnav undoes a zoom it made, but leaves one you made yourself. Elsewhere the key
+does nothing and isn't shown in the footer or help.
+
+- **The herdr terminal multiplexer** is detected via `HERDR_ENV=1`. riffnav talks
+  to its [socket API][herdr-socket] over its Unix control socket (found via
+  `HERDR_SOCKET_PATH` / `HERDR_SESSION`, or the default session socket).
+- **The Herdr desktop app** is detected via `HC_TERMINAL_ID`, when `herdr-app` is
+  installed and a running window shows riffnav's terminal. riffnav checks this at
+  startup, so a terminal that was headless then needs riffnav restarted. It finds
+  its pane with `herdr-app ls`, toggles with `herdr-app do pane.zoom`, and reads
+  the result from the app's `view.json`.
 
 ## How it works
 

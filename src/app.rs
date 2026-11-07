@@ -965,7 +965,7 @@ impl App {
     /// Ask herdr to toggle zoom on our pane, reporting the outcome in the status
     /// line. Only reachable when running inside herdr.
     fn toggle_herdr_zoom(&mut self) {
-        let Some(herdr) = &self.herdr else { return };
+        let Some(herdr) = &mut self.herdr else { return };
         let msg = match herdr.toggle_zoom() {
             Ok(Some(zoomed)) => {
                 self.zoomed = zoomed;
@@ -999,7 +999,7 @@ impl App {
             return;
         }
         if let Some(herdr) = &self.herdr {
-            let _ = herdr.toggle_zoom();
+            let _ = herdr.restore_zoom();
         }
         self.zoomed = false;
     }
