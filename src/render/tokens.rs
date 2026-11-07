@@ -180,9 +180,15 @@ mod tests {
         );
         let file = parse(&raw).remove(0);
         let rows = rows(&file);
-        let tokens = highlight(&file, &rows, DiffTheme::GitHubDark, &[])
-            .tokens
-            .remove(1);
+        let tokens = highlight(
+            &file,
+            &rows,
+            DiffTheme::GitHubDark,
+            &[],
+            &Default::default(),
+        )
+        .tokens
+        .remove(1);
         let text =
             |ranges: Vec<Range<usize>>| ranges.into_iter().map(|r| line[r].to_string()).collect();
         (text(tokens.whole), text(tokens.literal))

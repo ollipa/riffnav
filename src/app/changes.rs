@@ -34,18 +34,21 @@ impl App {
     /// The `J` and `K` keys. They act on the diff from either pane.
     pub(super) fn jump_change(&mut self, forward: bool) {
         self.focus = Focus::Diff;
+        self.head(forward, true);
         self.change_jumps.queued.push_back(forward);
         // A jump on its way somewhere goes first, as it was asked for first.
-        if self.comment_landing.is_none() && self.move_landing.is_none() && !self.landing_on_match()
+        if self.comment_landing.is_none()
+            && self.move_landing.is_none()
+            && !self.heading_for_match()
         {
             self.run_change_jumps();
         }
     }
 
     /// Act on as many waiting presses as the renders on hand allow. The event loop
-    /// comes back here once it has rendered whatever they're waiting for.
+    /// comes back here once whatever they're waiting for has landed.
     pub(super) fn run_change_jumps(&mut self) {
-        while self.change_render_ready() {
+        while self.render_ready() {
             if let Some(landing) = self.change_jumps.landing.take() {
                 self.land_on_change(landing);
             } else if let Some(forward) = self.change_jumps.queued.pop_front() {
@@ -93,7 +96,7 @@ impl App {
 
     /// Whether the cursor's index is good for the render on show. A folder has no
     /// render to wait for.
-    fn change_render_ready(&self) -> bool {
+    pub(super) fn render_ready(&self) -> bool {
         self.selected_file().is_none_or(|file| {
             self.render_of(file).is_some() && self.cursor_token == Some(self.render_token(file))
         })
@@ -200,10 +203,13 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    use std::time::Duration;
+
     use super::*;
     use crate::comment::{Comment, CommentStore, Side};
     use crate::config::Config;
     use crate::diff::parse;
+    use crate::render::test_support::Gate;
 
     const WIDTH: u16 = 80;
     const HEIGHT: u16 = 16;
@@ -1003,5 +1009,371 @@ mod tests {
         press(&mut helping, Char('J'));
         assert!(helping.show_help);
         assert_eq!(at(&helping), before);
+    }
+
+    /// Renders that are late: a frame goes ahead without them.
+    fn late(app: &mut App) -> Gate {
+        let gate = Gate::default();
+        app.cache.wait(Duration::ZERO);
+        app.cache.hooks().start = Some(gate.clone());
+        gate
+    }
+
+    /// Passes of the event loop until the renders have all landed.
+    fn settle(app: &mut App) {
+        for _ in 0..200 {
+            frame(app);
+            app.cache.finish();
+            frame(app);
+            if !app.change_jumps_waiting() && app.held_keys.is_empty() {
+                return;
+            }
+        }
+        panic!("never settled");
+    }
+
+    /// Every file has its render land after a frame has gone by without it, so each
+    /// hop of the burst really does have to wait.
+    #[test]
+    fn a_burst_survives_every_render_being_late() {
+        let files: String = (0..10)
+            .map(|at| hunk(&format!("f{at}"), " x\n-y\n z\n-w\n q\n-r\n"))
+            .collect();
+        let mut late_app = app(&files);
+        let mut prompt = app(&files);
+        late(&mut late_app).open();
+        for _ in 0..25 {
+            late_app.press_for_test(Char('J'), false);
+            press(&mut prompt, Char('J'));
+        }
+        settle(&mut late_app);
+        assert_eq!(file_name(&late_app), file_name(&prompt));
+        assert_eq!(at(&late_app), at(&prompt));
+    }
+
+    #[test]
+    fn a_press_held_behind_a_jump_keeps_its_place_in_line() {
+        let raw = format!(
+            "{}{}",
+            hunk("a", " x\n-y\n"),
+            hunk("b", " p\n q\n-r\n s\n t\n-u\n")
+        );
+        let mut app = app(&raw);
+        press(&mut app, Char('J'));
+        late(&mut app).open();
+        for key in ['J', 'j', 'J', 'k'] {
+            app.press_for_test(Char(key), false);
+        }
+        settle(&mut app);
+        assert_eq!(file_name(&app).as_deref(), Some("b"));
+        // Into b's first change, down a line, on to its second, and back a line.
+        assert_eq!(at(&app), (Some(5), Some(4)));
+    }
+
+    #[test]
+    fn a_key_that_changes_file_leaves_what_was_held_behind() {
+        let raw = format!(
+            "{}{}{}",
+            hunk("a", " x\n-y\n"),
+            hunk("b", &edits(2, 3)),
+            hunk("c", " p\n-q\n")
+        );
+        let mut app = app(&raw);
+        let gate = late(&mut app);
+        press(&mut app, Char('J'));
+        press(&mut app, Char('J'));
+        assert_eq!(file_name(&app).as_deref(), Some("b"));
+        assert!(app.change_jumps_waiting());
+        press(&mut app, Char('j'));
+        assert_eq!(app.held_keys.len(), 1);
+
+        press(&mut app, Char('n'));
+        assert!(app.held_keys.is_empty());
+        gate.open();
+        settle(&mut app);
+        assert_eq!(file_name(&app).as_deref(), Some("c"));
+        assert_eq!(
+            at(&app),
+            (Some(1), Some(1)),
+            "where a first look puts the cursor"
+        );
+    }
+
+    #[test]
+    fn quitting_does_not_wait_for_a_render() {
+        let mut app = app(&hunk("f", &edits(2, 3)));
+        late(&mut app);
+        app.cache.clear();
+        frame(&mut app);
+        assert!(app.current_render().is_none());
+        press(&mut app, Char('j'));
+        press(&mut app, Char('q'));
+        assert!(app.quit);
+    }
+
+    /// Nothing here has a render to read, and all of it has to survive that.
+    #[test]
+    fn every_key_copes_with_a_file_that_has_no_render_yet() {
+        let raw = format!("{}{}", hunk("a", &edits(3, 3)), hunk("b", &edits(3, 3)));
+        let keys = [
+            Char('j'),
+            Char('k'),
+            Char('g'),
+            Char('G'),
+            Char(' '),
+            Char('b'),
+            Char('c'),
+            Char('m'),
+            Char('x'),
+            Char(']'),
+            Char('['),
+            Char('J'),
+            Char('K'),
+            Char('y'),
+            Char('v'),
+            Char('i'),
+            Char('e'),
+            Char('s'),
+            Char('T'),
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Tab,
+            KeyCode::Left,
+            KeyCode::Right,
+        ];
+        for key in keys {
+            let mut app = app(&raw);
+            let gate = late(&mut app);
+            app.cache.clear();
+            frame(&mut app);
+            assert!(app.current_render().is_none());
+            press(&mut app, key);
+            press(&mut app, key);
+            frame_at(&mut app, 60, HEIGHT);
+            gate.open();
+            settle(&mut app);
+            if app.composer.is_some() {
+                press(&mut app, KeyCode::Esc);
+                press(&mut app, KeyCode::Esc);
+            }
+            if let Some(render) = app.current_render() {
+                assert!(app.diff_cursor < render.lines().max(1), "{key:?}");
+            }
+        }
+    }
+
+    /// The cursor's token used to be noted before the render was there, which would
+    /// leave the first look at a file with its cursor on the header.
+    #[test]
+    fn a_late_render_still_starts_the_cursor_on_the_first_line_of_code() {
+        let raw = format!("{}{}", hunk("a", " x\n-y\n"), hunk("b", " p\n q\n"));
+        let mut app = app(&raw);
+        let gate = late(&mut app);
+        press(&mut app, Char('n'));
+        frame(&mut app);
+        assert!(app.current_render().is_none());
+        gate.open();
+        settle(&mut app);
+        let first = app.current_render().unwrap().line_map.first_code_row();
+        assert_eq!(Some(app.diff_cursor), first);
+    }
+
+    #[test]
+    fn a_late_render_after_s_puts_the_cursor_back_on_its_line() {
+        let mut app = app(&hunk("f", &edits(6, 2)));
+        for _ in 0..4 {
+            press(&mut app, Char('J'));
+        }
+        let line = at(&app);
+        let gate = late(&mut app);
+        press(&mut app, Char('s'));
+        assert!(app.current_render().is_none());
+        press(&mut app, Char('j'));
+        gate.open();
+        settle(&mut app);
+        assert_eq!(at(&app).0, line.0.map(|old| old + 1));
+    }
+
+    #[test]
+    fn a_comment_jump_waits_for_its_file_and_keeps_its_aim() {
+        let raw = format!("{}{}", hunk("a", " x\n y\n"), hunk("b", " p\n q\n r\n s\n"));
+        let mut store = CommentStore::disabled();
+        store.add(note("b", 3));
+        let mut app = App::new(parse(&raw), false, &Config::default());
+        app.install_comments_for_test(store);
+        app.focus = Focus::Diff;
+        frame(&mut app);
+        let gate = late(&mut app);
+        press(&mut app, Char(']'));
+        assert_eq!(file_name(&app).as_deref(), Some("b"));
+        frame(&mut app);
+        assert!(app.comment_landing.is_some(), "still on its way");
+        gate.open();
+        settle(&mut app);
+        assert!(app.comment_landing.is_none());
+        let block = app.current_render().unwrap().comment_rows[0].start;
+        assert_eq!(app.diff_cursor, block);
+    }
+
+    #[test]
+    fn a_jump_a_later_key_overtook_does_not_land_on_the_wrong_file() {
+        let raw = format!(
+            "{}{}{}",
+            hunk("a", " x\n y\n"),
+            hunk("b", " p\n q\n r\n s\n"),
+            hunk("c", " p\n q\n r\n s\n"),
+        );
+        let mut store = CommentStore::disabled();
+        store.add(note("b", 3));
+        store.add(note("c", 2));
+        let mut app = App::new(parse(&raw), false, &Config::default());
+        app.install_comments_for_test(store);
+        app.focus = Focus::Diff;
+        frame(&mut app);
+        let gate = late(&mut app);
+        press(&mut app, Char(']'));
+        press(&mut app, Char('n'));
+        gate.open();
+        settle(&mut app);
+        assert_eq!(file_name(&app).as_deref(), Some("c"));
+        assert!(app.comment_landing.is_none());
+        let first = app.current_render().unwrap().line_map.first_code_row();
+        assert_eq!(Some(app.diff_cursor), first, "c has its own start");
+    }
+
+    #[test]
+    fn a_move_jump_waits_for_its_file() {
+        let body =
+            "fn moved_away() {\n    first_call(1);\n    second_call(2);\n    third_call(3);\n}\n";
+        let minus: String = body.lines().map(|l| format!("-{l}\n")).collect();
+        let plus: String = body.lines().map(|l| format!("+{l}\n")).collect();
+        let raw = format!("{}{}", hunk("a", &minus), hunk("b", &plus));
+        let mut app = app(&raw);
+        let gate = late(&mut app);
+        press(&mut app, Char('m'));
+        assert_eq!(file_name(&app).as_deref(), Some("b"));
+        frame(&mut app);
+        assert!(app.move_landing.is_some(), "waiting for b");
+        press(&mut app, Char('m')); // Would read a render that isn't there.
+        assert_eq!(app.held_keys.len(), 1);
+        gate.open();
+        settle(&mut app);
+        assert_eq!(file_name(&app).as_deref(), Some("a"), "there and back");
+    }
+
+    #[test]
+    fn opening_the_search_drops_held_keys_rather_than_typing_them() {
+        let mut app = app(&hunk("f", &edits(3, 3)));
+        let gate = late(&mut app);
+        app.cache.clear();
+        frame(&mut app);
+        press(&mut app, Char('j'));
+        press(&mut app, Char('/'));
+        press(&mut app, Char('z'));
+        gate.open();
+        settle(&mut app);
+        assert_eq!(app.search_prompt(), Some("z"));
+    }
+
+    #[test]
+    fn a_change_of_focus_drops_keys_meant_for_the_other_pane() {
+        let mut app = app(&hunk("f", &edits(3, 3)));
+        let gate = late(&mut app);
+        app.cache.clear();
+        frame(&mut app);
+        press(&mut app, Char('j'));
+        press(&mut app, KeyCode::Tab);
+        assert!(app.held_keys.is_empty());
+        gate.open();
+        settle(&mut app);
+        assert_eq!(app.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn a_comment_key_held_for_a_render_opens_the_composer_for_what_follows() {
+        let mut app = app(&hunk("f", &edits(3, 3)));
+        let gate = late(&mut app);
+        app.cache.clear();
+        frame(&mut app);
+        press(&mut app, Char('c'));
+        press(&mut app, Char('j')); // Held behind it, and so text.
+        gate.open();
+        settle(&mut app);
+        assert_eq!(app.composer.as_ref().unwrap().body(), "j");
+    }
+
+    #[test]
+    fn the_wheel_over_a_file_with_no_render_goes_nowhere() {
+        let mut app = app(&hunk("f", &edits(9, 3)));
+        late(&mut app);
+        app.cache.clear();
+        frame(&mut app);
+        app.scroll_at(ratatui::layout::Position::new(70, 5), 1);
+        assert_eq!(app.diff_scroll, 0);
+    }
+
+    /// On a reload, `+` holds the cursor's row on screen until the render exists.
+    #[test]
+    fn a_held_screen_row_waits_for_a_late_render() {
+        let mut app = app(&hunk("f", &edits(8, 3)));
+        for _ in 0..5 {
+            press(&mut app, Char('J'));
+        }
+        let row = cursor_row(&app);
+        app.hold_cursor_on_screen();
+        let gate = late(&mut app);
+        app.reload_in_place(parse(&hunk("f", &edits(8, 4))));
+        frame(&mut app);
+        assert!(app.cursor_screen_row.is_some());
+        gate.open();
+        settle(&mut app);
+        assert!(app.cursor_screen_row.is_none());
+        assert_eq!(cursor_row(&app), row);
+    }
+
+    #[test]
+    fn the_next_file_is_prefetched_in_the_direction_of_travel() {
+        let raw = format!(
+            "{}{}{}{}",
+            hunk("a", " x\n-y\n"),
+            hunk("b", " x\n y\n"),
+            hunk("c", " x\n-y\n"),
+            hunk("d", " x\n-y\n"),
+        );
+        let mut app = app(&raw);
+        app.cache.prefetch_for_test();
+        app.prefetch_asked = None;
+        let prefetched = |app: &mut App, file: usize| {
+            app.cache.finish();
+            app.render_of(file).is_some()
+        };
+        frame(&mut app);
+        assert!(prefetched(&mut app, 1), "next in tree order");
+
+        press(&mut app, Char('n'));
+        press(&mut app, Char('n'));
+        press(&mut app, Char('p'));
+        assert_eq!(file_name(&app).as_deref(), Some("b"));
+        assert!(prefetched(&mut app, 0), "going backwards");
+    }
+
+    #[test]
+    fn a_change_jump_prefetches_the_next_file_with_a_change() {
+        let raw = format!(
+            "{}{}{}",
+            hunk("a", " x\n-y\n z\n-w\n"),
+            hunk("b", " x\n y\n"),
+            hunk("c", " x\n-y\n"),
+        );
+        let mut app = app(&raw);
+        app.cache.prefetch_for_test();
+        press(&mut app, Char('J'));
+        app.cache.finish();
+        frame(&mut app);
+        app.cache.finish();
+        assert!(app.render_of(2).is_some(), "c, as b has nothing to stop at");
+        assert!(app.render_of(1).is_none());
     }
 }

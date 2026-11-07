@@ -11,6 +11,7 @@
 use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 
 use ratatui::style::{Color, Modifier, Style};
 use two_face::re_exports::syntect::highlighting::{
@@ -23,12 +24,12 @@ use super::tokens::{self, Tokens};
 use crate::diff::{FileDiff, Row, RowKind};
 use crate::theme::DiffTheme;
 
-/// Lines longer than this skip highlighting. Rendering blocks the UI, and a
-/// minified bundle is one enormous line that would stall it for no useful color.
+/// Lines longer than this skip highlighting. A minified bundle is one enormous
+/// line that would hold the render up for no useful color.
 pub const MAX_LINE_BYTES: usize = 2_000;
 /// Diffs bigger than this skip highlighting altogether, for the same reason: a
-/// generated file or lockfile would otherwise freeze the UI on selection. Word
-/// emphasis still applies, and it's what matters most on a file that big.
+/// generated file or lockfile would otherwise take minutes to color. Word emphasis
+/// still applies, and it's what matters most on a file that big.
 pub const MAX_FILE_BYTES: usize = 500_000;
 
 /// A stretch of a row's text in one style, up to byte offset `end`.
@@ -41,6 +42,11 @@ pub struct Run {
 struct Assets {
     syntaxes: SyntaxSet,
     themes: EmbeddedLazyThemeSet,
+}
+
+/// Start decoding the bundled syntaxes, so it's done by the time they're wanted.
+pub fn warm_up() {
+    thread::spawn(assets);
 }
 
 /// Decoding the bundled syntaxes takes real time, so it happens on first use and
@@ -123,8 +129,15 @@ impl<'a> Side<'a> {
 }
 
 /// Parse `rows`, each side of the diff on its own. `starts` lines up with the
-/// file's hunks, and a hunk past the end of it starts afresh.
-pub fn highlight(file: &FileDiff, rows: &[Row], theme: DiffTheme, starts: &[HunkStart]) -> Syntax {
+/// file's hunks, and a hunk past the end of it starts afresh. Stops short once
+/// `cancelled` is set.
+pub fn highlight(
+    file: &FileDiff,
+    rows: &[Row],
+    theme: DiffTheme,
+    starts: &[HunkStart],
+    cancelled: &AtomicBool,
+) -> Syntax {
     let mut out = Syntax {
         runs: vec![Vec::new(); rows.len()],
         tokens: vec![Tokens::default(); rows.len()],
@@ -140,6 +153,9 @@ pub fn highlight(file: &FileDiff, rows: &[Row], theme: DiffTheme, starts: &[Hunk
     let mut new = Side::new(syntax, None, &highlighter);
     let mut hunks = starts.iter();
     for (at, row) in rows.iter().enumerate() {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
         if let RowKind::HunkHeader { .. } = row.kind {
             let start = hunks.next();
             old = Side::new(syntax, start.and_then(|s| s.old.as_ref()), &highlighter);
@@ -276,7 +292,14 @@ mod tests {
     fn highlighted(path: &str, hunk: &str) -> (Vec<Row>, Vec<Vec<Run>>) {
         let file = file(path, hunk);
         let rows = rows(&file);
-        let runs = highlight(&file, &rows, DiffTheme::GitHubDark, &[]).runs;
+        let runs = highlight(
+            &file,
+            &rows,
+            DiffTheme::GitHubDark,
+            &[],
+            &AtomicBool::new(false),
+        )
+        .runs;
         (rows, runs)
     }
 

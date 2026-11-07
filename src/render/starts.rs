@@ -9,10 +9,9 @@
 //! diff doesn't show.
 //!
 //! Parsing is the expensive part, at roughly 20 lines of Rust a millisecond, so a
-//! 3,500-line file costs 200ms and a file at the size limit most of a second.
-//! That's far too long for the UI thread, which only ever waits [`WAIT`]: the
-//! work happens on a thread of its own, and a file that takes longer is drawn with
-//! its hunks starting afresh until the answer comes in.
+//! 3,500-line file costs 200ms and a file at the size limit most of a second. It
+//! happens as the first step of rendering the file, off the UI thread, so the
+//! render that comes out of it is the right one and there's no second to make.
 //!
 //! The answer is kept by the hash of the diff text, which names the blob and every
 //! hunk, so resizing or changing theme costs nothing. A file the diff can't be
@@ -20,20 +19,21 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use twox_hash::XxHash3_128;
 
 use super::highlight::{self, HunkStart, MAX_FILE_BYTES};
 use crate::diff::{self, FileDiff, Hunk, Row, RowKind};
 
-/// How long a first render waits for its hunk starts. Long enough that an ordinary
-/// file is drawn once and correctly, and short enough not to be felt.
-const WAIT: Duration = Duration::from_millis(25);
+/// How often a running git is checked on, to stop it if the job was cancelled.
+const GIT_POLL: Duration = Duration::from_millis(2);
 /// Files to remember the hunk starts of. Refreshing adds to these without
 /// removing any, so they're dropped wholesale at this many.
 const MAX_KNOWN: usize = 512;
@@ -41,23 +41,10 @@ const MAX_KNOWN: usize = 512;
 /// One file's hunk starts. Empty when there's nothing better than starting afresh.
 pub type Starts = Arc<Vec<HunkStart>>;
 
-/// A file being worked on.
-struct Job {
-    source: u128,
-    cancelled: Arc<AtomicBool>,
-    /// Closes without an answer if the job was cancelled or panicked.
-    result: Receiver<Starts>,
-}
-
-/// Works out hunk starts in the background, one file at a time, and remembers
-/// them. Only the file on screen matters, so asking about another abandons the
-/// one in progress.
+/// Works out hunk starts and remembers them. Shared by the render threads.
 pub struct StartReader {
     repo: PathBuf,
-    known: HashMap<u128, Starts>,
-    job: Option<Job>,
-    /// What to work on when the cancelled job has stopped.
-    next: Option<(u128, FileDiff)>,
+    known: Mutex<HashMap<u128, Starts>>,
 }
 
 impl StartReader {
@@ -65,97 +52,33 @@ impl StartReader {
     pub fn new(repo: impl Into<PathBuf>) -> Self {
         Self {
             repo: repo.into(),
-            known: HashMap::new(),
-            job: None,
-            next: None,
+            known: Mutex::default(),
         }
     }
 
-    /// Whether a file is being worked on.
-    pub fn busy(&self) -> bool {
-        self.job.is_some()
+    fn known(&self) -> MutexGuard<'_, HashMap<u128, Starts>> {
+        self.known.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The starts of `file`, known as `source`, or `None` while they're being
-    /// worked out, which this sets going if nothing else has.
-    pub fn ask(&mut self, source: u128, file: &FileDiff) -> Option<Starts> {
-        if let Some(starts) = self.known.get(&source) {
+    /// The starts of `file`, or `None` if `cancelled` was set first. A file that
+    /// panics gets none, as trying again would only repeat it, and renders without.
+    pub fn read(&self, file: &FileDiff, cancelled: &AtomicBool) -> Option<Starts> {
+        let source = XxHash3_128::oneshot(file.raw.as_bytes());
+        if let Some(starts) = self.known().get(&source) {
             return Some(starts.clone());
         }
-        match &self.job {
-            None => self.start(source, file.clone()),
-            Some(job) if job.source == source && !job.cancelled.load(Ordering::Relaxed) => {}
-            Some(job) => {
-                job.cancelled.store(true, Ordering::Relaxed);
-                if self.next.as_ref().is_none_or(|(next, _)| *next != source) {
-                    self.next = Some((source, file.clone()));
-                }
-            }
-        }
-        None
-    }
-
-    /// As [`Self::ask`], but give the answer up to [`WAIT`] to arrive.
-    pub fn wait_for(&mut self, source: u128, file: &FileDiff) -> Option<Starts> {
-        let deadline = Instant::now() + WAIT;
-        loop {
-            let starts = self.ask(source, file);
-            let Some(job) = self.job.as_ref().filter(|_| starts.is_none()) else {
-                return starts;
-            };
-            let left = deadline.saturating_duration_since(Instant::now());
-            match job.result.recv_timeout(left) {
-                Ok(starts) => self.finish(Some(starts)),
-                Err(RecvTimeoutError::Disconnected) => self.finish(None),
-                Err(RecvTimeoutError::Timeout) => return None,
-            }
-        }
-    }
-
-    /// Collect the running job's answer if it has one.
-    pub fn drain(&mut self) {
-        if let Some(job) = &self.job {
-            match job.result.try_recv() {
-                Ok(starts) => self.finish(Some(starts)),
-                Err(TryRecvError::Disconnected) => self.finish(None),
-                Err(TryRecvError::Empty) => {}
-            }
-        }
-    }
-
-    fn start(&mut self, source: u128, file: FileDiff) {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let (sender, result) = mpsc::channel();
-        let (repo, flag) = (self.repo.clone(), cancelled.clone());
-        thread::spawn(move || {
-            if let Some(starts) = read(&file, &repo, &flag) {
-                let _ = sender.send(Arc::new(starts));
-            }
-        });
-        self.job = Some(Job {
-            source,
-            cancelled,
-            result,
-        });
-    }
-
-    /// Close the running job with its answer, and start what's waiting.
-    fn finish(&mut self, starts: Option<Starts>) {
-        let Some(job) = self.job.take() else {
-            return;
+        let read = AssertUnwindSafe(|| read(file, &self.repo, cancelled));
+        let starts = match panic::catch_unwind(read) {
+            Ok(None) => return None,
+            Ok(Some(starts)) => Arc::new(starts),
+            Err(_) => Starts::default(),
         };
-        // No answer and not cancelled means it panicked, which trying again
-        // would only repeat.
-        let dead = !job.cancelled.load(Ordering::Relaxed);
-        if let Some(starts) = starts.or_else(|| dead.then(Starts::default)) {
-            if self.known.len() >= MAX_KNOWN {
-                self.known.clear();
-            }
-            self.known.insert(job.source, starts);
+        let mut known = self.known();
+        if known.len() >= MAX_KNOWN {
+            known.clear();
         }
-        if let Some((source, file)) = self.next.take() {
-            self.start(source, file);
-        }
+        known.insert(source, starts.clone());
+        Some(starts)
     }
 }
 
@@ -172,6 +95,8 @@ fn lines_above(start: u32, len: u32) -> usize {
 
 /// Work out `file`'s hunk starts, running git in `repo`. `None` if `cancelled`.
 fn read(file: &FileDiff, repo: &Path, cancelled: &AtomicBool) -> Option<Vec<HunkStart>> {
+    #[cfg(test)]
+    assert_ne!(file.path(), tests::PANIC_PATH, "injected");
     let rows = diff::rows(file);
     let hunks = diff::hunks(&file.raw);
     let stops: Vec<usize> = hunks
@@ -186,8 +111,8 @@ fn read(file: &FileDiff, repo: &Path, cancelled: &AtomicBool) -> Option<Vec<Hunk
     // is, has nothing above it to read.
     let needed = stops.iter().any(|&stop| stop > 0);
     let blob = old_blob(&file.raw).filter(|_| needed);
-    let Some(text) = blob.and_then(|id| read_blob(repo, id)) else {
-        return Some(Vec::new());
+    let Some(text) = blob.and_then(|id| read_blob(repo, id, cancelled)) else {
+        return (!cancelled.load(Ordering::Relaxed)).then(Vec::new);
     };
     let old: Vec<&str> = text.lines().collect();
     if !shows(&old, &stops, &rows) {
@@ -278,8 +203,9 @@ fn old_blob(raw: &str) -> Option<&str> {
     (hex && id.bytes().any(|b| b != b'0')).then_some(id)
 }
 
-/// A blob's text, if git has it and it isn't over the size limit.
-fn read_blob(repo: &Path, id: &str) -> Option<String> {
+/// A blob's text, if git has it and it isn't over the size limit. A cancelled job
+/// doesn't wait for git, and neither does quitting, so nothing's left running.
+fn read_blob(repo: &Path, id: &str, cancelled: &AtomicBool) -> Option<String> {
     let mut git = Command::new("git")
         .args(["cat-file", "--batch"])
         .current_dir(repo)
@@ -290,16 +216,33 @@ fn read_blob(repo: &Path, id: &str) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let text = blob_text(&mut git, id);
+    let (stdin, stdout) = (git.stdin.take(), git.stdout.take());
+    let text = thread::scope(|scope| {
+        let reading = scope.spawn(|| blob_text(stdin?, stdout?, id));
+        watch_git(&mut git, cancelled, || reading.is_finished());
+        reading.join().ok().flatten()
+    });
     // Stops git writing out a blob that turned out to be too big.
     let _ = git.kill();
     let _ = git.wait();
     text
 }
 
-fn blob_text(git: &mut std::process::Child, id: &str) -> Option<String> {
-    writeln!(git.stdin.take()?, "{id}").ok()?;
-    let mut out = BufReader::new(git.stdout.take()?);
+/// Wait for `done`, stopping `git` if `cancelled` gets set first.
+fn watch_git(git: &mut Child, cancelled: &AtomicBool, done: impl Fn() -> bool) {
+    while !done() {
+        if cancelled.load(Ordering::Relaxed) {
+            let _ = git.kill();
+            return;
+        }
+        thread::sleep(GIT_POLL);
+    }
+}
+
+fn blob_text(mut stdin: ChildStdin, stdout: ChildStdout, id: &str) -> Option<String> {
+    writeln!(stdin, "{id}").ok()?;
+    drop(stdin);
+    let mut out = BufReader::new(stdout);
     let mut header = String::new();
     out.read_line(&mut header).ok()?;
     // `<id> blob <size>`, or `<id> missing` or `<id> ambiguous`.
@@ -316,7 +259,7 @@ fn blob_text(git: &mut std::process::Child, id: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::fs;
     use std::process::Output;
     use std::sync::atomic::AtomicUsize;
@@ -325,6 +268,9 @@ mod tests {
     use crate::diff::parse;
     use crate::render::highlight::{Run, highlight};
     use crate::theme::DiffTheme;
+
+    /// A file whose read panics, to show what that does.
+    pub const PANIC_PATH: &str = "panics-reading-starts.rs";
 
     /// A throwaway repository.
     struct Repo(PathBuf);
@@ -404,7 +350,14 @@ mod tests {
     /// `file` highlighted from `starts`, as `(text, runs)` for each code row.
     fn colored(file: &FileDiff, starts: &[HunkStart]) -> HashMap<String, Vec<Run>> {
         let rows = diff::rows(file);
-        let runs = highlight(file, &rows, DiffTheme::GitHubDark, starts).runs;
+        let runs = highlight(
+            file,
+            &rows,
+            DiffTheme::GitHubDark,
+            starts,
+            &AtomicBool::new(false),
+        )
+        .runs;
         rows.into_iter()
             .zip(runs)
             .filter(|(row, _)| !is_header(row))
@@ -615,17 +568,12 @@ mod tests {
         repo.commit("a.rs", &text);
         let out = repo.run(&["rev-parse", "HEAD:a.rs"]);
         let id = String::from_utf8(out.stdout).unwrap();
-        assert_eq!(read_blob(&repo.0, id.trim()), None);
+        assert_eq!(read_blob(&repo.0, id.trim(), &AtomicBool::new(false)), None);
     }
 
-    /// Ask until there's an answer.
-    fn answer(reader: &mut StartReader, source: u128, file: &FileDiff) -> Starts {
-        for _ in 0..1000 {
-            if let Some(starts) = reader.wait_for(source, file) {
-                return starts;
-            }
-        }
-        panic!("no answer");
+    /// Work out `file`'s starts through `reader`.
+    fn answer(reader: &StartReader, file: &FileDiff) -> Starts {
+        reader.read(file, &AtomicBool::new(false)).unwrap()
     }
 
     #[test]
@@ -635,40 +583,45 @@ mod tests {
         repo.commit("a.rs", &with_line(&commented(), 20, "let x = 1;"));
         let file = repo.diff(&["show", "HEAD"]);
 
-        let mut reader = StartReader::new(&repo.0);
-        assert_eq!(answer(&mut reader, 1, &file).len(), 1);
-        assert!(!reader.busy());
+        let reader = StartReader::new(&repo.0);
+        assert_eq!(answer(&reader, &file).len(), 1);
         // With the repository gone, only a remembered answer can come back.
         fs::remove_dir_all(repo.0.join(".git")).unwrap();
-        assert_eq!(reader.ask(1, &file).unwrap().len(), 1);
-        assert!(!reader.busy());
+        assert_eq!(answer(&reader, &file).len(), 1);
     }
 
     #[test]
-    fn asking_about_another_file_abandons_the_first() {
+    fn a_cancelled_read_has_no_answer_and_leaves_none_behind() {
         let repo = Repo::new();
         repo.commit("a.rs", &commented());
         repo.commit("a.rs", &with_line(&commented(), 20, "let x = 1;"));
         let file = repo.diff(&["show", "HEAD"]);
 
-        let mut reader = StartReader::new(&repo.0);
-        assert!(reader.ask(1, &file).is_none());
-        assert!(reader.ask(2, &file).is_none());
-        assert!(reader.ask(3, &file).is_none());
-        assert_eq!(answer(&mut reader, 3, &file).len(), 1);
-        assert!(!reader.busy(), "the job for 2 was replaced before it began");
+        let reader = StartReader::new(&repo.0);
+        assert!(reader.read(&file, &AtomicBool::new(true)).is_none());
+        assert_eq!(answer(&reader, &file).len(), 1, "it can be asked again");
     }
 
     #[test]
-    fn returning_to_an_abandoned_file_asks_again() {
+    fn a_cancelled_job_stops_a_git_that_has_gone_quiet() {
+        let mut git = Command::new("sleep").arg("30").spawn().unwrap();
+        let cancelled = AtomicBool::new(true);
+        watch_git(&mut git, &cancelled, || false);
+        assert!(!git.wait().unwrap().success(), "killed, not left to finish");
+    }
+
+    #[test]
+    fn a_read_that_panics_leaves_the_file_starting_afresh() {
         let repo = Repo::new();
         repo.commit("a.rs", &commented());
         repo.commit("a.rs", &with_line(&commented(), 20, "let x = 1;"));
-        let file = repo.diff(&["show", "HEAD"]);
+        let mut file = repo.diff(&["show", "HEAD"]);
+        file.new_path = Some(PANIC_PATH.to_string());
 
-        let mut reader = StartReader::new(&repo.0);
-        assert!(reader.ask(1, &file).is_none());
-        assert!(reader.ask(2, &file).is_none());
-        assert_eq!(answer(&mut reader, 1, &file).len(), 1);
+        let reader = StartReader::new(&repo.0);
+        assert!(answer(&reader, &file).is_empty());
+        // Remembered, so the panic isn't there to be hit again.
+        fs::remove_dir_all(repo.0.join(".git")).unwrap();
+        assert!(answer(&reader, &file).is_empty());
     }
 }

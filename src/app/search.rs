@@ -16,8 +16,8 @@ use crate::tree;
 /// How long the scan may hold up each pass of the event loop.
 const SCAN_SLICE: Duration = Duration::from_millis(8);
 /// How long typing has to pause before the view follows a match into a file that
-/// has yet to be rendered. Rendering a big file blocks, and the next keystroke
-/// would usually move the match on anyway.
+/// has yet to be rendered. The next keystroke would usually move the match on, and
+/// a view that flickers through files on the way to one is hard to read.
 const PREVIEW_DELAY: Duration = Duration::from_millis(150);
 
 /// Everything about the search, kept together.
@@ -27,8 +27,8 @@ pub(super) struct Find {
     prompt: Option<Prompt>,
     /// The first match still to be shown.
     seek: Option<Seek>,
-    /// A match waiting on the event loop to render the file it's in.
-    landing: Option<Landing>,
+    /// A match waiting for the file it's in to be rendered.
+    landing: Option<(usize, Landing)>,
     /// Where to put the view back if Enter was pressed before the scan got far
     /// enough to say there are no matches.
     fallback: Option<Origin>,
@@ -143,7 +143,10 @@ impl App {
         }
         self.find.seek?;
         let typed = self.find.prompt.as_ref()?.typed;
-        Some(PREVIEW_DELAY.saturating_sub(typed.elapsed()))
+        let left = PREVIEW_DELAY.saturating_sub(typed.elapsed());
+        // Past the delay, what's holding it up can only be a render. That wakes the
+        // event loop when it lands, and until then there's nothing to come back for.
+        (!left.is_zero() || !self.cache.busy()).then_some(left)
     }
 
     /// The `/` key: open the prompt on a blank query. Whatever search was in force
@@ -177,9 +180,10 @@ impl App {
         self.find.held.is_some() && self.find.held == self.cursor_anchor
     }
 
-    /// Whether `n` or `N` is waiting on the event loop to render its file.
-    pub(super) fn landing_on_match(&self) -> bool {
-        self.find.landing.is_some()
+    /// Whether the view is on its way to a match, or to a first match that's yet
+    /// to be picked.
+    pub(super) fn heading_for_match(&self) -> bool {
+        self.find.landing.is_some() || self.find.seek.is_some()
     }
 
     /// Where in tree order the view is: the selected file, or the first file
@@ -333,6 +337,7 @@ impl App {
     /// Esc with a search in force: drop it, and leave the view where it is.
     pub(super) fn clear_search(&mut self) {
         self.find = Find::default();
+        self.held_keys.clear(); // A held `n` meant the match, not the next file.
     }
 
     fn restore_view(&mut self, origin: &Origin) {
@@ -395,7 +400,7 @@ impl App {
             self.reveal_file(file);
         }
         self.find.seek = None;
-        self.find.landing = Some(landing);
+        self.find.landing = Some((file, landing));
     }
 
     /// The file `seek` leads to and which of its matches to land on: `None` when
@@ -413,9 +418,11 @@ impl App {
             if Some(file) != seek.file {
                 return Some(Some((file, Landing::First)));
             }
-            // The render can be missing if the pane was resized on the way here.
+            // Lines only mean something against a render. There's none on the way
+            // if the view has left the file, and then its first match will do.
             let Some(render) = self.render_of(file) else {
-                return Some(Some((file, Landing::First)));
+                let waiting = self.selected_file() == Some(file);
+                return (!waiting).then_some(Some((file, Landing::First)));
             };
             let after = |hit: &Hit| {
                 render
@@ -439,10 +446,14 @@ impl App {
     /// the current match right if the render changed under it.
     pub(super) fn land_on_match(&mut self) {
         self.follow_match();
-        let Some(landing) = self.find.landing else {
+        let Some((file, landing)) = self.find.landing else {
             return;
         };
-        let (Some(file), Some(render)) = (self.selected_file(), self.current_render()) else {
+        if self.selected_file() != Some(file) {
+            self.find.landing = None; // The view has moved on without it.
+            return;
+        }
+        let Some(render) = self.current_render() else {
             return;
         };
         let Some(search) = &self.find.search else {
@@ -543,9 +554,6 @@ impl App {
     /// on it, otherwise from the cursor, and walks off the end of a file into the
     /// next one with a match, wrapping at the ends of the diff.
     pub(super) fn step_match(&mut self, forward: bool) {
-        if self.find.landing.is_some() || self.find.seek.is_some() {
-            return; // Still on the way: the render this would read is out of date.
-        }
         let Some(search) = &self.find.search else {
             return;
         };
@@ -610,11 +618,12 @@ impl App {
         if self.selected_file() != Some(file) {
             self.reveal_file(file);
         }
-        self.find.landing = Some(if forward {
+        let landing = if forward {
             Landing::First
         } else {
             Landing::Last
-        });
+        };
+        self.find.landing = Some((file, landing));
         if wrapped {
             let end = if forward { "top" } else { "bottom" };
             self.set_status(format!("Search wrapped to the {end}"));
@@ -1462,5 +1471,113 @@ mod tests {
             .map(|color| (format!("{color:?}"), ()))
             .collect();
         assert_eq!(all.len(), 4);
+    }
+
+    /// Renders that are late: a frame goes ahead without them.
+    fn late(app: &mut App) -> crate::render::test_support::Gate {
+        let gate = crate::render::test_support::Gate::default();
+        app.cache.wait(Duration::ZERO);
+        app.cache.hooks().start = Some(gate.clone());
+        gate
+    }
+
+    fn settle(app: &mut App) {
+        for _ in 0..20 {
+            frame(app);
+            app.cache.finish();
+            frame(app);
+        }
+    }
+
+    #[test]
+    fn n_waits_for_the_file_the_last_match_went_into() {
+        let mut app = app(TWO_FILES);
+        search_for(&mut app, "needle");
+        let total = |app: &mut App| {
+            let mut stops = Vec::new();
+            for _ in 0..3 {
+                app.press_for_test(Char('n'), false);
+            }
+            settle(app);
+            stops.push(footer(app));
+            stops
+        };
+        let expected = {
+            let mut prompt = self::app(TWO_FILES);
+            search_for(&mut prompt, "needle");
+            total(&mut prompt)
+        };
+        late(&mut app).open();
+        assert_eq!(total(&mut app), expected, "every press counted");
+    }
+
+    #[test]
+    fn a_search_over_a_render_that_has_gone_keeps_its_place_in_the_file() {
+        let raw = hunk(
+            "f",
+            " needle first\n a\n b\n c\n needle second\n d\n needle third\n",
+        );
+        let mut app = app(&raw);
+        frame(&mut app);
+        press(&mut app, Char('j'));
+        press(&mut app, Char('j'));
+        let gate = late(&mut app);
+        // A resize on the way: the render the search starts from is being made.
+        app.cache.clear();
+        frame(&mut app);
+        assert!(app.current_render().is_none());
+        type_query(&mut app, "needle");
+        gate.open();
+        settle(&mut app);
+        press(&mut app, Enter);
+        settle(&mut app);
+        assert_eq!(cursor_new_line(&app), Some(5), "at or after the cursor");
+    }
+
+    #[test]
+    fn enter_on_a_match_in_a_file_still_rendering_lands_there_later() {
+        let mut app = app(TWO_FILES);
+        frame(&mut app);
+        let gate = late(&mut app);
+        type_query(&mut app, "a needle b");
+        press(&mut app, Enter);
+        frame(&mut app);
+        gate.open();
+        settle(&mut app);
+        assert_eq!(current(&mut app), ["a needle b"]);
+    }
+
+    #[test]
+    fn a_keypress_that_overtakes_a_landing_cancels_it() {
+        let mut app = app(TWO_FILES);
+        search_for(&mut app, "needle");
+        let gate = late(&mut app);
+        for _ in 0..4 {
+            press(&mut app, Char('n'));
+        }
+        press(&mut app, Char('p'));
+        gate.open();
+        settle(&mut app);
+        assert!(app.find.landing.is_none());
+        assert!(app.held_keys.is_empty());
+    }
+
+    /// Otherwise the event loop would spin for as long as the render took.
+    #[test]
+    fn a_prompt_waiting_on_a_render_does_not_keep_the_event_loop_awake() {
+        let raw = hunk("f", " needle first\n a\n needle second\n");
+        let mut app = app(&raw);
+        frame(&mut app);
+        let gate = late(&mut app);
+        app.cache.clear();
+        frame(&mut app);
+        type_query(&mut app, "needle");
+        assert!(app.search_prompt().is_some());
+        assert!(app.heading_for_match(), "it can't say which match is next");
+        assert_eq!(app.search_wait(), None);
+        gate.open();
+        settle(&mut app);
+        assert_eq!(app.search_wait(), None);
+        assert!(!app.heading_for_match());
     }
 }

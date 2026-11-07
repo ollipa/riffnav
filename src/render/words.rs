@@ -12,6 +12,7 @@
 //! same text differently, which would make unchanged code look changed.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use similar::{Algorithm, DiffOp, capture_diff_slices};
 
@@ -37,8 +38,17 @@ pub struct Changes {
 }
 
 /// Pair up the edited lines in `rows` and mark what changed in each. A moved row
-/// isn't an edit of anything, so it stays out of the pairing.
-pub fn changes(rows: &[Row], tokens: &[Tokens], moves: &FileMoves) -> Changes {
+/// isn't an edit of anything, so it stays out of the pairing. Stops short once
+/// `cancelled` is set.
+///
+/// `tokens` only shapes the marks: rows pair up the same way with none, which is
+/// what lets a file be laid out in its final shape before it has been parsed.
+pub fn changes(
+    rows: &[Row],
+    tokens: &[Tokens],
+    moves: &FileMoves,
+    cancelled: &AtomicBool,
+) -> Changes {
     let mut out = Changes {
         emphasis: vec![Vec::new(); rows.len()],
         partner: (0..rows.len())
@@ -47,6 +57,9 @@ pub fn changes(rows: &[Row], tokens: &[Tokens], moves: &FileMoves) -> Changes {
     };
     let line = |row: usize| Line::new(&rows[row].text, &tokens[row]);
     for (mut removed, mut added) in change_runs(rows) {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
         removed.retain(|&row| moves.at(row).is_none());
         added.retain(|&row| moves.at(row).is_none());
         let lines: Vec<Line> = added.iter().map(|&row| line(row)).collect();
@@ -383,8 +396,9 @@ mod tests {
         let raw = format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n{hunk}");
         let file = parse(&raw).remove(0);
         let rows = rows(&file);
-        let syntax = highlight(&file, &rows, DiffTheme::GitHubDark, &[]);
-        let changes = changes(&rows, &syntax.tokens, &FileMoves::default());
+        let cancelled = AtomicBool::new(false);
+        let syntax = highlight(&file, &rows, DiffTheme::GitHubDark, &[], &cancelled);
+        let changes = changes(&rows, &syntax.tokens, &FileMoves::default(), &cancelled);
         (rows, changes)
     }
 

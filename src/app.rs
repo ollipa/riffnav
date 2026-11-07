@@ -1,14 +1,18 @@
 mod changes;
 mod search;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::io::IsTerminal;
+use std::panic;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, PoisonError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -24,7 +28,7 @@ use crate::diff::{FileDiff, FileStatus};
 use crate::forge::{Forge, ReviewSync};
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
-use crate::render::{CommentLayer, RenderCache, Target};
+use crate::render::{CommentLayer, RenderCache, Request, Target, WAIT};
 use crate::review::ReviewStore;
 use crate::session::Session;
 use crate::theme::DiffTheme;
@@ -67,9 +71,12 @@ const CONTEXT_STEP: u32 = 1;
 /// While watching for comments written elsewhere, cap the input wait so an
 /// agent's note appears without needing a keypress.
 const COMMENT_POLL: Duration = Duration::from_millis(250);
-/// While a file's hunk starts are being worked out, cap the input wait so they
-/// reach the screen without needing a keypress.
-const STARTS_POLL: Duration = Duration::from_millis(50);
+/// While a render is under way, how often to look for it between keypresses. A
+/// key read can't be interrupted, so this is as late as a finished render can land.
+const RENDER_POLL: Duration = Duration::from_millis(5);
+/// How long the first frame waits for its render. There's nothing on screen yet to
+/// be held up, and the syntaxes it needs may still be loading.
+const FIRST_WAIT: Duration = Duration::from_millis(150);
 
 /// Best-effort terminal mouse reporting, toggled around screen ownership: on
 /// while the TUI runs so clicks and the wheel reach us, off whenever we hand the
@@ -252,10 +259,18 @@ pub struct App {
     /// A `]`/`[` jump that crossed into another file, waiting for that file to be
     /// rendered before the cursor can be put on the comment it was aimed at:
     /// `true` for its first comment, `false` for its last.
-    comment_landing: Option<bool>,
+    comment_landing: Option<(usize, bool)>,
     /// A diff line an `m` jump is heading for, waiting on the event loop to render
     /// the file it's in, the same way `comment_landing` does.
-    move_landing: Option<Anchor>,
+    move_landing: Option<(usize, Anchor)>,
+    /// Keys that act on the render, pressed before it was there for them to act on,
+    /// oldest first. They run in order once it lands, so a render only ever delays
+    /// a key rather than swallowing it. See [`App::must_wait`].
+    held_keys: VecDeque<KeyEvent>,
+    /// Which way the reader is working through the files.
+    heading: Heading,
+    /// What the last prefetch was worked out from, as it only changes with these.
+    prefetch_asked: Option<PrefetchAsked>,
     /// The id `x` has asked about deleting, waiting on the y/N answer. Holds the
     /// next keypress hostage, which is the whole point of it.
     confirm_delete: Option<String>,
@@ -286,6 +301,54 @@ pub struct App {
     zoomed: bool,
     /// When set, the current `status` clears itself once this instant passes.
     status_deadline: Option<Instant>,
+}
+
+/// Which way the reader is working through the files, which is the best guess at
+/// which file is next.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Heading {
+    forward: bool,
+    /// By `J` and `K`, which skip files with no changes.
+    by_change: bool,
+}
+
+/// What decides which file to prefetch and how it's to look.
+type PrefetchAsked = (usize, Heading, u16, bool, DiffTheme);
+
+/// Panics on other threads, to report once the terminal is back.
+static BACKGROUND_PANICS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// `ratatui::init`, keeping the panic hook it installs to the UI thread.
+///
+/// That hook restores the terminal, which is right for a panic that's about to end
+/// the app. On any other thread the app carries on, in a terminal that's no longer
+/// set up for it, and `catch_unwind` can't help, as the hook has run by then. This
+/// goes on top of ratatui's hook, so it has to follow every `ratatui::init`.
+fn init_terminal() -> DefaultTerminal {
+    let terminal = ratatui::init();
+    let ui = thread::current().id();
+    let restoring = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        if thread::current().id() == ui {
+            restoring(info);
+        } else {
+            let mut panics = BACKGROUND_PANICS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            panics.push(info.to_string());
+        }
+    }));
+    terminal
+}
+
+/// Say what panicked off the UI thread, now there's a terminal to say it on.
+fn report_background_panics() {
+    let mut panics = BACKGROUND_PANICS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    for panic in panics.drain(..) {
+        eprintln!("riffnav: {panic}");
+    }
 }
 
 impl App {
@@ -350,6 +413,12 @@ impl App {
             cursor_screen_row: None,
             comment_landing: None,
             move_landing: None,
+            held_keys: VecDeque::new(),
+            heading: Heading {
+                forward: true,
+                by_change: false,
+            },
+            prefetch_asked: None,
             confirm_delete: None,
             composer: None,
             pending_comment: None,
@@ -917,13 +986,15 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        let mut terminal = ratatui::init();
+        let mut terminal = init_terminal();
         enable_mouse();
         enable_enhanced_keys();
         let result = self.event_loop(&mut terminal);
         disable_enhanced_keys();
         disable_mouse();
         ratatui::restore();
+        self.cache.stop();
+        report_background_panics();
         self.restore_herdr_zoom();
         self.flush_review_sync(); // let in-flight GitHub marks finish (bounded)
         self.review.save(); // safety net; toggles already persist eagerly
@@ -935,9 +1006,11 @@ impl App {
     }
 
     fn event_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        self.cache.wait(FIRST_WAIT);
         while !self.quit {
             let diff_width = self.diff_pane_width(terminal.size()?.width);
             self.prepare_frame(diff_width);
+            self.cache.wait(WAIT);
 
             terminal.draw(|frame| crate::ui::draw(frame, self, diff_width))?;
             let last_draw = Instant::now();
@@ -981,36 +1054,54 @@ impl App {
 
         // Before the render, as it can select the file a match is in.
         self.advance_search();
-        self.settle_view(diff_width);
-        // A jump that went on into another file needs that file rendered too, and
-        // no keypress may be coming to wake the event loop up for it.
-        while self.change_jumps_waiting() {
+        // A jump that goes on into another file needs that file rendered too, and
+        // no keypress may be coming to wake the event loop up for it. It stops at a
+        // file that isn't ready, or at the frame's time, as a run of ordinary files
+        // adds up, and the event loop comes back for the rest either way.
+        let deadline = Instant::now() + self.cache.waits();
+        loop {
+            let file = self.selected_file();
             self.settle_view(diff_width);
+            if self.selected_file() == file || Instant::now() >= deadline {
+                break;
+            }
+        }
+        self.prefetch_next(diff_width);
+        if let Some(failure) = self.cache.take_failure() {
+            self.set_status(format!("Couldn't render {failure}"));
         }
     }
 
+    /// Put a question to the render cache about file `idx`, shown `width` wide.
+    fn ask_cache(&mut self, idx: usize, width: u16, ask: fn(&mut RenderCache, &Request<'_>)) {
+        let side_by_side = self.side_by_side_for(idx);
+        let diff_hash = self.file_hashes.get(idx).copied().unwrap_or(0);
+        let comments = Self::comment_layer(
+            &self.files,
+            &self.comments,
+            &self.comment_author,
+            diff_hash,
+            self.comment_rev,
+            self.comments_on,
+            idx,
+        );
+        let request = Request {
+            file: idx,
+            diff: &self.files[idx],
+            width,
+            side_by_side,
+            theme: self.diff_theme,
+            comments,
+        };
+        ask(&mut self.cache, &request);
+    }
+
     /// Render the selected file, and put the cursor and any jump in progress on it.
+    /// The render may not be there yet, and all of this then waits for it to land.
     fn settle_view(&mut self, diff_width: u16) {
-        if let Some(idx) = self.selected_file() {
-            let side_by_side = self.side_by_side_for(idx);
-            let diff_hash = self.file_hashes.get(idx).copied().unwrap_or(0);
-            let layer = Self::comment_layer(
-                &self.files,
-                &self.comments,
-                &self.comment_author,
-                diff_hash,
-                self.comment_rev,
-                self.comments_on,
-                idx,
-            );
-            self.cache.ensure(
-                idx,
-                &self.files[idx],
-                diff_width,
-                side_by_side,
-                self.diff_theme,
-                &layer,
-            );
+        match self.selected_file() {
+            Some(idx) => self.ask_cache(idx, diff_width, RenderCache::ensure),
+            None => self.cache.release(),
         }
         // The render may have changed shape (new comments, new theme, new
         // width), so put the cursor back on the line it was on.
@@ -1022,23 +1113,129 @@ impl App {
         self.land_on_move();
         self.land_on_match();
         self.run_change_jumps();
+        self.replay_held_keys();
+    }
+
+    /// Whether a key that reads the render can act now: the one on show is there
+    /// for it, the cursor is good for it, and no jump is still on its way.
+    fn view_settled(&self) -> bool {
+        self.comment_landing.is_none()
+            && self.move_landing.is_none()
+            && !self.heading_for_match()
+            && !self.change_jumps_waiting()
+            && self.render_ready()
+    }
+
+    /// Whether `key` has to wait its turn. A key that only makes sense against the
+    /// render does, as does any after it, to stay in order. Anything else can go
+    /// straight away, which is what keeps `q` and `n` working on a file that's
+    /// taking its time.
+    fn must_wait(&self, key: KeyEvent) -> bool {
+        let reads_render = self.reads_render(key);
+        // `J` and `K` keep a queue of their own, for what comes after them.
+        let queues = matches!(key.code, KeyCode::Char('J' | 'K'));
+        reads_render && (!self.held_keys.is_empty() || !(queues || self.view_settled()))
+    }
+
+    fn reads_render(&self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let diff = self.focus == Focus::Diff;
+        let comments = self.comments_on;
+        match key.code {
+            KeyCode::Char('J' | 'K' | 'g' | 'G') => true,
+            KeyCode::Char('n' | 'N') => self.searching(),
+            KeyCode::Char('d' | 'u') => ctrl,
+            KeyCode::Char('j' | 'k' | ' ' | 'b' | 'm') => diff,
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => diff,
+            KeyCode::Char('c') => comments && !ctrl,
+            KeyCode::Char('x' | ']' | '[') => comments,
+            _ => false,
+        }
+    }
+
+    /// Act on the keys that have been waiting, for as long as they can. One of them
+    /// can move the view on, or open the composer, and the rest go where they would
+    /// have gone had the render been there all along.
+    fn replay_held_keys(&mut self) {
+        while self.view_settled() {
+            let Some(key) = self.held_keys.pop_front() else {
+                return;
+            };
+            let _ = self.route_key(key, true);
+        }
+    }
+
+    /// With the file on screen done, get the one the reader is heading for ready.
+    fn prefetch_next(&mut self, width: u16) {
+        if !self.view_settled() || !self.held_keys.is_empty() || self.cache.busy() {
+            return;
+        }
+        let asked = (
+            self.selected_index(),
+            self.heading,
+            width,
+            self.side_by_side,
+            self.diff_theme,
+        );
+        if self.prefetch_asked == Some(asked) {
+            return;
+        }
+        self.prefetch_asked = Some(asked);
+        if let Some(next) = self.likely_next() {
+            self.ask_cache(next, width, RenderCache::prefetch);
+        }
+    }
+
+    /// The file the next press in the direction of travel would open.
+    fn likely_next(&self) -> Option<usize> {
+        let Heading { forward, by_change } = self.heading;
+        if by_change {
+            let order = self.tree_order();
+            let here = self.selected_file();
+            let mut onward = self.ranks_onward(forward, order.len());
+            return onward
+                .find(|&(rank, _)| {
+                    Some(order[rank]) != here && crate::diff::has_changes(&self.files[order[rank]])
+                })
+                .map(|(rank, _)| order[rank]);
+        }
+        let file = |row: &Row| match row.kind {
+            RowKind::File { diff_index } => Some(diff_index),
+            RowKind::Dir { .. } => None,
+        };
+        let here = self.selected_index();
+        if forward {
+            self.rows.iter().skip(here + 1).find_map(file)
+        } else {
+            self.rows.iter().take(here).rev().find_map(file)
+        }
     }
 
     /// Input wait. Normally blocks for the next event, but bounds the wait when something needs servicing without a keypress: a
     /// timed status that must expire, or an in-flight GitHub sync whose result
-    /// should be surfaced. Both are handled after the wait returns.
+    /// should be surfaced. Both are handled after the wait returns. While a render
+    /// is running it looks for that between keys too, and a redraw comes of it only
+    /// when one lands.
     fn wait_for_event(&mut self) -> Result<()> {
-        match self.idle_timeout() {
-            Some(timeout) => {
-                if event::poll(timeout)? {
-                    self.handle_event()?;
-                }
+        let deadline = self.idle_timeout().map(|timeout| Instant::now() + timeout);
+        loop {
+            let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+            let busy = self.cache.busy().then_some(RENDER_POLL);
+            let slice = left.into_iter().chain(busy).min();
+            let Some(slice) = slice else {
+                self.handle_event()?;
+                break;
+            };
+            if event::poll(slice)? {
+                self.handle_event()?;
+                break;
             }
-            None => self.handle_event()?,
+            if self.cache.collect() || left.is_some_and(|left| left <= slice) {
+                break;
+            }
         }
         self.expire_status();
         self.drain_review_sync();
-        self.cache.drain_starts();
         self.poll_comments();
         Ok(())
     }
@@ -1062,20 +1259,14 @@ impl App {
             (false, true) => Some(COMMENT_POLL),
             (false, false) => None,
         };
-        let bound = match (self.cache.reading_starts(), bound) {
-            (true, Some(bound)) => Some(bound.min(STARTS_POLL)),
-            (true, None) => Some(STARTS_POLL),
-            (false, bound) => bound,
-        };
-        let bound = match (self.search_wait(), bound) {
-            (Some(search), Some(bound)) => Some(bound.min(search)),
-            (search, bound) => search.or(bound),
-        };
-        match (status, bound) {
-            (Some(s), Some(b)) => Some(s.min(b)),
-            (Some(s), None) => Some(s),
-            (None, b) => b,
-        }
+        // A frame that ran out of time before the view settled has more to do, and
+        // no render on the way is going to say so.
+        let unsettled = !self.cache.busy() && !(self.view_settled() && self.held_keys.is_empty());
+        let settling = unsettled.then_some(FRAME_MIN);
+        [status, bound, self.search_wait(), settling]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Swap in a freshly parsed file set, rebuilding the tree while preserving
@@ -1099,7 +1290,11 @@ impl App {
         self.last_width = 0; // force a re-render at the next draw
         self.finder = None; // indices changed; a stale finder would mislead
         self.restart_search(resume);
-        self.abandon_change_landing(); // So did the file it's heading for.
+        // So did the file each of these is heading for.
+        self.abandon_change_landing();
+        self.comment_landing = None;
+        self.move_landing = None;
+        self.prefetch_asked = None;
 
         let target = prev_path
             .as_deref()
@@ -1175,6 +1370,7 @@ impl App {
         self.files[i] = file;
         self.cache.invalidate(i);
         self.cache.index_moves(&self.files);
+        self.prefetch_asked = None;
         self.restart_search(resume);
         self.last_width = 0; // force a re-render at the next draw
         self.cursor_token = None; // and let the cursor re-resolve from its anchor
@@ -1233,11 +1429,18 @@ impl App {
             return;
         }
         let max = self.rows.len() as isize - 1;
+        self.head(delta > 0, false);
         self.select((self.selected_index() as isize + delta).clamp(0, max) as usize);
+    }
+
+    /// Note the way the reader is going, for [`App::likely_next`].
+    fn head(&mut self, forward: bool, by_change: bool) {
+        self.heading = Heading { forward, by_change };
     }
 
     /// Jump to the next/previous file row, skipping directories.
     fn jump_file(&mut self, forward: bool) {
+        self.head(forward, false);
         let cur = self.selected_index();
         let is_file = |i: &usize| matches!(self.rows[*i].kind, RowKind::File { .. });
         let next = if forward {
@@ -1257,7 +1460,8 @@ impl App {
         self.park_cursor_in_view();
     }
 
-    /// The render backing the current view, if it's already cached.
+    /// The render backing the current view, if it's already cached. Rendering is
+    /// off this thread, so `None` here can last for many frames.
     fn current_render(&self) -> Option<&crate::render::Rendered> {
         self.render_of(self.selected_file()?)
     }
@@ -1273,13 +1477,17 @@ impl App {
     }
 
     /// What file `idx`'s render looks like now, to hold a cursor's index against.
+    /// Comments count once they're in the render on show.
     fn render_token(&self, idx: usize) -> CursorToken {
+        let (width, side_by_side, theme) =
+            (self.last_width, self.side_by_side_for(idx), self.diff_theme);
+        let rev = self.cache.rev(idx, width, side_by_side, theme);
         (
             idx,
-            self.last_width,
-            self.side_by_side_for(idx),
-            self.diff_theme,
-            self.comment_rev,
+            width,
+            side_by_side,
+            theme,
+            rev.unwrap_or(self.comment_rev),
         )
     }
 
@@ -1293,6 +1501,11 @@ impl App {
         };
         let token = self.render_token(idx);
         if self.cursor_token == Some(token) {
+            return;
+        }
+        // Not noted until there's a render to go by, as that's what the cursor has
+        // to be put right against.
+        if self.current_render().is_none() {
             return;
         }
         self.cursor_token = Some(token);
@@ -1528,7 +1741,7 @@ impl App {
             return false;
         };
         self.reveal_file(idx);
-        self.comment_landing = Some(forward);
+        self.comment_landing = Some((idx, forward));
         true
     }
 
@@ -1548,9 +1761,13 @@ impl App {
     /// has rendered it: the cursor goes on that file's first comment when we came
     /// in going forward, its last when going back.
     fn land_on_comment(&mut self) {
-        let Some(first) = self.comment_landing.take() else {
+        let Some((file, first)) = self.comment_landing else {
             return;
         };
+        if self.selected_file() != Some(file) {
+            self.comment_landing = None; // The view has moved on without it.
+            return;
+        }
         let Some(render) = self.current_render() else {
             return;
         };
@@ -1559,7 +1776,9 @@ impl App {
         } else {
             render.comment_rows.last()
         };
-        if let Some(start) = block.map(|b| b.start) {
+        let start = block.map(|b| b.start);
+        self.comment_landing = None;
+        if let Some(start) = start {
             self.set_cursor_on_block(start);
         }
     }
@@ -1597,27 +1816,30 @@ impl App {
     /// Jump to the other end of a moved line. Both ends point at each other, so
     /// pressing `m` again comes straight back.
     fn jump_move(&mut self) {
-        if self.move_landing.is_some() {
-            return; // Still on the way: the render this would read is out of date.
-        }
         let Some(target) = self.move_target() else {
             return self.set_status("Not on a moved line");
         };
         if self.selected_file() != Some(target.file) {
             self.reveal_file(target.file);
         }
-        self.move_landing = Some(target.anchor);
+        self.move_landing = Some((target.file, target.anchor));
     }
 
     /// Finish an `m` jump once its file is rendered.
     fn land_on_move(&mut self) {
-        let Some(anchor) = self.move_landing.take() else {
+        let Some((file, anchor)) = self.move_landing else {
             return;
         };
-        let Some(line) = self
-            .current_render()
-            .and_then(|render| render.line_map.row_for(anchor))
-        else {
+        if self.selected_file() != Some(file) {
+            self.move_landing = None; // The view has moved on without it.
+            return;
+        }
+        let Some(render) = self.current_render() else {
+            return;
+        };
+        let line = render.line_map.row_for(anchor);
+        self.move_landing = None;
+        let Some(line) = line else {
             return;
         };
         let here = self.current_render().map(|r| r.code_line(self.diff_cursor));
@@ -1972,7 +2194,7 @@ impl App {
         }
         let status = cmd.status();
 
-        *terminal = ratatui::init();
+        *terminal = init_terminal();
         enable_mouse();
         enable_enhanced_keys();
         let _ = terminal.clear();
@@ -2116,7 +2338,7 @@ impl App {
     fn scroll_at(&mut self, pos: Position, dir: i32) {
         if self.tree_area.is_some_and(|a| a.contains(pos)) {
             self.move_selection(dir as isize);
-        } else {
+        } else if self.current_render().is_some() {
             self.scroll_diff(dir * 3);
         }
     }
@@ -2128,7 +2350,11 @@ impl App {
             ev = event::read()?;
         }
         if let Event::Mouse(mouse) = ev {
+            let selected = self.selected_index();
             self.handle_mouse(mouse);
+            if self.selected_index() != selected {
+                self.held_keys.clear();
+            }
             return Ok(());
         }
         let Event::Key(key) = ev else {
@@ -2140,9 +2366,33 @@ impl App {
         self.dispatch_key(key)
     }
 
-    /// Act on one keypress, routing it to whatever currently owns input: the
-    /// composer, the finder, the help overlay, or the panes themselves.
-    fn dispatch_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+    /// Act on one keypress. A key that moves the view or the focus on, or takes over
+    /// the keyboard, leaves anything still waiting behind: the later key wins, and
+    /// what was held was meant for a view that's gone.
+    fn dispatch_key(&mut self, key: KeyEvent) -> Result<()> {
+        let (selected, focus) = (self.selected_index(), self.focus);
+        let owned = self.keyboard_taken();
+        let result = self.route_key(key, false);
+        let moved_on = self.selected_index() != selected || self.focus != focus;
+        if moved_on || (!owned && self.keyboard_taken()) {
+            self.held_keys.clear();
+        }
+        result
+    }
+
+    /// Whether something other than the panes is getting the keys.
+    fn keyboard_taken(&self) -> bool {
+        self.composer.is_some()
+            || self.finder.is_some()
+            || self.search_prompt().is_some()
+            || self.show_help
+            || self.confirm_delete.is_some()
+    }
+
+    /// Route one keypress to whatever currently owns input: the composer, the
+    /// finder, the help overlay, or the panes themselves. `held` is for a key that
+    /// has already waited its turn.
+    fn route_key(&mut self, key: KeyEvent, held: bool) -> Result<()> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         // A note being typed captures all input, printable keys included.
@@ -2228,6 +2478,11 @@ impl App {
         // out of riffnav.
         if self.confirm_delete.is_some() {
             self.answer_delete(key.code);
+            return Ok(());
+        }
+
+        if !held && self.must_wait(key) {
+            self.held_keys.push_back(key);
             return Ok(());
         }
 
@@ -2387,6 +2642,7 @@ impl App {
             .insert_for_test_with_comments(idx, width, false, self.diff_theme, text, &layer);
         self.last_width = width;
         self.cursor_token = None; // the render is new; let the cursor re-resolve
+        self.resync_cursor();
     }
 }
 
@@ -3279,14 +3535,14 @@ mod tests {
         let idx = app.selected_file().unwrap();
         let side_by_side = app.side_by_side_for(idx);
         app.last_width = 60;
-        app.cache.ensure(
-            idx,
-            &app.files[idx],
-            60,
+        app.cache.ensure(&Request {
+            file: idx,
+            diff: &app.files[idx],
+            width: 60,
             side_by_side,
-            app.diff_theme,
-            &crate::render::CommentLayer::none(),
-        );
+            theme: app.diff_theme,
+            comments: CommentLayer::none(),
+        });
         app.resync_cursor();
         app.land_on_move();
     }
@@ -3550,7 +3806,7 @@ mod tests {
 
         app.jump_comment(true);
         assert_eq!(app.selected_file(), Some(1), "the fold was opened");
-        assert_eq!(app.comment_landing, Some(true), "and the landing is armed");
+        assert!(app.comment_landing.is_some(), "and the landing is armed");
     }
 
     /// With every note in the file that's open there's nowhere to cross to, so

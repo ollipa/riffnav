@@ -110,6 +110,13 @@ fn main() -> Result<()> {
     let cli = cli::Cli::parse();
     let config = config::Config::load(cli.config.as_deref())?;
 
+    if matches!(
+        cli.command,
+        None | Some(cli::Command::Diff(_) | cli::Command::Show { .. })
+    ) {
+        render::warm_up();
+    }
+
     let input = match cli.command {
         // `diff`/`show` are just another way to *source* the diff — they still
         // open the TUI, so they fall through to the app below.
@@ -171,7 +178,11 @@ fn main() -> Result<()> {
         config.comment_retention_days,
         config.comment_author.as_deref(),
     );
-    app.run()
+    let result = app.run();
+    // Everything that matters is saved, and the process is about to give the memory
+    // back in one go. Freeing a big render piece by piece would only hold up the exit.
+    std::mem::forget(app);
+    result
 }
 
 #[cfg(test)]

@@ -336,10 +336,18 @@ from `/dev/tty`.
 The lines between hunks aren't in a diff, so a hunk that opens inside a block
 comment or a multi-line string can't be colored from the diff alone. When riffnav
 ran git itself it reads the file's old blob and applies the hunks to it, parsing
-each side down to each hunk off the UI thread. A big file is drawn straight away
-and its colors correct themselves a moment later. A diff piped in, or a blob
-that's missing, over the size limit or isn't the text shown (a `textconv` diff),
-starts each hunk afresh.
+each side down to each hunk as the first step of rendering the file. A diff piped
+in, or a blob that's missing, over the size limit or isn't the text shown (a
+`textconv` diff), starts each hunk afresh.
+
+Rendering happens off the UI thread, so a big file never holds up a key. A frame
+waits up to 25ms for a render, which covers most files. A slower file shows its
+text without syntax colors, already in its final layout, until the real render
+replaces it, and one too big to color shows `rendering…` until it's done. A key
+that needs the render, such as `j` or `G`, acts when it lands, in the order
+pressed, while `n`, `p` and `q` act at once. With the file on screen done, the
+next file in the direction of travel is rendered ahead of time, and work for a file
+that's no longer wanted is dropped. The cache keeps roughly 256 MB of renders.
 
 Comments anchor to a *diff line*, never a screen row, so they stay put across a
 resize, a theme switch, or a unified/side-by-side toggle. Each rendered row keeps

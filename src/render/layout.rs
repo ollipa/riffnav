@@ -1,6 +1,7 @@
 //! Turning a file's rows into styled, width-filled lines.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
@@ -37,6 +38,8 @@ pub struct Content<'a> {
     pub syntax: &'a [Vec<Run>],
     pub changes: &'a Changes,
     pub moves: &'a FileMoves,
+    /// Set to stop short, with the lines so far.
+    pub cancelled: &'a AtomicBool,
 }
 
 pub fn unified(
@@ -54,6 +57,9 @@ pub fn unified(
     let mut numbers = vec![LineNumbers::none(); lines.len()];
     let mut sources = Sources::new();
     for (i, row) in content.rows.iter().enumerate() {
+        if content.cancelled.load(Ordering::Relaxed) {
+            break;
+        }
         let mark = content.moves.at(i);
         let line = match row.kind {
             RowKind::HunkHeader { new_start } => {
@@ -140,7 +146,7 @@ pub fn side_by_side(
     let mut sources = Sources::new();
     let mut runs = change_runs(rows).into_iter().peekable();
     let mut i = 0;
-    while i < rows.len() {
+    while i < rows.len() && !content.cancelled.load(Ordering::Relaxed) {
         let row = &rows[i];
         if let Some((removed, added)) =
             runs.next_if(|(removed, added)| removed.first().or(added.first()) == Some(&i))
