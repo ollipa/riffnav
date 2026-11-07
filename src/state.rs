@@ -101,8 +101,10 @@ pub fn sweep(dir: &Path, retention: u64, keep: &Path) {
 /// It serializes every read-modify-write of a kind's scope files: one lock for
 /// the whole tree, since each hold lasts a read and a write, and sweeping, which
 /// deletes scope files, must not race a writer either. The OS drops the lock if
-/// its holder dies, so a killed process can't wedge the next one. `None` if the
-/// lock file can't be opened or locked.
+/// its holder dies, so a killed process can't wedge the next one. A live one
+/// can, if it's stopped mid-write (`Ctrl-Z`, a debugger), so the wait gives up
+/// after [`LOCK_WAIT`] rather than freeze the window. `None` if the lock file
+/// can't be opened, or the lock wasn't free in time.
 ///
 /// The lock file sits beside the repo directories, never in one, so [`sweep`],
 /// which only looks inside them, can't delete a lock someone holds.
@@ -114,9 +116,21 @@ pub fn lock(dir: &Path) -> Option<std::fs::File> {
         .write(true)
         .open(dir.join(".lock"))
         .ok()?;
-    file.lock().ok()?;
-    Some(file)
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(_) => return None,
+        }
+    }
 }
+
+/// How long [`lock`] waits for another holder. A hold is one small read and
+/// write, so anything near this long means the holder is stuck.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Write `bytes` to `path` via a temp file + rename, creating parent directories
 /// as needed. Best-effort: returns whether the file landed. The rename keeps a
@@ -236,6 +250,17 @@ mod tests {
             second.try_lock().is_ok(),
             "and gets it once the first is done"
         );
+    }
+
+    /// A holder that never lets go (stopped mid-write) mustn't freeze the next
+    /// one: the wait gives up.
+    #[test]
+    fn lock_gives_up_on_a_holder_that_never_lets_go() {
+        let dir = TempDir::new("lock-stuck");
+        let _held = lock(&dir).expect("the lock is taken");
+        let start = std::time::Instant::now();
+        assert!(lock(&dir).is_none(), "a second taker gives up");
+        assert!(start.elapsed() >= LOCK_WAIT);
     }
 
     /// Two writers of the same scope must not share a temp path.

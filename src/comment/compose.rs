@@ -26,8 +26,9 @@ pub struct PendingComment {
     /// The diff lines quoted back below the scissors, for context while typing
     /// in `$EDITOR`.
     pub context: Vec<String>,
-    /// Text already typed in the composer, pre-filled into the editor buffer when
-    /// composing is handed off to `$EDITOR` mid-note.
+    /// Text already typed: pre-filled into the editor buffer when composing is
+    /// handed off to `$EDITOR` mid-note, and into the composer when a save
+    /// failed and the note is handed back.
     pub draft: String,
 }
 
@@ -53,12 +54,20 @@ pub struct Composer {
 }
 
 impl Composer {
+    /// A field holding `pending.draft`, usually empty, with the cursor at its end.
     pub fn new(pending: PendingComment) -> Self {
+        let lines: Vec<Vec<char>> = pending
+            .draft
+            .split('\n')
+            .map(|l| l.chars().collect())
+            .collect();
+        let row = lines.len() - 1;
+        let col = lines[row].len();
         Self {
             pending,
-            lines: vec![Vec::new()],
-            row: 0,
-            col: 0,
+            lines,
+            row,
+            col,
         }
     }
 

@@ -201,6 +201,8 @@ impl App {
     }
 
     /// Turn the text an author typed into a stored comment. Empty means abort.
+    /// If the store refuses it, the composer reopens holding the text, so a
+    /// failed save never costs what was typed.
     pub(super) fn save_composed(&mut self, pending: PendingComment, body: String) {
         let body = body.trim();
         if body.is_empty() {
@@ -215,18 +217,26 @@ impl App {
             body: body.to_string(),
             author: self.comment_author.clone(),
             created: crate::state::now_unix(),
-            reply_to: pending.reply_to,
+            reply_to: pending.reply_to.clone(),
             diff_hash: Some(format!("{:032x}", pending.diff_hash)),
         };
         let saved = self.comments.update(|store| store.add(comment));
         self.bump_comments();
-        self.set_status(match saved {
-            Ok(id) => format!(
+        match saved {
+            Ok(id) => self.set_status(format!(
                 "💬 Commented on {}:{}  (#{id})",
                 pending.file, pending.anchor.line
-            ),
-            Err(e) => format!("Couldn't save the comment: {e}"),
-        });
+            )),
+            Err(e) => {
+                self.composer = Some(Composer::new(PendingComment {
+                    draft: body.to_string(),
+                    ..pending
+                }));
+                // Not `set_status`: the reason stays up while the note does.
+                self.status = Some(format!("Couldn't save the comment: {e}"));
+                self.status_deadline = None;
+            }
+        }
     }
 }
 
@@ -239,6 +249,7 @@ mod tests {
     use crate::app::test_support::{app_with, file_with_raw, seed_text};
     use crate::app::{App, Focus};
     use crate::comment::CommentStore;
+    use crate::testing::TempDir;
 
     /// An app with comments on, that diff rendered, and the cursor on a
     /// commentable line — the state `c` is pressed from.
@@ -277,6 +288,92 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].body, "no backoff\nhere");
         assert_eq!(saved[0].line, 1, "anchored to the cursor's line");
+    }
+
+    /// A save the store refuses hands the note back: the composer reopens with
+    /// every line typed, the status says why, and a save that works later
+    /// stores it. Covers both refusals: a store that won't parse, and a lock
+    /// that can't be taken.
+    #[test]
+    fn a_failed_save_reopens_the_composer_with_the_text() {
+        for broken in ["unparseable", "unlockable"] {
+            let dir = TempDir::new("composer-fail");
+            let path = dir.join("scope.json");
+            match broken {
+                "unparseable" => std::fs::write(&path, "{ half a store").unwrap(),
+                // A directory where the lock file goes can't be opened to lock.
+                _ => std::fs::create_dir(dir.join(".lock")).unwrap(),
+            }
+            let mut app = app_ready_to_comment();
+            app.install_comments_for_test(CommentStore::with_path(path.clone()));
+
+            app.press_for_test(KeyCode::Char('c'), false);
+            type_into(&mut app, "first line");
+            app.press_mods_for_test(KeyCode::Enter, KeyModifiers::SHIFT);
+            type_into(&mut app, "second");
+            app.press_for_test(KeyCode::Enter, false);
+
+            let composer = app.composer.as_ref().expect("the note is handed back");
+            assert_eq!(composer.body(), "first line\nsecond", "{broken}");
+            assert_eq!(composer.pending.anchor.line, 1, "on the same line");
+            let status = app.status.clone().unwrap_or_default();
+            assert!(status.starts_with("Couldn't save the comment"), "{status}");
+            assert!(app.comments.all().is_empty());
+
+            // The cursor sits at the end, so typing carries on the note.
+            type_into(&mut app, ", more");
+            // Once the store is fixed, the same Enter stores it.
+            match broken {
+                "unparseable" => std::fs::remove_file(&path).unwrap(),
+                _ => std::fs::remove_dir(dir.join(".lock")).unwrap(),
+            }
+            app.press_for_test(KeyCode::Enter, false);
+            assert!(app.composer.is_none(), "{broken}");
+            assert_eq!(app.comments.all()[0].body, "first line\nsecond, more");
+        }
+    }
+
+    /// The same for a note written in `$EDITOR`: it comes back in the composer.
+    #[test]
+    fn a_failed_save_from_the_editor_keeps_the_text_too() {
+        let dir = TempDir::new("composer-fail-editor");
+        let path = dir.join("scope.json");
+        std::fs::write(&path, "{ half a store").unwrap();
+        let mut app = app_ready_to_comment();
+        app.install_comments_for_test(CommentStore::with_path(path.clone()));
+        app.press_for_test(KeyCode::Char('c'), false);
+        app.press_for_test(KeyCode::Char('o'), true);
+        let pending = app.pending_comment.take().expect("handed to the editor");
+
+        app.save_composed(pending, "written in the editor".to_string());
+        let composer = app.composer.as_ref().expect("the note is handed back");
+        assert_eq!(composer.body(), "written in the editor");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ half a store");
+    }
+
+    /// A delete the store refuses deletes nothing, and says so.
+    #[test]
+    fn a_failed_delete_keeps_the_comment() {
+        let dir = TempDir::new("composer-fail-delete");
+        let path = dir.join("scope.json");
+        let mut app = app_ready_to_comment();
+        app.install_comments_for_test(CommentStore::with_path(path.clone()));
+        app.press_for_test(KeyCode::Char('c'), false);
+        type_into(&mut app, "keep me");
+        app.press_for_test(KeyCode::Enter, false);
+        let id = app.comments.all()[0].id.clone();
+
+        // The save left a lock file; a directory in its place can't be locked.
+        std::fs::remove_file(dir.join(".lock")).unwrap();
+        std::fs::create_dir(dir.join(".lock")).unwrap();
+        app.confirm_delete = Some(id.clone());
+        app.answer_delete(KeyCode::Char('y'));
+        let status = app.status.clone().unwrap_or_default();
+        assert!(status.starts_with("Couldn't delete"), "{status}");
+        assert_eq!(app.comments.all().len(), 1, "still in memory");
+        let mut fresh = CommentStore::with_path(path);
+        fresh.reload();
+        assert_eq!(fresh.get(&id).map(|c| c.body.as_str()), Some("keep me"));
     }
 
     /// Terminals that don't report Shift on Enter still need a way to break a
