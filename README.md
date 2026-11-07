@@ -4,414 +4,130 @@ A git diff pager with a GitHub-style file tree.
 
 > 🤖 **Built with AI.** riffnav — its code, tests, and docs — was written with AI assistance
 
-`riffnav` reads a unified diff on stdin and shows it in a terminal UI: a navigable
-file tree on the left, the syntax-highlighted diff on the right. It's a Rust take
-on [diffnav][diffnav].
+riffnav shows a diff in a terminal UI: a file tree on the left, the
+syntax-highlighted diff on the right. It's a Rust take on [diffnav][diffnav].
 
 ![riffnav demo](demo.gif)
 
-## Requirements
-
-- A **[Nerd Font][nerdfonts]** for filetype icons (optional). No Nerd Font? Press
-  `i` to cycle to `unicode` or `ascii` icons, or set `icon_style` in the config.
-
 ## Install
 
-With the Rust toolchain (`cargo`):
-
 ```sh
-# From a local checkout:
-cargo install --path .
-
-# Or straight from the repository:
-cargo install --git https://github.com/ollipa/riffnav
+cargo install riffnav
 ```
 
-This puts the `riffnav` binary in `~/.cargo/bin` (make sure that's on your `PATH`).
+A [Nerd Font][nerdfonts] is used for file icons. Without one, press `i` to switch
+to `unicode` or `ascii` icons, or set `icon_style` in the config.
 
 ## Usage
 
-Use `riffnav diff` and `riffnav show` wherever you'd type `git diff` and
-`git show` — same arguments, rendered in the TUI:
+`riffnav diff` and `riffnav show` take the same arguments as `git diff` and
+`git show`:
 
 ```sh
-riffnav diff                  # unstaged changes, like `git diff`
-                              # (steps on to a fuller view when that's empty)
-riffnav diff --staged         # staged changes
-riffnav diff HEAD~3           # any revision(s) git accepts
-riffnav diff -- src/          # scoped to a pathspec
-riffnav show                  # the last commit, like `git show`
+riffnav diff              # unstaged changes
+riffnav diff --staged
+riffnav diff HEAD~3 -- src/
+riffnav show              # the last commit
 riffnav show <commit>
 ```
 
-See [Diff views](#diff-views) for the flags that pick a view, and how the
-argument pass-through works.
-
-Or pipe any unified diff in, which is what makes riffnav usable as git's pager:
+Or pipe in any unified diff:
 
 ```sh
 git diff | riffnav
-git show <commit> | riffnav
 ```
 
-A merge reads the way git shows it, as a combined diff: only the lines that differ
-from every parent, which is also what `riffnav diff` shows during a merge conflict.
-Rows are simply removed, added or context, whichever parents they came from. The
-old line number follows the first parent, so a line only another parent had has
-none. A clean merge has no such lines, so it opens nothing; to read what it brought
-in, use `riffnav show --first-parent <merge>`. A conflict git can't diff, such as a
-file one side deleted and the other modified, is listed as `U` with how the merge
-left it (`unmerged: a.txt (deleted by them)`).
-
-### Use it as git's pager
+To use riffnav as git's pager for `git diff` and `git show`:
 
 ```sh
 git config --global pager.diff riffnav
 git config --global pager.show riffnav
 ```
 
-Now `git diff` and `git show` open in riffnav. (Setting `core.pager` also works,
-but scoping to `diff`/`show` avoids sending `git log` through it.) This is
-independent of `riffnav diff` — riffnav disables the pager for its own git calls,
-so the two can't loop.
+### Diff views
 
-riffnav starts in unified view unless `side_by_side` is set in the config; pick a
-layout for one run with `-s` (side-by-side) or `-u` (unified).
+```sh
+riffnav diff                    # unstaged, plus untracked files
+riffnav diff --staged           # staged
+riffnav diff --all-uncommitted  # staged + unstaged + untracked, vs HEAD
+riffnav diff --vs-base          # branch vs base (`<base>...HEAD`), the PR view
+riffnav diff --all              # the branch's commits plus all uncommitted work
+```
 
-## Keybindings
+When there are no unstaged changes, a plain `riffnav diff` falls back to the
+narrowest view that shows something. Press `d` to cycle views, or `1`–`5` to jump
+to one. The base branch is detected from `origin/HEAD` or a local `main`/`master`;
+set it with `--base <ref>` or `base_branch`.
+
+Passing your own git arguments turns off view cycling and untracked files.
+Arguments that suppress the diff, such as `--stat` or `--name-only`, leave nothing
+to show.
+
+## Keys
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` (or `↑` / `↓`) | Move selection (tree) / move the line cursor (diff), per focus |
-| `n` / `p` (or `N`) | Next / previous file; during a [search](#searching-the-diff), `n` / `N` step through matches and `p` stays previous file |
-| `J` / `K` | Next / previous [change](#moving-between-changes), across files |
-| `Ctrl-d` / `Ctrl-u` | Scroll diff half a page |
-| `PgDn` / `PgUp` | Page down / up (scroll diff or move tree, per focus) |
-| `Space` / `b` | Page the diff down / up (diff focus) |
-| `g` / `G` | Top / bottom of the diff |
-| `Enter` | Expand / collapse the selected folder |
-| `Tab` | Switch focus between tree and diff |
-| `←` / `→` | Focus the tree / the diff |
-| `/` | [Search](#searching-the-diff) the text of the whole diff |
+| `j` / `k` | Move in the tree or the diff |
+| `n` / `p` | Next / previous file |
+| `J` / `K` | Next / previous change, across files |
+| `Ctrl-d` / `Ctrl-u`, `Space` / `b` | Half page / page |
+| `g` / `G` | Top / bottom |
+| `Tab`, `←` / `→` | Switch focus between tree and diff |
+| `Enter` | Expand / collapse folder |
+| `/` | Search the whole diff; `n` / `N` step through matches |
 | `t` | Fuzzy-find a file |
 | `s` | Toggle side-by-side / unified |
 | `e` | Toggle the file tree |
-| `i` | Cycle icon style (nerd → unicode → ascii) |
-| `T` | Switch diff theme (github-dark ↔ github-light) |
-| `y` | Copy the selected file's path |
-| `v` / `V` | Mark the file viewed / jump to the next unviewed file |
-| `d` | Cycle the diff view — all → all-uncommitted → staged → unstaged → branch-vs-base (only for a plain [`riffnav diff`](#diff-views)) |
-| `1`–`5` | Jump straight to one of those five [views](#diff-views), in that order |
-| `r` | Re-read the diff, picking up changes made since (not for a diff piped in) |
-| `+` / `-` | Show more / fewer context lines around each change, never fewer than git's default (not for a diff piped in) |
-| `o` | Open the selected file in `$EDITOR` |
-| `c` | [Comment](#review-comments) on the cursor's line, or reply when it's inside a thread |
-| `x` | Delete the comment under the cursor, and its replies (asks first) |
-| `]` / `[` | Jump to the next / previous comment, across files |
-| `m` | Jump to the other end of a moved or copied line, across files; press again to come back. See [moved and copied code](#moved-and-copied-code) |
-| `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
-| `W` | Open the branch's pull request diff in the browser (GitHub, with `gh` installed) |
-| `?` | Toggle the help overlay |
-| `q` / `Esc` / `Ctrl-c` | Quit (`Esc` clears a search first) |
+| `i` / `T` | Cycle icon style / switch theme |
+| `y` | Copy the file's path |
+| `v` / `V` | Mark viewed / next unviewed file |
+| `d`, `1`–`5` | Cycle / pick the diff view |
+| `r` | Reload the diff |
+| `+` / `-` | More / less context |
+| `o` | Open the file in `$EDITOR` |
+| `c` / `x` | Comment or reply / delete a comment |
+| `]` / `[` | Next / previous comment |
+| `m` | Jump to the other end of a moved or copied line |
+| `z` | Zoom riffnav's pane (in [herdr](#herdr)) |
+| `W` | Open the branch's pull request in the browser (needs `gh`) |
+| `?` | Help |
+| `q` / `Esc` | Quit |
 
-## Moved and copied code
+## Features
 
-Code that moved, within a file or between files, is drawn muted with a note saying
-where it went, rather than as a removal and an unrelated addition. An added block
-that duplicates code that's still there keeps its added colors and gets a
-`≡ copied from path:line` note. `detect_moves` and `detect_copies` turn each off.
+- **Moved and copied code.** Moved code is muted with a note saying where it
+  went. Added code that duplicates existing code gets a `≡ copied from` note.
+  `m` jumps between the two ends.
+- **Viewed marks.** `v` marks a file viewed, like GitHub's checkbox. Marks are
+  kept per repository and branch, and a file reverts to unviewed when it changes.
+- **Review comments.** `c` leaves a note on a line. `Ctrl-O` moves a long note
+  into `$EDITOR`.
+- **Correct colors mid-file.** When riffnav runs git itself, it reads the full
+  file, so a hunk inside a block comment or string is colored correctly.
 
-`m` on such a line jumps to its other end, across files, and pressing it again comes
-back. On a side-by-side row with an end on each side, the new side goes first and
-further presses take turns, with the status line saying which (`Moved line 1 of 2`).
-A copy's source that isn't in the diff is named in the status line.
+### Comments from an agent
 
-## Moving between changes
+`riffnav comment` lets an agent read and write the same comments. They show up
+in an open riffnav window right away.
 
-`J` and `K` step through the changes in the diff, so reading a long file doesn't
-mean paging through context. A change is one unbroken run of added, removed or
-moved lines, so a hunk can hold several. `J` goes to the first line of the next
-one and `K` to the first line of the one before; inside a change, `K` goes to the
-start of that change first. The line cursor goes with them, so `c` and `m` act on
-that line.
+```sh
+riffnav comment context    # files and lines that can be commented on
+riffnav comment add --file src/app.rs --new-line 103 --body "No backoff here."
+riffnav comment list --json
+```
 
-Past the last change in a file they carry on into the next file with one, opening
-its folder if it's collapsed, and at the ends of the diff they wrap and say so.
-Files with no text changes are skipped. In the tree they act on the diff and move
-focus there.
-
-## Searching the diff
-
-Press `/` to search the code of every file in the diff, not just the one on
-screen. Matches show as you type, the view follows the first one at or after
-the cursor, and the footer counts them (`3/17`). `Enter` keeps the search; `Esc`
-cancels it and puts the view back.
-
-While a search is in force, `n` and `N` step to the next and previous match, like
-in `less` and vim, and the line cursor goes with them, so `c` and `m` act on that
-line. Past the last match in a file they carry on into the next file with one,
-opening its folder if it's collapsed, and at the ends of the diff they wrap and
-say so. `Esc` clears the search, and `n` goes back to meaning next file.
-
-The query is plain text, not a regular expression. A query in lower case ignores
-case, and any capital makes it exact. It's matched within a line against the code
-on both sides of the diff, tabs as tabs. File names (`t` finds those), hunk
-headers, comments and the notes riffnav adds aren't searched. Side by side, an
-unchanged line appears in both panels but counts as one match.
+`riffnav skill` prints a skill that teaches an agent these commands.
 
 ## Configuration
 
-riffnav reads `$XDG_CONFIG_HOME/riffnav/config.toml` (or
-`~/.config/riffnav/config.toml`); override with `--config <FILE>`. Every key is
-optional. Settings resolve as **defaults < config file < CLI flags**.
+riffnav reads `~/.config/riffnav/config.toml` (or `$XDG_CONFIG_HOME`), or a file
+given with `--config`. See [`config.example.toml`](config.example.toml) for every
+option.
 
-```toml
-# ~/.config/riffnav/config.toml
-side_by_side = false     # start in side-by-side view
-icon_style   = "nerd"    # nerd | unicode | ascii
-diff_theme   = "github-dark" # github-dark | github-light
-tab_width    = 4         # columns between tab stops in the diff
-detect_moves = true      # mute code that moved and say where it went
-detect_copies = true     # note added code that duplicates code that's still there
-tree_width   = 32        # columns for the file-tree pane
-show_tree    = true
-start_focus  = "diff"    # "diff": open in the first file (n/p between files) | "tree"
-show_header  = true
-show_footer  = true
-open_depth   = 64        # expand folders shallower than this on launch
-review_retention_days = 90 # days to keep "viewed" marks before GC
-review_auto_advance = true # jump to next unviewed file after marking viewed
-review_sync_github = false # push "viewed" marks to the matching GitHub PR (needs `gh`)
-# base_branch = "main"     # base for the base-relative views; omit to auto-detect
-# diff_source = "all"      # default view: all|all-uncommitted|staged|unstaged|vs-base
-show_comments = true     # show review comments, and the keys that write them
-comment_retention_days = 90 # days to keep comments before GC
-# comment_author = "me"    # author of comments written here; omit for $USER
-```
+## herdr
 
-See [`config.example.toml`](config.example.toml) for the annotated version.
-
-## Reviewing changes
-
-Press `v` to mark the selected file **viewed** — it gets a green `✓` and dims in
-the tree — and `V` to jump to the next unviewed file. Marking viewed also
-advances to the next unviewed file by default (`review_auto_advance`), so review
-flows file-to-file. The header shows your progress (`✓ 3/8 viewed`).
-
-Viewed marks persist across runs, scoped per repository **and** branch (like
-GitHub's per-PR "Viewed" checkbox), and are keyed on the *content* of each
-change: edit a file you'd marked viewed and it reverts to unviewed automatically,
-just as GitHub un-ticks a file the author pushes to. State lives under
-`$XDG_STATE_HOME/riffnav/viewed/` and is garbage-collected by age
-(`review_retention_days`, default 90). Outside a git repo (e.g. an arbitrary diff
-piped in) marking still works for the session but isn't persisted.
-
-## Review comments
-
-Leave notes on a line of the diff, and read notes an AI agent left for you.
-
-Press `c` to comment on the line under the cursor. A field opens right where the
-note will live — type into it, `Enter` to save, `Esc` to discard. It takes the
-usual editing keys (`Shift-Enter` for a new line, `Ctrl-W` / `Ctrl-U` to rub out
-a word or the line, `Ctrl-A` / `Ctrl-E` for its ends), and `Ctrl-O` moves what
-you've typed into `$EDITOR` when a note outgrows the field — a git-commit-style
-buffer, where you type above the scissors line and save empty to abort.
-
-`Shift-Enter` needs a terminal that speaks the kitty keyboard protocol (kitty,
-ghostty, WezTerm, foot, recent Alacritty); elsewhere use `Alt-Enter` for a new
-line. `Ctrl-S` still saves in either case.
-
-Press `c` inside an existing thread — where `]` / `[` leave the cursor — and it
-replies to the comment you're on instead; there's no separate reply key. `x`
-deletes the comment under the cursor along with the replies beneath it, after a
-`y/N` question in the footer — there's no undo, so the next key has to be `y`.
-Saved notes are drawn as a box under the line they annotate, with each reply on
-a divider inside it. Files carrying comments show a `💬` count in the tree.
-
-`]` / `[` walk every note in the diff, not just the open file's: past the last
-one they carry on into the next file that has comments — opening its folder if
-the tree had it collapsed — and lap back to the start at the end.
-
-Your own name — `comment_author`, or `$USER` — is drawn in the box's own color;
-every other author gets one picked from a palette by hashing the name, so an
-agent (or a second reviewer) keeps the same color everywhere and a thread can be
-read by who is speaking.
-
-### Letting an agent comment
-
-The `riffnav comment` subcommands are the agent-facing half. They're ordinary
-non-interactive commands that read and write the same store the running window
-watches — so a note written in another terminal appears on screen within a
-moment, and works just as well with no window open.
-
-```sh
-riffnav comment context                # files and the line ranges you can anchor to
-riffnav comment add --file src/app.rs --new-line 103 --body "No backoff here."
-riffnav comment list --json            # read back what the user wrote
-```
-
-Point your agent at the bundled skill, which teaches it the above:
-
-```sh
-riffnav skill            # print it
-riffnav skill --path     # write it out and print the path
-```
-
-Anchors are validated before anything is written: naming a file that isn't in
-the diff, or a line outside every hunk, fails with the ranges that *would* have
-worked. Several notes at once go through one batch, which is validated whole so
-a typo can't half-apply:
-
-```sh
-printf '%s' '{"comments":[
-  {"file":"src/app.rs","newLine":103,"body":"No backoff here."},
-  {"file":"README.md","newLine":12,"body":"Stale: the flag is now --diff."}
-]}' | riffnav comment apply --stdin
-```
-
-There's no daemon and no port — just a JSON file under
-`$XDG_STATE_HOME/riffnav/comments/`, scoped per repository and branch like
-viewed marks, and garbage-collected by age (`comment_retention_days`). Every
-write locks it and re-reads it first, so the window and any number of agents can
-write at once without losing each other's notes. A comment
-whose code has changed since it was written is flagged rather than silently
-sliding onto a different line.
-
-## Diff views
-
-`riffnav diff` shows unstaged work by default, like `git diff`. Flags pick one
-of the other views:
-
-```sh
-riffnav diff                    # unstaged — `git diff`, plus untracked files
-riffnav diff --staged           # staged — `git diff --staged`
-riffnav diff --all-uncommitted  # staged + unstaged + untracked, vs HEAD
-riffnav diff --vs-base          # branch vs base — `git diff <base>...HEAD`, the PR view
-riffnav diff --all              # everything since the branch forked: its commits
-                                # plus all of the above
-riffnav diff --base develop --vs-base   # against a specific base branch
-```
-
-`--all` is the only view that spans the last commit: it diffs the working tree
-against the point where your branch forked, so the branch's commits and the work
-you haven't committed yet appear together. It's the view to reach for mid-branch,
-when what you want to read is "everything I've done here" and you don't much care
-which side of a commit each piece landed on.
-
-When the default comes back empty — a clean tree, where `git diff` has nothing to
-say — a bare `riffnav diff` steps on to the narrowest view that still shows
-everything there is: `--all` when you have both commits and uncommitted work,
-otherwise whichever of the two has anything, so opening riffnav on a committed
-branch shows the branch. A view you named yourself is shown as asked, empty or
-not: `riffnav diff --unstaged` on a clean tree correctly reports no changes.
-
-The three views that reach the working tree (`riffnav diff`, `--all-uncommitted`
-and `--all`) also list untracked, non-ignored files, rendered as fully added —
-`git diff` omits them by design, which would leave a brand-new file invisible
-until you staged it. That's the one way they differ from the git command they
-shadow.
-
-Press `d` to cycle between the five views without restarting, or `1`–`5` to jump
-straight to one (in the order listed by `?`, widest first: all, all uncommitted,
-staged, unstaged, branch vs base). `r` re-reads the diff — commits, stages, and
-edits made since you opened riffnav show up without losing your place in the file
-you're reading.
-
-The base branch for `--all` and `--vs-base` is auto-detected from `origin/HEAD` and a local
-`main`/`master`, picking whichever branched off your current branch more
-recently — so commits you already merged into a local `main` aren't counted as
-your branch's work. Set it explicitly with `--base <ref>` or the `base_branch`
-config key, and change the default view with the `diff_source` config key.
-
-### Passing arguments through to git
-
-Anything else you write after `riffnav diff` or `riffnav show` goes to git
-verbatim, so the commands stand in for their git counterparts:
-
-```sh
-riffnav diff main...HEAD
-riffnav diff -w -- src/
-riffnav show HEAD~2 -- src/
-```
-
-Three things switch off once you pass your own arguments, because riffnav can no
-longer tell a revision from a pathspec: the `d` view cycle (there is nothing to
-cycle through), folding untracked files in, and a `diff_source` set in the config
-file (your revision is the one that counts). `r` still refreshes.
-
-riffnav needs a real unified diff to build its tree from, so arguments that
-suppress one — `--stat`, `--name-only`, `--summary` and friends — leave it with
-nothing to show.
-
-## herdr integration
-
-When riffnav runs inside [herdr](https://herdr.dev), the `z` key toggles **zoom**
-on riffnav's pane — maximizing it to fill the window, or restoring it. Closing
-riffnav undoes a zoom it made, but leaves one you made yourself. Elsewhere the key
-does nothing and isn't shown in the footer or help.
-
-- **The herdr terminal multiplexer** is detected via `HERDR_ENV=1`. riffnav talks
-  to its [socket API][herdr-socket] over its Unix control socket (found via
-  `HERDR_SOCKET_PATH` / `HERDR_SESSION`, or the default session socket).
-- **The Herdr desktop app** is detected via `HC_TERMINAL_ID`, when `herdr-app` is
-  installed and a running window shows riffnav's terminal. riffnav checks this at
-  startup, so a terminal that was headless then needs riffnav restarted. It finds
-  its pane with `herdr-app ls`, toggles with `herdr-app do pane.zoom`, and reads
-  the result from the app's `view.json`.
-
-## How it works
-
-A unified diff — from `git diff`/`git show` run by riffnav, or piped in on stdin
-— is split per file (`diff --git`, or `diff --cc` for a merge) into a tree. On selection the file's hunks
-become rows, highlighted with [syntect][syntect] and marked token by token where a
-line was edited, so `==` becoming `!=` or `sum(a)` becoming `total(b)` reads as one
-change. Removed and added lines are matched across the whole diff to find
-blocks that moved, then everything is drawn with [ratatui][ratatui] and cached per
-file/width/layout/theme. Because stdin may itself be the diff, key input is read
-from `/dev/tty`.
-
-Copied code keeps its added colors, since a pasted function is a reason to look
-harder rather than less. Lines are compared ignoring whitespace, a block that could
-be a move is one, and a note is meant to be rare: it takes four rare lines of real
-code, so license headers, imports, fields, match arms, tests, fixtures and generated
-files stay quiet. The source can be context in the diff, an unchanged line of a file
-in the diff, or, when riffnav ran git and knows the tree behind the diff, a file the
-diff doesn't touch. For those a few of the rarest lines go to one `git grep`, stopped
-after two seconds, and only the files it names are read. This all happens on its own
-thread after the first frame is drawn: a note that arrives late leaves the cursor and
-the view on the same code. A diff over 100,000 changed lines is skipped, and no more
-than 32 MiB of blobs are read for one diff.
-
-The lines between hunks aren't in a diff, so a hunk that opens inside a block
-comment or a multi-line string can't be colored from the diff alone. When riffnav
-ran git itself it reads the file's old blob and applies the hunks to it, parsing
-each side down to each hunk as the first step of rendering the file. A diff piped
-in, or a blob that's missing, over the size limit or isn't the text shown (a
-`textconv` diff), starts each hunk afresh.
-
-A file's language comes from its name or extension, or else from a `#!` or
-`-*- mode: -*-` first line. When the diff doesn't show that line, as for a change
-far down `bin/deploy`, the same blob read supplies it, so a script with no
-extension is colored whichever of its lines changed.
-
-Rendering happens off the UI thread, so a big file never holds up a key. A frame
-waits up to 25ms for a render, which covers most files. A slower file shows its
-text without syntax colors, already in its final layout, until the real render
-replaces it, and one too big to color shows `rendering…` until it's done. A key
-that needs the render, such as `j` or `G`, acts when it lands, in the order
-pressed, while `n`, `p` and `q` act at once. With the file on screen done, the
-file the last move would reach if made again is rendered ahead of time: the next
-in the tree for `n` and `p`, the next with a change for `J` and `K`, the next
-unviewed for `v` and `V`, the next with a match or a comment while stepping
-through those, and after it the file `m` would jump to from the cursor's line.
-Work for a file that's no longer wanted is dropped. The cache keeps roughly 256 MB
-of renders.
-
-Comments anchor to a *diff line*, never a screen row, so they stay put across a
-resize, a theme switch, or a unified/side-by-side toggle. Each rendered row keeps
-the line numbers it came from, so a comment always finds its place. The view goes
-by them too: a new width or layout keeps the line at the top of the pane at the
-top, and the line cursor on its line.
+Inside [herdr](https://herdr.dev), the terminal multiplexer or the desktop app,
+`z` toggles zoom on riffnav's pane. Quitting undoes a zoom riffnav made.
 
 ## License
 
@@ -419,6 +135,3 @@ MIT
 
 [diffnav]: https://github.com/dlvhdr/diffnav
 [nerdfonts]: https://www.nerdfonts.com/
-[ratatui]: https://ratatui.rs/
-[syntect]: https://github.com/trishume/syntect
-[herdr-socket]: https://herdr.dev/docs/socket-api/
