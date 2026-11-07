@@ -75,13 +75,20 @@ struct Entry {
     failure: Option<String>,
 }
 
+/// Which queue a job goes on: a prefetch is idle, and anything for the screen
+/// comes before it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Priority {
+    Urgent,
+    Idle,
+}
+
 /// A job that's wanted. One that isn't in the list has had its result given up on.
 struct Running {
     id: u64,
     key: Key,
     cancelled: Arc<AtomicBool>,
-    /// A prefetch, which anything for the screen comes before.
-    idle: bool,
+    priority: Priority,
     started: Instant,
     /// The [`RenderCache::copies_rev`] it's working from.
     copies_rev: u64,
@@ -303,7 +310,8 @@ impl RenderCache {
             return false;
         };
         let job = &self.running[at];
-        let (key, copies_rev, idle) = (job.key, job.copies_rev, job.idle);
+        let (key, copies_rev) = (job.key, job.copies_rev);
+        let idle = job.priority == Priority::Idle;
         // A prefetch keeps what it makes only where there's room for it.
         let spare = if idle { self.left } else { None };
         let roomy = |cache: &Self, made: &Made| !idle || cache.room_for(key, made);
@@ -456,7 +464,7 @@ impl RenderCache {
     /// Give up on what's being rendered for the screen, which has nothing to show.
     pub fn release(&mut self) {
         self.left = self.shown.take().or(self.left);
-        self.cancel(|job| !job.idle);
+        self.cancel(|job| job.priority == Priority::Urgent);
     }
 
     /// Work out what moved across `files`, and drop the render of any file that
@@ -584,14 +592,14 @@ impl RenderCache {
         self.prefetched.remove(&key);
         self.clock += 1;
         self.collect();
-        self.cancel(|job| !job.idle && job.key != key);
+        self.cancel(|job| job.priority == Priority::Urgent && job.key != key);
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.used = self.clock;
         }
         loop {
             match self.need(&key, request) {
                 Need::Nothing => return,
-                Need::Render => self.start_render(key, request, false),
+                Need::Render => self.start_render(key, request, Priority::Urgent),
                 Need::Splice(origin) => self.start_splice(key, origin, request),
             }
             if !self.wait_for(&key) {
@@ -620,16 +628,16 @@ impl RenderCache {
         };
         if !matches!(need, Need::Nothing) {
             // The screen comes first, unless it's after the prefetch's own file.
-            self.cancel(|job| job.idle && job.key != *key);
+            self.cancel(|job| job.priority == Priority::Idle && job.key != *key);
         }
         need
     }
 
-    fn start_render(&mut self, key: Key, request: &Request<'_>, idle: bool) {
+    fn start_render(&mut self, key: Key, request: &Request<'_>, priority: Priority) {
         if let Some(job) = self.running.iter_mut().find(|job| job.key == key) {
             // Already on it, which a prefetch may be. It's urgent now.
-            if job.idle && !idle {
-                job.idle = false;
+            if job.priority == Priority::Idle && priority == Priority::Urgent {
+                job.priority = Priority::Urgent;
                 job.started = Instant::now();
             }
             return;
@@ -645,11 +653,10 @@ impl RenderCache {
             #[cfg(test)]
             test: self.test.clone(),
         };
-        let ticket = self.ticket(key, idle);
-        if idle {
-            self.jobs.idle(move || spec.run(&ticket));
-        } else {
-            self.jobs.urgent(move || spec.run(&ticket));
+        let ticket = self.ticket(key, priority);
+        match priority {
+            Priority::Urgent => self.jobs.urgent(move || spec.run(&ticket)),
+            Priority::Idle => self.jobs.idle(move || spec.run(&ticket)),
         }
     }
 
@@ -658,12 +665,12 @@ impl RenderCache {
             return; // It lands at a revision that's looked at again then.
         }
         let comments = request.comments.owned();
-        let ticket = self.ticket(key, false);
+        let ticket = self.ticket(key, Priority::Urgent);
         self.jobs
             .urgent(move || splice_again(origin, &comments, &key, &ticket));
     }
 
-    fn ticket(&mut self, key: Key, idle: bool) -> Ticket {
+    fn ticket(&mut self, key: Key, priority: Priority) -> Ticket {
         let id = self.next_id;
         self.next_id += 1;
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -671,7 +678,7 @@ impl RenderCache {
             id,
             key,
             cancelled: cancelled.clone(),
-            idle,
+            priority,
             started: Instant::now(),
             copies_rev: self.copies_rev,
         });
@@ -709,7 +716,7 @@ impl RenderCache {
             return Prefetch::Stopped;
         }
         let key = request.key();
-        self.cancel(|job| job.idle && job.key != key);
+        self.cancel(|job| job.priority == Priority::Idle && job.key != key);
         if self.entries.get(&key).is_some_and(|entry| !entry.preview) {
             Prefetch::Ready
         } else if self.running.iter().any(|job| job.key == key) {
@@ -717,7 +724,7 @@ impl RenderCache {
         } else if self.prefetched.contains(&key) || self.busy() {
             Prefetch::Stopped
         } else {
-            self.start_render(key, request, true);
+            self.start_render(key, request, Priority::Idle);
             Prefetch::Started
         }
     }
