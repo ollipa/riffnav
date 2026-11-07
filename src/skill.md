@@ -114,7 +114,8 @@ directory or branch) and act on the comments.
 - **no file `x` in this diff**: the path isn't in the changeset; the error lists
   what is.
 - **line N is not in ...'s diff**: the line isn't in a hunk. The error lists the
-  ranges and the diff in force. Re-run `context`; don't pick a nearby line.
+  ranges, names the diff in force, and says if it moved since earlier comments.
+  Re-run `context`; don't pick a nearby line.
 - **pass one of --new-line or --old-line**: exactly one, never both.
 - **a reply carries no anchor of its own**: drop `--file` and the line flags.
 - **no riffnav session and not inside a git repository**: run it from the repo.

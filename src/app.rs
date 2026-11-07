@@ -421,6 +421,7 @@ impl App {
         enable_mouse();
         enable_enhanced_keys();
         let result = self.event_loop(&mut terminal);
+        self.stop_sending(); // a notice left queued isn't typed after we're gone
         disable_enhanced_keys();
         disable_mouse();
         ratatui::restore();

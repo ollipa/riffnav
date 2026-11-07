@@ -51,6 +51,11 @@ impl App {
         self.outbox.delivery.is_some()
     }
 
+    /// Drop a notice still waiting, unsent: riffnav is quitting.
+    pub(super) fn stop_sending(&mut self) {
+        self.outbox.delivery = None;
+    }
+
     /// Note a comment written in this window, as news for the agent.
     pub(super) fn record_written(&mut self, id: String) {
         self.outbox.written.push(id);
@@ -139,15 +144,17 @@ impl App {
         };
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                picker.selected = (picker.selected + 1).min(picker.agents.len() - 1);
+                picker.selected = (picker.selected + 1).min(picker.agents.len().saturating_sub(1));
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 picker.selected = picker.selected.saturating_sub(1);
             }
             KeyCode::Enter => {
-                let agent = picker.agents[picker.selected].clone();
+                let agent = picker.agents.get(picker.selected).cloned();
                 self.outbox.picker = None;
-                self.start_delivery(agent);
+                if let Some(agent) = agent {
+                    self.start_delivery(agent);
+                }
             }
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.outbox.picker = None;
@@ -207,7 +214,7 @@ impl App {
         let msg = match progress {
             Progress::Waiting(_) => unreachable!("handled above"),
             Progress::Sent => {
-                self.outbox.sent.extend(delivery.notice.ids);
+                self.outbox.sent.extend(delivery.notice.ids.iter().cloned());
                 format!("✉ Sent {n} {} to {label}", plural(n, "comment", "comments"))
             }
             Progress::Gone => {

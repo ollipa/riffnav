@@ -6,6 +6,8 @@
 //! agent is free, and reports how it's getting on over a channel.
 
 use std::ffi::{OsStr, OsString};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
@@ -53,25 +55,44 @@ impl Progress {
 }
 
 /// A notice on its way, in a thread of its own. Dropping it stops the thread
-/// at its next look, unsent.
+/// before it next looks or types, so a notice left behind by quitting never goes.
 pub struct Delivery {
     pub notice: Notice,
     progress: Receiver<Progress>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Delivery {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Delivery {
     pub(super) fn start(pane: AppPane, hc: OsString, notice: Notice) -> Self {
         let (sender, progress) = mpsc::channel();
-        let sent = notice.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (sent, stopped) = (notice.clone(), stop.clone());
         thread::spawn(move || {
-            deliver(&pane, &hc, &sent, POLL, |p| sender.send(p).is_ok());
+            deliver(&pane, &hc, &sent, POLL, &stopped, |p| {
+                sender.send(p).is_ok()
+            });
         });
-        Self { notice, progress }
+        Self {
+            notice,
+            progress,
+            stop,
+        }
     }
 
     #[cfg(test)]
     pub fn for_test(notice: Notice, progress: Receiver<Progress>) -> Self {
-        Self { notice, progress }
+        let stop = Arc::new(AtomicBool::new(false));
+        Self {
+            notice,
+            progress,
+            stop,
+        }
     }
 
     /// The latest news, if any, without blocking. A thread that died without a
@@ -96,17 +117,21 @@ impl Delivery {
     }
 }
 
-/// Wait for the agent to be free, then type the notice. Every look is reported,
-/// and a `false` from `report` (nobody listening) stops it.
+/// Wait for the agent to be free, then type the notice. Every look is reported.
+/// `stopped`, or a `false` from `report` (nobody listening), ends it unsent.
 fn deliver(
     pane: &AppPane,
     hc: &OsStr,
     notice: &Notice,
     poll: Duration,
+    stopped: &AtomicBool,
     mut report: impl FnMut(Progress) -> bool,
 ) {
     let mut misses = 0;
     loop {
+        if stopped.load(Ordering::Relaxed) {
+            return;
+        }
         let waiting = match pane.agent(&notice.terminal) {
             Err(e) => {
                 misses += 1;
@@ -124,6 +149,7 @@ fn deliver(
                 misses = 0;
                 agent.status
             }
+            Ok(Some(_)) if stopped.load(Ordering::Relaxed) => return,
             Ok(Some(_)) => {
                 misses = 0;
                 match send(hc, &notice.terminal, &notice.text) {
@@ -251,11 +277,18 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
         /// report. Returns every report.
         fn run(&self, mut step: impl FnMut(&Self, usize)) -> Vec<Progress> {
             let mut seen = Vec::new();
-            deliver(&self.pane, &self.hc, &Self::notice(), Duration::ZERO, |p| {
-                seen.push(p);
-                step(self, seen.len());
-                seen.len() < 20
-            });
+            deliver(
+                &self.pane,
+                &self.hc,
+                &Self::notice(),
+                Duration::ZERO,
+                &AtomicBool::new(false),
+                |p| {
+                    seen.push(p);
+                    step(self, seen.len());
+                    seen.len() < 20
+                },
+            );
             seen
         }
 
@@ -360,12 +393,37 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
             &fake.hc,
             &Fake::notice(),
             Duration::ZERO,
+            &AtomicBool::new(false),
             |_| {
                 looks += 1;
                 false
             },
         );
         assert_eq!(looks, 1);
+        assert_eq!(fake.sent(), "");
+    }
+
+    /// Quitting riffnav drops the delivery: a notice still waiting on a busy
+    /// agent must not be typed once that agent comes free.
+    #[test]
+    fn a_stopped_delivery_never_types() {
+        let fake = Fake::new("stopped", r#""working""#);
+        let stopped = AtomicBool::new(false);
+        let mut seen = Vec::new();
+        deliver(
+            &fake.pane,
+            &fake.hc,
+            &Fake::notice(),
+            Duration::ZERO,
+            &stopped,
+            |p| {
+                seen.push(p);
+                stopped.store(true, Ordering::Relaxed);
+                fake.set("ls.json", &ls(r#""idle""#));
+                seen.len() < 5
+            },
+        );
+        assert_eq!(seen, [Progress::Waiting("working".into())]);
         assert_eq!(fake.sent(), "");
     }
 
