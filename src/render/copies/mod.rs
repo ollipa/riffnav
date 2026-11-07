@@ -37,7 +37,7 @@ use self::corpus::{Corpus, Run, added_runs};
 use self::filter::extension;
 use self::matching::{Block, search};
 use self::sources::{Reading, add_diff_files, add_outside_files, rare_lines};
-use super::moves::{MoveIndex, Target};
+use super::moves::{MAX_CHANGED_LINES, MoveIndex, Target, lines_changed};
 use crate::autodiff::Tree;
 use crate::comment::store::{Anchor, Side};
 use crate::diff::{self, FileDiff, Row, path};
@@ -57,8 +57,6 @@ const MIN_LINE_ALNUM: usize = 8;
 const MAX_PLACES: usize = 4;
 /// Places a whole block may turn up in. Past this it's a pattern and not a copy.
 const MAX_BLOCK_PLACES: usize = 2;
-/// Changed lines in the whole diff past which detection is skipped.
-const MAX_CHANGED_LINES: u64 = 100_000;
 /// Blob bytes read for one diff, across every file.
 const MAX_BLOB_BYTES: usize = 32 << 20;
 /// A line this long is data, whatever it looks like.
@@ -155,11 +153,7 @@ pub struct Git {
 /// Whether a diff is small enough to look through, which is the check to make before
 /// going to the trouble of handing it to another thread.
 pub fn worth_trying(files: &[FileDiff]) -> bool {
-    let changed: u64 = files
-        .iter()
-        .map(|f| u64::from(f.additions) + u64::from(f.deletions))
-        .sum();
-    (1..=MAX_CHANGED_LINES).contains(&changed)
+    (1..=MAX_CHANGED_LINES).contains(&lines_changed(files))
 }
 
 /// Find what the diff copied. `None` if `cancelled` was set first.

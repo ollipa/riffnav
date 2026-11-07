@@ -27,8 +27,8 @@ const MIN_ANCHOR_ALNUM: usize = 5;
 /// How many added copies of a line it may have and still start a block. This bounds
 /// the pairs compared, and so the memory used, at this many per removed line.
 const MAX_COPIES: usize = 32;
-/// Changed lines in the whole diff past which detection is skipped.
-const MAX_CHANGED_LINES: u64 = 100_000;
+/// Changed lines in the whole diff past which move and copy detection are skipped.
+pub(super) const MAX_CHANGED_LINES: u64 = 100_000;
 /// The hint on a block that never left its place: re-indented, realigned, or
 /// given new line endings.
 const WHITESPACE_ONLY: &str = "whitespace only";
@@ -82,13 +82,17 @@ pub struct MoveIndex {
     files: Vec<FileMoves>,
 }
 
+/// The lines `files` add and remove between them.
+pub(super) fn lines_changed(files: &[FileDiff]) -> u64 {
+    files
+        .iter()
+        .map(|f| u64::from(f.additions) + u64::from(f.deletions))
+        .sum()
+}
+
 impl MoveIndex {
     pub fn build(files: &[FileDiff]) -> Self {
-        let changed: u64 = files
-            .iter()
-            .map(|f| u64::from(f.additions) + u64::from(f.deletions))
-            .sum();
-        if changed > MAX_CHANGED_LINES {
+        if lines_changed(files) > MAX_CHANGED_LINES {
             return Self::default();
         }
 
