@@ -5,15 +5,12 @@
 //! theme switch, a resize, or a unified/side-by-side toggle: the mapping to a
 //! screen row is derived at render time (see [`super::anchor`]) and thrown away.
 //!
-//! Scope, location and garbage collection are shared with the "viewed" marks —
-//! see [`crate::state`] — so comments live per repository and per branch under
-//! `$XDG_STATE_HOME/riffnav/comments/<repo>/<branch>.json`. Outside a git repo
-//! there's no stable scope, so the store degrades to session-only: comments
-//! still work, nothing persists.
+//! Scope, location and garbage collection are shared with the "viewed" marks (see
+//! [`crate::state`]). Outside a git repo the store is session-only: comments still
+//! work, nothing persists.
 //!
-//! Unlike hunk (which keeps notes in the running window's memory and loses them
-//! on exit), persisting to disk means `riffnav comment add` works with no window
-//! open and notes survive a restart.
+//! Persisting to disk means `riffnav comment add` works with no window open and
+//! notes survive a restart.
 
 use std::path::{Path, PathBuf};
 
@@ -176,7 +173,6 @@ impl CommentStore {
         self.comments.iter().find(|c| c.id == id)
     }
 
-    /// How many comments are anchored in `file`.
     pub fn count_for_file(&self, file: &str) -> usize {
         self.comments.iter().filter(|c| c.file == file).count()
     }
@@ -184,10 +180,9 @@ impl CommentStore {
     /// The comment a thread hangs from: `c` itself when it starts one, otherwise
     /// the furthest ancestor its `reply_to` chain reaches.
     ///
-    /// A thread is one conversation, so the root's anchor is the thread's — see
-    /// [`Self::threads`]. A reply whose parent isn't in the store at all is its
-    /// own root, which is what promotes an orphan instead of dropping it, and so
-    /// is one caught in a `reply_to` cycle a hand-edited file left behind.
+    /// The root's anchor is the thread's. A reply whose parent isn't in the store
+    /// is its own root, so an orphan is promoted rather than dropped; so is one
+    /// caught in a `reply_to` cycle a hand-edited file left behind.
     pub fn root_of<'a>(&'a self, c: &'a Comment) -> &'a Comment {
         let mut root = c;
         let mut seen = vec![root.id.as_str()];
@@ -202,21 +197,9 @@ impl CommentStore {
     }
 
     /// Comments on `file`, grouped by anchor and ordered for display: anchors in
-    /// line order, and within each anchor every root comment followed by the
-    /// thread beneath it, oldest first.
-    ///
-    /// Each comment is placed at *its thread's* anchor rather than its own. The
-    /// two can differ: a reply written after the file's diff shifted carries a
-    /// line of its own, and grouping on that would break it out of the thread
-    /// into a box that reads as an unrelated note. The parent's anchor wins.
-    ///
-    /// The walk under a root is depth-first, so a reply to a reply lands under
-    /// the note it answers instead of vanishing — `c` on a reply row, and
-    /// `comment add --reply-to <reply-id>`, both produce exactly that.
-    ///
-    /// A reply whose parent is missing (the parent was deleted) is promoted to a
-    /// root so the text is never silently dropped, and so is anything a hand-
-    /// edited file leaves unreachable.
+    /// line order, and within each anchor every root followed depth-first by its
+    /// thread, oldest first. Each comment sits at its thread's anchor (see
+    /// [`Self::root_of`]), so a reply stored on a shifted line stays in its thread.
     pub fn threads(&self, file: &str) -> Vec<(Anchor, Vec<&Comment>)> {
         // Resolve each comment's thread anchor once: `root_of` walks a chain, and
         // the grouping below would otherwise re-walk it for every anchor.
@@ -494,9 +477,8 @@ mod tests {
         assert_eq!(store.threads("f")[0].1.len(), 1);
     }
 
-    /// The diff moves while a review is under way — comment, fix, reply is the
-    /// normal loop — so a reply can carry a line its parent doesn't. It still
-    /// belongs to the conversation it answers, at the anchor that thread hangs on.
+    /// The diff moves during a review, so a reply can carry a line its parent
+    /// doesn't. It still renders at the anchor its thread hangs on.
     #[test]
     fn a_reply_stored_on_another_line_still_renders_inside_its_thread() {
         let mut store = CommentStore::disabled();

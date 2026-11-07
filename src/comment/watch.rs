@@ -1,19 +1,14 @@
 //! Noticing comments written by someone else.
 //!
 //! An agent leaving notes runs `riffnav comment add` in another terminal, which
-//! writes the same scope file this window reads. A `notify` watcher on that file's
-//! directory turns the write into a redraw, so notes appear without a keypress —
-//! no daemon, no port, nothing for an agent sandbox to block.
+//! writes the same scope file this window reads. A `notify` watcher turns the
+//! write into a redraw, so notes appear without a keypress.
 //!
-//! The *directory* is watched rather than the file itself: saves go through a
-//! temp-file-and-rename (see [`crate::state::write_atomic`]), which replaces the
-//! inode and would silently break a watch registered on the file.
-//!
-//! And the whole comments tree is watched rather than this scope's own
-//! directory, for the same reason one level up: a scope directory comes and goes
-//! under a running window — [`crate::state::sweep`] prunes an empty one, the
-//! next write recreates it — and a watch on a directory that was removed is dead
-//! for good, without saying so. The tree's root outlives all of that.
+//! The file itself isn't watched: saves go through a temp-file-and-rename (see
+//! [`crate::state::write_atomic`]), which replaces the inode and would silently
+//! break a watch on the file. Nor is its directory: [`crate::state::sweep`] can
+//! prune an empty one, and a watch on a removed directory is dead for good,
+//! without saying so. The whole comments tree's root outlives both.
 
 use std::path::Path;
 use std::sync::mpsc::{Receiver, channel};
@@ -32,9 +27,7 @@ impl CommentWatch {
     /// something else redraws.
     pub fn new(path: &Path) -> Option<Self> {
         // `<comments>/<repo>/<branch>.json`, so two levels up is the tree root.
-        // Neither directory need exist yet, and a watch on a missing path fails,
-        // so create the root up front — but not the scope directory, which is
-        // then free to appear and vanish inside a watch that outlives it.
+        // A watch on a missing path fails, so create the root up front.
         let root = path.parent()?.parent()?;
         std::fs::create_dir_all(root).ok()?;
 
@@ -92,11 +85,7 @@ mod tests {
         false
     }
 
-    /// The scope directory a window watches is not permanent: it holds no file
-    /// until the first comment lands, and any `riffnav comment` run sweeps an
-    /// empty one away. A watch registered on that directory dies with it — for
-    /// good, and silently — so the first note an agent wrote would never appear,
-    /// which is what watching the tree's root instead is for.
+    /// A watch on the scope directory would die silently when a sweep removes it.
     #[test]
     fn a_note_written_after_the_scope_directory_was_swept_still_wakes_the_watch() {
         let root = TempDir::new("watch");

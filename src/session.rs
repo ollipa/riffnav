@@ -7,10 +7,8 @@
 //! parsed file and hunk structure to a small JSON file, and the CLI reads it to
 //! answer "does this file exist, and is line 103 actually in it?".
 //!
-//! This is deliberately *not* a daemon. hunk solves the same problem with a
-//! loopback HTTP broker on a fixed port, which its own docs then have to explain
-//! how to unblock inside an agent sandbox. A file needs no port, no process, and
-//! survives the window closing.
+//! A file rather than a daemon: it needs no port for an agent's sandbox to block,
+//! no process, and survives the window closing.
 //!
 //! Scoped per repo and branch like the other state (see [`crate::state`]), so two
 //! windows on the same branch share one entry — they're showing the same diff.

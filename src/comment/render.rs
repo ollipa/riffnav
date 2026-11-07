@@ -6,11 +6,9 @@
 //! revision) in the render cache, never per frame.
 //!
 //! Bodies are pre-wrapped here rather than left to ratatui because side-by-side
-//! renders are never wrapped downstream (`Rendered::row_offsets` is `None`), so a
-//! long comment would otherwise run off the edge in exactly one of the two modes.
-//! Pre-wrapping is also what lets a thread be boxed: every row is padded to the
-//! pane width here, so the frame's right edge lines up on rows ratatui never
-//! reflows.
+//! renders are never wrapped downstream (`Rendered::row_offsets` is `None`). It
+//! also lets every row be padded to the pane width, so the box's right edge lines
+//! up.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -37,9 +35,8 @@ pub struct CommentBlock {
     pub len: usize,
     /// The diff line the thread hangs on.
     pub anchor: Anchor,
-    /// The line each individual comment's header landed on, with its id — what
-    /// lets `c` and `x` name the one comment the cursor is sitting on rather
-    /// than the whole thread.
+    /// The line each comment's header landed on, with its id, so `c` and `x` can
+    /// act on one comment rather than the whole thread.
     pub entries: Vec<(usize, String)>,
 }
 
@@ -72,10 +69,8 @@ pub struct Card<'a> {
 
 /// Splice each thread of `comments` into `text`, keeping `map` index-aligned.
 ///
-/// Returns one block per thread, ascending by row — what `]` and `[` step
-/// through. Threads whose anchor is no longer in the render are appended at the
-/// end rather than dropped, so a comment can never go missing because the code
-/// moved underneath it.
+/// Returns one block per thread, ascending by row. Threads whose anchor is no
+/// longer in the render are appended at the end rather than dropped.
 pub fn splice(
     text: &mut Text<'static>,
     map: &mut LineMap,
@@ -128,7 +123,6 @@ pub fn splice(
         })
         .collect();
 
-    // Insert bottom-up so the pre-insert rows stay valid as we go.
     for p in placed.into_iter().rev() {
         map.insert_blanks(p.row, p.lines.len());
         text.lines.splice(p.row..p.row, p.lines);
@@ -148,8 +142,7 @@ struct Placed {
 /// The rows for one anchor's thread, framed in a box that spans the pane.
 ///
 /// Each comment's header rides on a rule — the box's top edge for the first, a
-/// divider for every reply — so a thread reads as one card with its replies
-/// inside it, rather than as loose rows the eye has to group.
+/// divider for every reply — so a thread reads as one card.
 ///
 /// `orphaned` means the anchored line is no longer in the render, so the header
 /// spells out where the note used to live.
@@ -198,7 +191,6 @@ fn block(
                 Style::new().fg(palette.stale),
             ));
         }
-        // The first comment of an orphaned thread says where it used to live.
         if i == 0 && orphaned {
             header.push(Span::styled(
                 format!("  ({file}:{} is no longer in this diff)", anchor.line),
@@ -376,9 +368,8 @@ fn display_width(s: &str) -> usize {
     s.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
-/// Coarse relative time, in the spirit of a review UI. Anything older than a
-/// week reads as a plain day count rather than a date, which keeps the header
-/// short and needs no calendar arithmetic.
+/// Coarse relative time. Anything older than a day reads as a day count rather
+/// than a date, which keeps the header short and needs no calendar arithmetic.
 fn ago(now: u64, then: u64) -> String {
     let secs = now.saturating_sub(then);
     match secs {
@@ -444,11 +435,9 @@ impl Palette {
 
     /// The color to draw one author's name in.
     ///
-    /// The reader's own name keeps the frame's accent, so their notes read as the
-    /// box's own voice. Every other name — an agent's, a second reviewer's — is
-    /// hashed into [`Self::names`]: nobody has to configure anything, and a name
-    /// keeps the same color across sessions, machines and themes, which is what
-    /// makes a thread scannable by who is speaking.
+    /// The reader's own name keeps the frame's accent. Every other name is hashed
+    /// into [`Self::names`], so it needs no configuration and keeps its color
+    /// across sessions, machines and themes.
     fn author(&self, author: &str, me: &str) -> Color {
         if author.eq_ignore_ascii_case(me) {
             return self.accent;
@@ -519,8 +508,6 @@ mod tests {
         let out = text_of(&text.lines);
         assert_eq!(rows.iter().map(|b| b.start).collect::<Vec<_>>(), vec![2]);
         assert!(out[1].contains("second;"));
-        // The thread is a box: the header rides the top edge, the body sits
-        // inside it, and the bottom edge closes it before the code resumes.
         assert!(
             out[2].starts_with("╭─ ") && out[2].contains("claude") && out[2].ends_with('╮'),
             "header sits on the box's top edge under line 2: {out:?}"
@@ -528,8 +515,6 @@ mod tests {
         assert!(out[3].starts_with("│ ") && out[3].contains("why?") && out[3].ends_with(" │"));
         assert!(out[4].starts_with('╰') && out[4].ends_with('╯'));
         assert!(out[5].contains("third;"), "the next code line follows");
-        // Every row of the box is exactly as wide as the pane, so its right edge
-        // lines up and no row wraps.
         for row in &out[2..5] {
             assert_eq!(
                 display_width(row),

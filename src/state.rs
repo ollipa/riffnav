@@ -101,12 +101,10 @@ pub fn sweep(dir: &Path, retention: u64, keep: &Path) {
 /// as needed. Best-effort: returns whether the file landed. The rename keeps a
 /// concurrent reader from ever seeing a half-written file.
 ///
-/// The temp name carries the writer's pid and a per-process counter, because two
-/// writers of the *same* scope is the normal case here, not a corner one: an
-/// agent running `riffnav comment add` writes the very file the open window
-/// saves to. Sharing one temp path let them interleave into a half-written file,
-/// or rename it out from under each other — and a comment store that fails to
-/// parse is silently read as empty.
+/// The temp name is unique per write because two writers of the same scope is
+/// the normal case: an agent's `riffnav comment add` writes the file the open
+/// window saves to. A shared temp path lets them interleave into a half-written
+/// file, and a comment store that fails to parse is silently read as empty.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> bool {
     let Some(parent) = path.parent() else {
         return false;
@@ -182,9 +180,7 @@ mod tests {
         assert_eq!(leftovers, ["scope.json"]);
     }
 
-    /// A scope holds no file until its first comment, and the window watching it
-    /// is watching that directory. Pruning it as "empty" pulls it out from under
-    /// the watch, so the scope being opened keeps its directory.
+    /// The window watches the scope's directory before its first comment lands.
     #[test]
     fn sweep_keeps_the_directory_of_the_scope_being_opened() {
         let dir = TempDir::new("sweep");
@@ -204,9 +200,7 @@ mod tests {
         );
     }
 
-    /// Two writers of the same scope — an agent's `comment add` and the open
-    /// window — must not share a temp path, or they interleave into one file and
-    /// the loser's rename lands a half-written store.
+    /// Two writers of the same scope must not share a temp path.
     #[test]
     fn write_atomic_uses_a_distinct_temp_per_write() {
         let path = Path::new("/state/repo/scope.json");

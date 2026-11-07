@@ -2,13 +2,11 @@
 //!
 //! These run as their own short-lived process with no TUI. They read and write
 //! the same store the running window watches ([`crate::comment::store`]), so a
-//! note written here shows up on screen within a moment, and a window doesn't
-//! even have to be open.
+//! note written here shows up on screen within a moment; no window has to be open.
 //!
-//! Anchors are validated before anything is written: naming a file that isn't in
-//! the diff, or a line outside every hunk, is an error that names the valid
-//! ranges. Getting that wrong is the single most common way an agent's first
-//! attempt fails, so the error has to be actionable rather than silent.
+//! Anchors are validated before anything is written: a file not in the diff, or a
+//! line outside every hunk, is an error that names the valid ranges. That is the
+//! most common way an agent's first attempt fails.
 
 use std::io::Read;
 
@@ -188,8 +186,7 @@ fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> 
     for c in selected {
         // Print where the note actually hangs, not what it stores: a thread sits
         // on its root's anchor, so a reply carrying a line of its own renders at
-        // its parent's. Printing the stored one is what once let a detached reply
-        // look correctly threaded here while the window showed it adrift.
+        // its parent's.
         let root = store.root_of(c);
         let mut reply = String::new();
         if let Some(p) = &c.reply_to {
@@ -299,12 +296,11 @@ fn require_session() -> Result<Session> {
 /// Where one comment will hang: the anchor it names, or — for a reply — the one
 /// it inherits.
 ///
-/// A reply is never anchored independently. The diff moves while a review runs
-/// (comment, fix, reply is the normal loop), so a line resolved *now* is often
-/// not the line the parent was written against: honoring it would file the reply
-/// somewhere else and break the thread apart. Inheriting instead makes that
-/// impossible, and works even when the parent's line has left the diff entirely
-/// — or when there's no diff left at all, which is why `session` is optional.
+/// A reply is never anchored independently. The diff moves while a review runs,
+/// so a line resolved *now* is often not the one the parent was written against,
+/// and honoring it would break the thread apart. Inheriting also works when the
+/// parent's line has left the diff, or there's no diff at all, which is why
+/// `session` is optional.
 fn anchor(
     session: Option<&Session>,
     store: &CommentStore,
@@ -392,10 +388,9 @@ fn resolve(
 /// Which diff the rejected line was measured against, and whether that ground
 /// has moved since the existing comments on the file were written.
 ///
-/// The anchor space is a property of the diff on screen, and that flips on its
-/// own — `branch vs base` becomes `all vs base` the moment the tree is
-/// dirty. Without this the error reads as "you picked a bad line" when the truth
-/// is "the lines you were reading are no longer the ones in force".
+/// The diff on screen can change by itself (`branch vs base` becomes `all vs
+/// base` once the tree is dirty); without this the error reads as a bad line
+/// pick when the lines the agent read are no longer the ones in force.
 fn target_hint(
     session: &Session,
     store: &CommentStore,
@@ -542,9 +537,8 @@ mod tests {
         assert!(err.contains("12-15"), "the error should list ranges: {err}");
     }
 
-    /// The anchor space belongs to whichever diff is on screen, and that changes
-    /// under a review on its own, so a rejected line has to say which one judged
-    /// it — and that the ground moved, when the stored comments prove it did.
+    /// A rejected line says which diff judged it, and that the ground moved when
+    /// the stored comments prove it did.
     #[test]
     fn a_rejected_line_names_the_diff_it_was_measured_against() {
         let s = session();
@@ -622,11 +616,8 @@ mod tests {
         assert!(err.contains("no comment with id nope12"), "{err}");
     }
 
-    /// The whole point of fixing this: the parent's line has left the diff (the
-    /// fix it asked for landed), and replying to it still works — at the parent's
-    /// anchor, carrying the parent's hash so the thread doesn't read half-stale.
-    /// It works with no diff at all (`None`), which is what a committed fix or a
-    /// clean tree leaves behind.
+    /// The parent's line has left the diff, or there's no diff at all (`None`),
+    /// and replying still works: at the parent's anchor, with the parent's hash.
     #[test]
     fn a_reply_inherits_its_parents_anchor_even_when_that_line_is_gone() {
         let (store, parent) = store_with("src/app.rs", 999, Some("deadbeef"));
@@ -639,8 +630,7 @@ mod tests {
         assert_eq!(r.diff_hash.as_deref(), Some("deadbeef"));
     }
 
-    /// A reply that names its own line is refused rather than honored: honoring
-    /// it is what detached replies from their thread.
+    /// A reply that names its own line is refused rather than honored.
     #[test]
     fn a_reply_may_not_carry_an_anchor_of_its_own() {
         let (store, parent) = store_with("src/app.rs", 13, None);

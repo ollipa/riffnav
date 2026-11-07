@@ -4,11 +4,8 @@
 //! When riffnav detects a supported forge, the `W` ("web") key opens the current
 //! branch's pull-request diff in the browser, delegating entirely to the forge's
 //! own CLI (`gh pr diff --web`) so we never build URLs or launch a browser
-//! ourselves. Detection mirrors the herdr integration: [`Forge::detect`] returns
-//! `None` when no supported forge is available, so the key is simply inert.
-//!
-//! Adding another forge (GitLab, Bitbucket, …) means adding a variant plus its
-//! detection and open command; the `W` key and the UI wiring stay the same.
+//! ourselves. [`Forge::detect`] returns `None` when no supported forge is
+//! available, so the key is simply inert.
 
 use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -29,7 +26,7 @@ pub enum Forge {
 impl Forge {
     /// Detect the forge backing the current repo, or `None` when none is
     /// supported or available. Cheap, local-only checks (no network) run once at
-    /// startup, matching how herdr detection works.
+    /// startup.
     pub fn detect() -> Option<Self> {
         if gh_available() && remote_host().as_deref() == Some("github.com") {
             return Some(Self::GitHub);
@@ -44,9 +41,8 @@ impl Forge {
         }
     }
 
-    /// Open the current branch's PR diff in the browser via the forge's CLI.
-    /// Returns an error carrying the CLI's own message on failure (e.g. no PR
-    /// exists for the branch), which the caller surfaces in the status line.
+    /// Open the current branch's PR diff in the browser via the forge's CLI. An
+    /// error carries the CLI's own message (e.g. no PR exists for the branch).
     pub fn open_web_diff(&self) -> Result<()> {
         match self {
             Self::GitHub => run_quietly("gh", &["pr", "diff", "--web"]),
@@ -54,23 +50,20 @@ impl Forge {
     }
 }
 
-/// One-way sync of riffnav's "viewed" marks to the GitHub pull request for the
-/// current branch, ticking GitHub's per-file "Viewed" checkbox to match. Only
-/// meaningful for the branch-vs-base ("Committed") view — the caller enforces
-/// that — since the other views don't correspond to anything on the PR.
+/// One-way sync of riffnav's "viewed" marks to GitHub's per-file "Viewed"
+/// checkbox on the current branch's pull request. Only meaningful for the
+/// branch-vs-base ("Committed") view, which the caller enforces.
 ///
-/// Marks are handed to a background thread so the UI never blocks on `gh`: each
-/// `v` keypress enqueues a job and returns immediately, and the event loop drains
-/// outcomes — surfacing only failures — via [`ReviewSync::drain`]. The PR's
-/// GraphQL node id is resolved once on the worker and cached; a branch with no PR
-/// is cached too, reported once and then quietly skipped for the session.
+/// Marks go to a background thread so the UI never blocks on `gh`; the event loop
+/// collects failures via [`ReviewSync::drain`]. The PR's node id is resolved once
+/// and cached; a branch with no PR is reported once and then skipped.
 pub struct ReviewSync {
     /// Hands jobs to the worker. Dropping it (on app shutdown) ends the thread.
     jobs: Sender<Job>,
     /// One outcome per enqueued job: `Some(msg)` is an error to surface, `None`
     /// is a success or a deliberate skip (no PR for this branch).
     results: Receiver<Option<String>>,
-    /// Jobs enqueued but not yet drained — i.e. syncs still in flight.
+    /// Syncs still in flight.
     pending: usize,
 }
 
@@ -111,8 +104,8 @@ impl ReviewSync {
     }
 
     /// Queue a mark (`viewed`) / unmark of `path` on the branch's PR and return
-    /// at once; the `gh` round trip runs on the worker. Drain the outcome later
-    /// with [`ReviewSync::drain`]. The local viewed mark stands regardless.
+    /// at once; the `gh` round trip runs on the worker. The local viewed mark
+    /// stands regardless.
     pub fn enqueue(&mut self, path: &str, viewed: bool) {
         let job = Job {
             path: path.to_string(),
@@ -163,9 +156,8 @@ impl ReviewSync {
     }
 }
 
-/// Worker loop: own the PR resolution and run each queued mark/unmark to
-/// completion, reporting a message back for any that fails (and `None` otherwise,
-/// so the handle can track the in-flight count). Ends when the job sender drops.
+/// Run each queued job, sending back one outcome per job (`None` on success) so
+/// the handle can track the in-flight count. Ends when the job sender drops.
 fn worker(jobs: Receiver<Job>, results: Sender<Option<String>>) {
     let mut pr = PrState::Unresolved;
     while let Ok(job) = jobs.recv() {
@@ -177,13 +169,11 @@ fn worker(jobs: Receiver<Job>, results: Sender<Option<String>>) {
     }
 }
 
-/// Run one job against the cached PR state: resolve the PR lazily, cache a
-/// missing PR so we don't re-probe, and report a failure only the first time
-/// (then stay quiet). Returns an error message to surface, or `None`.
+/// Run one job, resolving the PR on first use. Returns an error message to
+/// surface, or `None`.
 fn run_job(pr: &mut PrState, job: &Job) -> Option<String> {
     let id = match pr {
         PrState::Ready(id) => id.clone(),
-        // Already determined there's nothing to sync to; stay quiet.
         PrState::Unavailable => return None,
         PrState::Unresolved => match resolve_pr() {
             Ok(id) => {
@@ -274,8 +264,7 @@ fn run_quietly(program: &str, args: &[&str]) -> Result<()> {
     run_capture(program, args).map(drop)
 }
 
-/// Like [`run_quietly`], but returns the command's stdout on success. Used for
-/// `gh` calls whose output we parse (e.g. `gh pr view --json …`).
+/// Like [`run_quietly`], but returns the command's stdout on success.
 fn run_capture(program: &str, args: &[&str]) -> Result<String> {
     let out = Command::new(program)
         .args(args)
@@ -321,7 +310,7 @@ mod tests {
     #[test]
     fn unavailable_pr_skips_without_touching_the_network() {
         // Once the branch is known to have no PR, a job neither shells out to
-        // `gh` nor reports anything — a silent no-op (mirrors "report once").
+        // `gh` nor reports anything.
         let mut pr = PrState::Unavailable;
         let job = Job {
             path: "src/main.rs".to_string(),

@@ -2,8 +2,7 @@
 //!
 //! Comments anchor to `(file, side, line)` in diff-line space, but they have to
 //! be drawn next to a *row*. The renderer knows which numbers each row carries,
-//! so [`LineMap`] just keeps them, aligned with the rows as comment blocks are
-//! spliced in.
+//! so [`LineMap`] just keeps them.
 
 use super::store::{Anchor, Side};
 
@@ -144,17 +143,15 @@ impl LineMap {
         })
     }
 
-    /// The first row carrying a line number, i.e. the first actual diff line
-    /// past the file header and hunk headers. Where the cursor
-    /// starts, so `c` works without hunting for a commentable row.
+    /// The first row carrying a line number, past the file and hunk headers. The
+    /// cursor starts here, so `c` works without hunting for a commentable row.
     pub fn first_code_row(&self) -> Option<usize> {
         self.rows
             .iter()
             .position(|r| r.old.is_some() || r.new.is_some())
     }
 
-    /// Insert `count` unnumbered rows at `at`, keeping the map index-aligned with
-    /// the text as comment blocks are spliced in.
+    /// Insert `count` unnumbered rows at `at`.
     pub fn insert_blanks(&mut self, at: usize, count: usize) {
         let at = at.min(self.rows.len());
         self.rows
@@ -212,8 +209,6 @@ mod tests {
 
     #[test]
     fn first_code_row_skips_the_headers() {
-        // The cursor opens here, so it must land past the file name and the rule
-        // beneath it — otherwise `c` reports there's nothing to comment on.
         assert_eq!(map(ROWS).first_code_row(), Some(2));
         assert_eq!(map(&[(None, None)]).first_code_row(), None);
     }

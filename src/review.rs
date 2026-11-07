@@ -5,16 +5,14 @@
 //! not its path, so a file automatically reverts to unviewed when its diff
 //! changes — exactly like GitHub un-ticking a file the author has pushed to.
 //!
-//! Scope is per repository **and** per branch, mirroring GitHub's per-PR model:
-//! the same change reviewed on another branch is reviewed independently. State
-//! lives under `$XDG_STATE_HOME/riffnav/viewed/<repo>/<branch>.json` and is
-//! garbage-collected by age — abandoned branch files are swept on startup, and
-//! within an active file stale entries are pruned on save. The location, scoping
-//! and sweeping are shared with inline comments; see [`crate::state`].
+//! Scope is per repository **and** per branch, like GitHub's per-PR model: the
+//! same change reviewed on another branch is reviewed independently. Abandoned
+//! branch files are swept on startup and stale entries dropped on load; the
+//! location, scoping and sweeping are shared with inline comments (see
+//! [`crate::state`]).
 //!
-//! When riffnav isn't run inside a git repo (e.g. an arbitrary diff piped in),
-//! there's no stable scope to anchor to, so the store degrades to session-only:
-//! toggling still works, nothing persists.
+//! Outside a git repo (e.g. an arbitrary diff piped in) the store is
+//! session-only: toggling still works, nothing persists.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -46,13 +44,11 @@ struct StoreFile {
 /// Tracks which file-diffs are marked viewed for the current (repo, branch)
 /// scope, persisting changes to disk. A `path` of `None` means session-only.
 pub struct ReviewStore {
-    /// Where this scope persists, or `None` for a session-only store.
     path: Option<PathBuf>,
     repo: String,
     branch: String,
     /// Diff hashes currently marked viewed, with their metadata.
     files: HashMap<u128, Entry>,
-    /// Whether `files` has unsaved changes.
     dirty: bool,
 }
 
@@ -112,7 +108,6 @@ impl ReviewStore {
         self.files.contains_key(&hash)
     }
 
-    /// Count how many of `hashes` are currently marked viewed.
     pub fn count_viewed(&self, hashes: &[u128]) -> usize {
         hashes.iter().filter(|h| self.is_viewed(**h)).count()
     }
@@ -135,9 +130,9 @@ impl ReviewStore {
         }
     }
 
-    /// Persist pending changes via a temp-file + rename, best-effort. Writing
-    /// refreshes the file's mtime so the active branch survives the next sweep;
-    /// an emptied scope deletes its file rather than leaving a husk behind.
+    /// Persist pending changes, best-effort. Writing refreshes the file's mtime so
+    /// the active branch survives the next sweep; an emptied scope deletes its
+    /// file rather than leaving a husk behind.
     pub fn save(&mut self) {
         if !self.dirty {
             return;
@@ -248,7 +243,6 @@ mod tests {
 
     #[test]
     fn disabled_store_never_records_a_path() {
-        // Session-only stores hold marks in memory but never get a file path.
         let mut store = ReviewStore::disabled();
         store.toggle(file_hash(RAW), "f");
         assert!(store.path.is_none());
@@ -256,7 +250,6 @@ mod tests {
 
     #[test]
     fn save_persists_and_empties_clean_up() {
-        // A unique dir per test process; the save path creates missing parents.
         let dir = TempDir::new("review");
         let path = dir.join("nested").join("scope.json");
         let mut store = ReviewStore::with_path(path.clone());
@@ -264,12 +257,10 @@ mod tests {
 
         store.toggle(hash, "f");
         store.save();
-        // The on-disk file parses back with our hash recorded.
         let text = std::fs::read_to_string(&path).expect("file written");
         let parsed: StoreFile = serde_json::from_str(&text).expect("valid json");
         assert!(parsed.files.contains_key(&format!("{hash:032x}")));
 
-        // Unmarking the last entry deletes the file rather than leaving a husk.
         store.toggle(hash, "f");
         store.save();
         assert!(!path.exists());

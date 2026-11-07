@@ -1,10 +1,8 @@
 //! Typing a comment inside riffnav.
 //!
-//! Handing the terminal to `$EDITOR` is a lot of ceremony for one sentence: the
-//! screen tears down, the diff being annotated disappears, and the note can't be
-//! seen next to the line it's about. So `c` opens this instead — a small text
-//! field drawn over the diff pane at the anchored line — with the editor still
-//! one keystroke away (`Ctrl-O`) for a note that outgrows it.
+//! Handing the terminal to `$EDITOR` is a lot of ceremony for one sentence, and
+//! hides the line the note is about. So `c` opens a small text field over the
+//! diff pane at the anchored line, with the editor one keystroke away (`Ctrl-O`).
 //!
 //! Text is held as chars rather than bytes because every operation here is
 //! cursor-relative (insert at, delete before, wrap between), and a char index is
@@ -35,8 +33,7 @@ pub struct PendingComment {
 
 /// The composer's text laid out for a field `cols` columns wide: one entry per
 /// display row, plus where the cursor lands among them. Wrapping and cursor
-/// placement are computed together because they have to agree — the caller can't
-/// re-derive one from the other.
+/// placement are computed together so they agree.
 pub struct Layout {
     pub rows: Vec<String>,
     /// `(row, column)` of the cursor within `rows`.
@@ -106,7 +103,7 @@ impl Composer {
         self.col += 1;
     }
 
-    /// Split the current line at the cursor, as Enter does in any text field.
+    /// Split the current line at the cursor.
     pub fn newline(&mut self) {
         let tail = self.lines[self.row].split_off(self.col);
         self.lines.insert(self.row + 1, tail);
@@ -297,7 +294,6 @@ mod tests {
     #[test]
     fn typing_and_editing_build_the_body() {
         let mut c = typed("hello wrold");
-        // Fix the typo the way a person would: back over it and retype.
         for _ in 0..4 {
             c.left();
         }
@@ -330,8 +326,7 @@ mod tests {
         c.delete_to_start();
         assert_eq!(c.body(), "");
 
-        // Ctrl-W with nothing left on the line falls back to joining upward,
-        // rather than doing nothing at all.
+        // Ctrl-W with nothing left on the line joins upward.
         let mut c = typed("one\n");
         c.delete_word();
         assert_eq!(c.body(), "one");
