@@ -36,7 +36,8 @@ const WHITESPACE_ONLY: &str = "whitespace only";
 /// What a moved row needs the renderer to know.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mark {
-    /// On a block's first row, where the block went or came from.
+    /// On a block's first row, where the block went or came from. A block that only
+    /// carries on the whitespace change above it has none. See [`repeats`].
     pub hint: Option<String>,
     /// On a removed row, the added row it matches if the two share a change, which
     /// is what side-by-side sets opposite it.
@@ -96,12 +97,17 @@ impl MoveIndex {
         let blocks = claim(matches(&removed, &added), &removed, &added);
 
         let reordered = reordered_runs(&blocks, &removed, &added);
+        let stayed = |block: &Block| {
+            let (old, new) = (&removed[block.old], &added[block.new]);
+            old.run == new.run && !reordered.contains(&old.run)
+        };
+        let old_repeats = repeats(&blocks, &removed, |b| b.old, stayed);
+        let new_repeats = repeats(&blocks, &added, |b| b.new, stayed);
         let mut marks: Vec<Vec<Option<Mark>>> = rows.iter().map(|r| vec![None; r.len()]).collect();
         let mut targets = vec![BTreeMap::new(); rows.len()];
-        for block in blocks {
+        for block in &blocks {
             let (old, new) = (&removed[block.old], &added[block.new]);
-            let stayed = old.run == new.run && !reordered.contains(&old.run);
-            let (to, from) = if stayed {
+            let (to, from) = if stayed(block) {
                 (WHITESPACE_ONLY.to_string(), WHITESPACE_ONLY.to_string())
             } else {
                 hints(old, new, files)
@@ -109,11 +115,11 @@ impl MoveIndex {
             for at in 0..block.len {
                 let (old, new) = (&removed[block.old + at], &added[block.new + at]);
                 marks[old.file][old.row] = Some(Mark {
-                    hint: (at == 0).then(|| to.clone()),
+                    hint: (at == 0 && !old_repeats.contains(&block.old)).then(|| to.clone()),
                     twin: (old.run == new.run).then_some(new.row),
                 });
                 marks[new.file][new.row] = Some(Mark {
-                    hint: (at == 0).then(|| from.clone()),
+                    hint: (at == 0 && !new_repeats.contains(&block.new)).then(|| from.clone()),
                     twin: None,
                 });
                 let (old_end, new_end) = (old.target(Side::Old), new.target(Side::New));
@@ -326,6 +332,26 @@ fn reordered_runs(blocks: &[Block], removed: &[Line], added: &[Line]) -> HashSet
         .collect()
 }
 
+/// Where the blocks that needn't say anything start on one side, `start` being where
+/// a block starts there. An edit splits a whitespace-only block into pieces, and
+/// the note on the first speaks for them all. A piece under another block's note
+/// keeps its own, or it would read as part of that block.
+fn repeats(
+    blocks: &[Block],
+    lines: &[Line],
+    start: impl Fn(&Block) -> usize,
+    stayed: impl Fn(&Block) -> bool,
+) -> HashSet<usize> {
+    let mut order: Vec<&Block> = blocks.iter().collect();
+    order.sort_by_key(|b| start(b));
+    order
+        .windows(2)
+        .filter(|pair| lines[start(pair[0])].run == lines[start(pair[1])].run)
+        .filter(|pair| stayed(pair[0]) && stayed(pair[1]))
+        .map(|pair| start(pair[1]))
+        .collect()
+}
+
 /// What to say above a block's removed and added halves, given their first lines.
 fn hints(old: &Line, new: &Line, files: &[FileDiff]) -> (String, String) {
     let there = |verb: &str, line: &Line| {
@@ -466,6 +492,135 @@ mod tests {
                 "moved from line 1"
             ]
         );
+    }
+
+    /// Six re-indented calls, as `(removed, added)` lines without their signs.
+    fn reindented() -> (Vec<String>, Vec<String>) {
+        let calls = (1..=6).map(|i| format!("a_numbered_call_{i}(argument);"));
+        let added = calls.clone().map(|call| format!("    {call}"));
+        (calls.collect(), added.collect())
+    }
+
+    /// One change that removes `removed` and adds `added`.
+    fn change(removed: &[String], added: &[String]) -> String {
+        let mut raw = format!(
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,{} +1,{} @@\n",
+            removed.len(),
+            added.len()
+        );
+        raw.extend(removed.iter().map(|line| format!("-{line}\n")));
+        raw.extend(added.iter().map(|line| format!("+{line}\n")));
+        raw
+    }
+
+    /// The text of each row with a hint, in order, sign first.
+    fn hinted(raw: &str) -> Vec<String> {
+        let got = moved(raw).remove(0);
+        let rows = got.iter().filter(|r| r.2.is_some());
+        rows.map(|r| format!("{}{}", r.0, r.1.trim())).collect()
+    }
+
+    #[test]
+    fn an_edit_in_a_whitespace_change_leaves_one_note_on_each_side() {
+        let (mut removed, mut added) = reindented();
+        removed[2] = "the_old_line(1);".to_string();
+        added[2] = "    the_new_line(2);".to_string();
+        let raw = change(&removed, &added);
+        assert_eq!(
+            hinted(&raw),
+            [
+                "-a_numbered_call_1(argument);",
+                "+a_numbered_call_1(argument);"
+            ]
+        );
+        // The rows after the edit are still marked, and still lead somewhere.
+        let files = parse(&raw);
+        let index = MoveIndex::build(&files);
+        let old = Anchor {
+            side: Side::Old,
+            line: 4,
+        };
+        let new = Anchor {
+            side: Side::New,
+            line: 4,
+        };
+        assert_eq!(index.file(0).target(old).unwrap().anchor, new);
+        assert_eq!(index.file(0).target(new).unwrap().anchor, old);
+        assert_eq!(moved(&raw)[0].len(), 10);
+    }
+
+    #[test]
+    fn a_line_added_to_a_whitespace_change_leaves_one_note_on_each_side() {
+        let (removed, mut added) = reindented();
+        added.insert(3, "    a_brand_new_line(1);".to_string());
+        assert_eq!(hinted(&change(&removed, &added)).len(), 2);
+    }
+
+    #[test]
+    fn a_line_dropped_from_a_whitespace_change_leaves_one_note_on_each_side() {
+        let (mut removed, added) = reindented();
+        removed.insert(3, "a_line_going_away(1);".to_string());
+        assert_eq!(hinted(&change(&removed, &added)).len(), 2);
+    }
+
+    #[test]
+    fn three_pieces_of_a_whitespace_change_share_one_note() {
+        let (mut removed, mut added) = reindented();
+        removed.extend(["a_numbered_call_7(argument);".to_string()]);
+        added.extend(["    a_numbered_call_7(argument);".to_string()]);
+        for at in [2, 5] {
+            removed[at] = format!("the_old_line({at});");
+            added[at] = format!("    the_new_line({at});");
+        }
+        assert_eq!(hinted(&change(&removed, &added)).len(), 2);
+    }
+
+    #[test]
+    fn a_piece_below_a_real_move_keeps_its_note() {
+        let (mut removed, added) = reindented();
+        removed.splice(3..3, FN_A.map(str::to_string));
+        let mut raw = change(&removed, &added);
+        raw.push_str(&file("g", &[], &FN_A));
+        assert_eq!(
+            hinted(&raw),
+            [
+                "-a_numbered_call_1(argument);",
+                "-fn alpha_value() {",
+                "-a_numbered_call_4(argument);",
+                "+a_numbered_call_1(argument);"
+            ]
+        );
+    }
+
+    #[test]
+    fn pieces_that_really_moved_keep_a_note_each() {
+        let removed = [FN_A[0], FN_A[1], "let old = 1;", FN_B[0], FN_B[1]];
+        let added = [FN_A[0], FN_A[1], "let new = 1;", FN_B[0], FN_B[1]];
+        let got = moved(&file("f", &removed, &added));
+        let hints: Vec<&str> = got[0].iter().filter_map(|r| r.2.as_deref()).collect();
+        assert_eq!(
+            hints,
+            [
+                "moved to line 2",
+                "moved to line 5",
+                "moved from line 1",
+                "moved from line 4"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_whitespace_change_either_side_of_a_kept_line_keeps_both_notes() {
+        let (removed, added) = reindented();
+        let mut raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,7 +1,7 @@\n".to_string();
+        for (lines, sign) in [(&removed[..3], '-'), (&added[..3], '+')] {
+            raw.extend(lines.iter().map(|line| format!("{sign}{line}\n")));
+        }
+        raw.push_str(" kept\n");
+        for (lines, sign) in [(&removed[3..], '-'), (&added[3..], '+')] {
+            raw.extend(lines.iter().map(|line| format!("{sign}{line}\n")));
+        }
+        assert_eq!(hinted(&raw).len(), 4);
     }
 
     #[test]
