@@ -97,7 +97,7 @@ layout for one run with `-s` (side-by-side) or `-u` (unified).
 | `c` | [Comment](#review-comments) on the cursor's line, or reply when it's inside a thread |
 | `x` | Delete the comment under the cursor, and its replies (asks first) |
 | `]` / `[` | Jump to the next / previous comment, across files |
-| `m` | Jump to the other end of a moved or copied line, across files; press again to come back. A copy's source that isn't in the diff is named in the status line |
+| `m` | Jump to the other end of a moved or copied line, across files; press again to come back. On a side-by-side row with one on each side, the new side goes first and further presses take turns, with the status line saying which (`Moved line 1 of 2`). A copy's source that isn't in the diff is named in the status line |
 | `z` | Toggle zoom on riffnav's pane (only inside [herdr](#herdr-integration)) |
 | `?` | Toggle the help overlay |
 | `q` / `Esc` / `Ctrl-c` | Quit (`Esc` clears a search first) |
