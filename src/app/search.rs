@@ -696,6 +696,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use crate::app::test_support::{HEIGHT, WIDTH, late};
     use std::collections::HashMap;
 
     use crossterm::event::KeyCode::{self, Backspace, Char, Enter, Esc};
@@ -710,9 +711,6 @@ mod tests {
     use crate::diff::parse;
     use crate::diff::testing::hunk;
     use crate::theme::DiffTheme;
-
-    const WIDTH: u16 = 80;
-    const HEIGHT: u16 = 16;
 
     fn app_of(raw: &str, side_by_side: bool, cfg: &Config) -> App {
         let mut app = App::new(parse(raw), side_by_side, cfg);
@@ -1519,14 +1517,6 @@ mod tests {
             .map(|color| (format!("{color:?}"), ()))
             .collect();
         assert_eq!(all.len(), 4);
-    }
-
-    /// Renders that are late: a frame goes ahead without them.
-    fn late(app: &mut App) -> crate::render::test_support::Gate {
-        let gate = crate::render::test_support::Gate::default();
-        app.cache.wait(Duration::ZERO);
-        app.cache.hooks().start = Some(gate.clone());
-        gate
     }
 
     fn settle(app: &mut App) {

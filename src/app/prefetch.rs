@@ -151,9 +151,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::KeyCode::{self, Char, Enter};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+    use crate::app::test_support::{file_name, frame, press};
+    use crossterm::event::KeyCode::{Char, Enter};
 
     use super::*;
     use crate::comment::testing;
@@ -162,9 +161,6 @@ mod tests {
     use crate::diff::parse;
     use crate::diff::testing::hunk;
     use crate::render::Target;
-
-    const WIDTH: u16 = 80;
-    const HEIGHT: u16 = 16;
 
     /// Files named by `names`, each with one change, which `matching` also have
     /// a line `zzz` in.
@@ -184,26 +180,6 @@ mod tests {
         app.cache.prefetch_for_test();
         frame(&mut app);
         app
-    }
-
-    /// A pass of the event loop.
-    fn frame(app: &mut App) {
-        let diff_width = app.diff_pane_width(WIDTH);
-        app.prepare_frame(diff_width);
-        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
-        terminal
-            .draw(|f| crate::ui::draw(f, app, diff_width))
-            .unwrap();
-    }
-
-    fn press(app: &mut App, code: KeyCode) {
-        app.press_for_test(code, false);
-        frame(app);
-    }
-
-    fn file_name(app: &App) -> Option<String> {
-        let file = app.selected_file()?;
-        Some(app.files[file].path().to_string())
     }
 
     /// Passes of the event loop until there's nothing left to prefetch, and the

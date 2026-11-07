@@ -1,12 +1,18 @@
 //! Fixtures and hooks for the app's tests.
 
 use crate::diff::testing::bare;
+use std::time::Duration;
+
 use crossterm::event::{KeyCode, KeyModifiers};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 
 use super::App;
 use crate::comment::CommentStore;
 use crate::config::Config;
 use crate::diff::{FileDiff, FileStatus};
+use crate::render::test_support::Gate;
 
 impl App {
     /// Turn comments on with an in-memory store, bypassing disk and git scope
@@ -92,4 +98,42 @@ pub(super) fn seed_text() -> ratatui::text::Text<'static> {
             .map(|n| ratatui::text::Line::from(format!("{n:>5}⋮{n:>5}│let x{n} = {n};")))
             .collect::<Vec<_>>(),
     )
+}
+
+/// The size the tests draw at.
+pub(super) const WIDTH: u16 = 80;
+pub(super) const HEIGHT: u16 = 16;
+
+/// A pass of the event loop at `width` by `height`, and what it drew.
+pub(super) fn frame_at(app: &mut App, width: u16, height: u16) -> Buffer {
+    let diff_width = app.diff_pane_width(width);
+    app.prepare_frame(diff_width);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|f| crate::ui::draw(f, app, diff_width))
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+/// A pass of the event loop.
+pub(super) fn frame(app: &mut App) -> Buffer {
+    frame_at(app, WIDTH, HEIGHT)
+}
+
+pub(super) fn press(app: &mut App, code: KeyCode) {
+    app.press_for_test(code, false);
+    frame(app);
+}
+
+pub(super) fn file_name(app: &App) -> Option<String> {
+    let file = app.selected_file()?;
+    Some(app.files[file].path().to_string())
+}
+
+/// Renders that are late: a frame goes ahead without them.
+pub(super) fn late(app: &mut App) -> Gate {
+    let gate = Gate::default();
+    app.cache.wait(Duration::ZERO);
+    app.cache.hooks().start = Some(gate.clone());
+    gate
 }

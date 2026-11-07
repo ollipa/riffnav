@@ -214,11 +214,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use crate::app::test_support::{HEIGHT, file_name, frame, frame_at, late, press};
     use crossterm::event::KeyCode::{self, Char, Enter};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    use std::time::Duration;
 
     use super::*;
     use crate::comment::testing;
@@ -226,10 +223,6 @@ mod tests {
     use crate::config::Config;
     use crate::diff::parse;
     use crate::diff::testing::hunk;
-    use crate::render::test_support::Gate;
-
-    const WIDTH: u16 = 80;
-    const HEIGHT: u16 = 16;
 
     /// `changes` one-line edits with `gap` lines of context around each.
     fn edits(changes: usize, gap: usize) -> String {
@@ -258,30 +251,6 @@ mod tests {
 
     fn app(raw: &str) -> App {
         app_with(raw, false, true)
-    }
-
-    /// A pass of the event loop.
-    fn frame(app: &mut App) {
-        frame_at(app, WIDTH, HEIGHT);
-    }
-
-    fn frame_at(app: &mut App, width: u16, height: u16) {
-        let diff_width = app.diff_pane_width(width);
-        app.prepare_frame(diff_width);
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|f| crate::ui::draw(f, app, diff_width))
-            .unwrap();
-    }
-
-    fn press(app: &mut App, code: KeyCode) {
-        app.press_for_test(code, false);
-        frame(app);
-    }
-
-    fn file_name(app: &App) -> Option<String> {
-        let file = app.selected_file()?;
-        Some(app.files[file].path().to_string())
     }
 
     /// The old and new number of the cursor's line.
@@ -1046,14 +1015,6 @@ mod tests {
         press(&mut helping, Char('J'));
         assert!(helping.show_help);
         assert_eq!(at(&helping), before);
-    }
-
-    /// Renders that are late: a frame goes ahead without them.
-    fn late(app: &mut App) -> Gate {
-        let gate = Gate::default();
-        app.cache.wait(Duration::ZERO);
-        app.cache.hooks().start = Some(gate.clone());
-        gate
     }
 
     /// Passes of the event loop until the renders have all landed.
