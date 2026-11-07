@@ -353,7 +353,7 @@ impl Panels<'_> {
     fn note_side(&self, text: Option<String>, panel: usize, delim: char) -> Vec<Span<'static>> {
         let mut spans = vec![panel_gutter(None, RowKind::Context, delim, self.palette)];
         let room = panel.saturating_sub(PANEL_GUTTER);
-        let shown = truncate(&text.unwrap_or_default(), room);
+        let shown = fit_note(&text.unwrap_or_default(), room);
         let fill = room.saturating_sub(display_width(&shown));
         spans.push(Span::styled(shown, self.palette.marker()));
         spans.push(Span::styled(" ".repeat(fill), self.palette.context()));
@@ -522,6 +522,52 @@ fn truncate(text: &str, cols: usize) -> String {
     out
 }
 
+/// Cut a note to `cols` columns. The line number is the part a reader can act on, so
+/// a note naming a file gives up the front of the path first, and is only cut like
+/// any other text once `…:line` no longer fits.
+fn fit_note(note: &str, cols: usize) -> String {
+    if display_width(note) <= cols {
+        return note.to_string();
+    }
+    let Some((lead, path, line)) = note_parts(note) else {
+        return truncate(note, cols);
+    };
+    let fixed = display_width(lead) + 1 + display_width(line);
+    if fixed > cols {
+        return truncate(note, cols);
+    }
+    format!("{lead}…{}{line}", last_columns(path, cols - fixed))
+}
+
+/// A note naming a line of another file, as `⇄ moved to `, `src/a.rs` and `:12`. A
+/// note starts with its mark and two words, so spaces in the path can't confuse it.
+fn note_parts(note: &str) -> Option<(&str, &str, &str)> {
+    let (space, _) = note.match_indices(' ').nth(2)?;
+    let (lead, place) = note.split_at(space + 1);
+    let (path, line) = place.split_at(place.rfind(':')?);
+    let digits = &line[1..];
+    let numbered = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+    numbered.then_some((lead, path, line))
+}
+
+/// The end of `text` that fits in `cols` columns. It starts on a character with a
+/// width, as a combining mark without its base would land on what comes before.
+fn last_columns(text: &str, cols: usize) -> &str {
+    let mut start = text.len();
+    let mut used = 0;
+    for (at, c) in text.char_indices().rev() {
+        let width = c.width().unwrap_or(0);
+        if used + width > cols {
+            break;
+        }
+        used += width;
+        if width > 0 {
+            start = at;
+        }
+    }
+    &text[start..]
+}
+
 fn no_newline(text: &str, palette: &DiffPalette) -> Line<'static> {
     Line::from(vec![
         gutter(None, None, RowKind::Context, palette),
@@ -533,7 +579,7 @@ fn no_newline(text: &str, palette: &DiffPalette) -> Line<'static> {
 /// came from.
 fn block_note(note: &str, width: usize, palette: &DiffPalette) -> Line<'static> {
     let room = width.saturating_sub(GUTTER);
-    let shown = truncate(note, room);
+    let shown = fit_note(note, room);
     let fill = room.saturating_sub(display_width(&shown));
     Line::from(vec![
         gutter(None, None, RowKind::Context, palette),
@@ -1270,7 +1316,8 @@ mod tests {
             &[],
         );
         assert_eq!(line_width(&text.lines[6]), usize::from(WIDTH));
-        assert!(plain(&text.lines[6]).ends_with('…'));
+        assert!(plain(&text.lines[6]).contains("…xxx"));
+        assert!(plain(&text.lines[6]).ends_with(".rs:1"));
     }
 
     #[test]
@@ -1331,6 +1378,126 @@ mod tests {
                 assert!(map.row_for(Anchor { side, line }).is_some());
             }
         }
+    }
+
+    const NOTE: &str = "⇄ moved to src/render/layout.rs:482";
+
+    #[test]
+    fn a_note_that_fits_is_left_alone() {
+        assert_eq!(fit_note(NOTE, display_width(NOTE)), NOTE);
+    }
+
+    #[test]
+    fn a_narrow_note_gives_up_the_front_of_the_path_for_its_line() {
+        assert_eq!(fit_note(NOTE, 33), "⇄ moved to …/render/layout.rs:482");
+        assert_eq!(fit_note(NOTE, 25), "⇄ moved to …layout.rs:482");
+    }
+
+    #[test]
+    fn a_file_name_too_long_to_fit_keeps_its_end() {
+        assert_eq!(fit_note(NOTE, 18), "⇄ moved to …rs:482");
+        assert_eq!(fit_note(NOTE, 16), "⇄ moved to …:482");
+    }
+
+    #[test]
+    fn below_the_last_of_the_path_a_note_is_cut_like_any_text() {
+        assert_eq!(fit_note(NOTE, 15), truncate(NOTE, 15));
+        assert_eq!(fit_note(NOTE, 5), truncate(NOTE, 5));
+    }
+
+    #[test]
+    fn every_kind_of_note_naming_a_file_keeps_its_line() {
+        let cut = |note| fit_note(note, 24);
+        assert_eq!(
+            cut("⇄ moved from src/render/moves.rs:7"),
+            "⇄ moved from …moves.rs:7"
+        );
+        assert_eq!(
+            cut("≡ copied from src/render/moves.rs:7"),
+            "≡ copied from …oves.rs:7"
+        );
+    }
+
+    #[test]
+    fn a_note_with_no_path_is_cut_as_before() {
+        for note in [
+            "⇄ moved to line 48211",
+            "⇄ whitespace only",
+            "⌀ No newline at end",
+        ] {
+            assert_eq!(fit_note(note, 9), truncate(note, 9));
+        }
+    }
+
+    #[test]
+    fn a_colon_in_the_path_isnt_taken_for_the_line() {
+        let note = "⇄ moved to src/a:b/c d.rs:12";
+        assert_eq!(fit_note(note, 22), "⇄ moved to …/c d.rs:12");
+        assert_eq!(note_parts("⇄ moved to src/a:b.rs"), None);
+        assert_eq!(note_parts("⇄ moved to src/a.rs:"), None);
+    }
+
+    #[test]
+    fn wide_characters_are_counted_in_columns_and_never_split() {
+        let note = "⇄ moved to 日本語/レイアウト.rs:12";
+        for cols in 15..display_width(note) {
+            let got = fit_note(note, cols);
+            assert!(got.ends_with(":12"), "{got}");
+            assert!(display_width(&got) <= cols, "{got} in {cols}");
+            assert!(
+                display_width(&got) + 1 >= cols,
+                "{got} wastes room in {cols}"
+            );
+        }
+        // Four columns of room for the path's end leave 'ト' a column short.
+        assert_eq!(fit_note(note, 19), "⇄ moved to ….rs:12");
+        assert_eq!(fit_note(note, 20), "⇄ moved to …ト.rs:12");
+    }
+
+    #[test]
+    fn a_combining_mark_doesnt_end_up_on_the_ellipsis() {
+        // "e" and a combining acute, at the end of what fits.
+        let note = "⇄ moved to src/cafe\u{301}.rs:9";
+        assert_eq!(fit_note(note, 17), "⇄ moved to ….rs:9");
+        assert_eq!(fit_note(note, 18), "⇄ moved to …e\u{301}.rs:9");
+    }
+
+    fn note_row(raw: &str, width: u16, side_by_side: bool) -> String {
+        let files = parse(raw);
+        let index = MoveIndex::build(&files);
+        let lay_out = if side_by_side {
+            render::side_by_side
+        } else {
+            render::unified
+        };
+        let (text, _) = lay_out(
+            &files[0],
+            index.file(0),
+            width,
+            DiffTheme::GitHubDark,
+            4,
+            &[],
+        );
+        let row = text.lines.iter().map(|line| {
+            let spans = line.spans.iter().map(|s| s.content.as_ref());
+            spans.collect::<String>()
+        });
+        row.filter(|row| row.contains(MOVE_MARK)).collect()
+    }
+
+    #[test]
+    fn both_layouts_keep_the_line_of_a_note_at_the_panes_edge() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n\
+                   @@ -1,3 +1,1 @@\n keep\n-fn alpha_value() {\n-    first_call(1);\n\
+                   diff --git a/src/render/deep/b.rs b/src/render/deep/b.rs\n\
+                   --- a/src/render/deep/b.rs\n+++ b/src/render/deep/b.rs\n\
+                   @@ -481,1 +481,3 @@\n keep\n+fn alpha_value() {\n+    first_call(1);\n";
+        let unified = note_row(raw, 36, false);
+        assert!(unified.contains("⇄ moved to …eep/b.rs:482"), "{unified}");
+        assert_eq!(display_width(&unified), 36);
+        let panels = note_row(raw, 60, true);
+        assert!(panels.contains("⇄ moved to …eep/b.rs:482"), "{panels}");
+        assert_eq!(display_width(&panels), 60);
     }
 
     #[test]
