@@ -37,7 +37,8 @@ impl App {
         let rows = if self.comments_on {
             self.diff_cursor..self.diff_cursor + 1
         } else {
-            let bottom = self.diff_scroll.saturating_add(self.diff_height.into());
+            let last = u32::from(self.diff_height.max(1)) - 1;
+            let bottom = self.diff_scroll.saturating_add(last);
             render.line_at(self.diff_scroll)..render.line_at(bottom) + 1
         };
         rows.into_iter().find_map(|row| {
@@ -573,6 +574,33 @@ mod tests {
         draw_for_move(&mut app);
         assert_eq!(app.selected_file(), Some(1));
         assert_eq!(cursor_line(&app), (None, Some(12)));
+    }
+
+    /// With comments off `m` reads the lines in view, and the row just below the
+    /// pane isn't in it.
+    #[test]
+    fn m_with_no_cursor_leaves_a_move_just_below_the_pane_alone() {
+        let mut app = app_with_a_move();
+        app.comments_on = false;
+        let render = app.current_render().unwrap();
+        let old = Anchor {
+            side: Side::Old,
+            line: 2,
+        };
+        let moved = render
+            .line_map
+            .row_for(old)
+            .expect("the moved line is in the render");
+        let block = (0..render.lines())
+            .find(|&line| render.code_line(line) == moved)
+            .unwrap();
+        let height = render.row_of(block) as u16;
+        app.diff_scroll = 0;
+        app.diff_height = height;
+        app.press_for_test(KeyCode::Char('m'), false);
+        draw_for_move(&mut app);
+        assert_eq!(app.selected_file(), Some(0), "it stayed put");
+        assert_eq!(app.status.as_deref(), Some("Not on a moved or copied line"));
     }
 
     #[test]
