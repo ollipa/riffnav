@@ -6,6 +6,7 @@
 //! on. The file `m` would jump to from the line under the cursor comes after it.
 //! See [`RenderCache::prefetch`].
 
+use super::search::Found;
 use super::{App, Direction, Focus};
 use crate::render::{Jump, Prefetch, RenderCache};
 use crate::theme::DiffTheme;
@@ -46,9 +47,15 @@ pub(super) struct PrefetchAsked {
     viewed: usize,
     comment_rev: u64,
     /// What the search has found so far.
-    found: Option<(String, usize, bool)>,
+    found: Option<Found>,
     /// Where `m` would go.
     jump: Option<usize>,
+}
+
+/// The files to prefetch, and what they were worked out from.
+pub(super) struct Prefetched {
+    asked: PrefetchAsked,
+    files: Vec<usize>,
 }
 
 impl App {
@@ -71,10 +78,13 @@ impl App {
             jump: self.jump_ahead(),
         };
         let files = match &self.prefetch_asked {
-            Some((was, files)) if *was == asked => files.clone(),
+            Some(was) if was.asked == asked => was.files.clone(),
             _ => {
                 let files = self.likely_next(asked.jump);
-                self.prefetch_asked = Some((asked, files.clone()));
+                self.prefetch_asked = Some(Prefetched {
+                    asked,
+                    files: files.clone(),
+                });
                 files
             }
         };
@@ -134,9 +144,9 @@ impl App {
         let here = self.selected_file()?;
         let back = self
             .copy_return
-            .filter(|(_, landed)| self.on_copy_landing(*landed));
+            .filter(|back| self.on_copy_landing(back.landed));
         let file = match back {
-            Some((from, _)) => from.file,
+            Some(back) => back.from.file,
             None => match self.jump_target()?.jump {
                 Jump::Moved(target) | Jump::Copied(target) => target.file,
                 Jump::Elsewhere(_) => return None,

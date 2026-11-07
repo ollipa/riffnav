@@ -4,6 +4,20 @@ use super::App;
 use crate::comment::{Anchor, Side};
 use crate::render::{Jump, Target};
 
+/// An `m` jump on its way to a line, and whether it set out from that line's file.
+#[derive(Clone, Copy)]
+pub(super) struct MoveLanding {
+    target: Target,
+    same_file: bool,
+}
+
+/// Where an `m` onto a copy's other end came from, and where it landed.
+#[derive(Clone, Copy)]
+pub(super) struct CopyReturn {
+    pub(super) from: Target,
+    pub(super) landed: Target,
+}
+
 /// One end of what `m` can follow from a row.
 pub(super) struct MoveEnd {
     pub(super) from: Target,
@@ -69,10 +83,10 @@ impl App {
     /// diff doesn't show it. Both ends point at each other, so pressing `m` again
     /// comes straight back. A row with an end on each side says which it took.
     pub(super) fn jump_move(&mut self) {
-        if let Some((from, landed)) = self.copy_return.take()
-            && self.on_copy_landing(landed)
+        if let Some(back) = self.copy_return.take()
+            && self.on_copy_landing(back.landed)
         {
-            return self.jump_to(from);
+            return self.jump_to(back.from);
         }
         let Some(end) = self.jump_target() else {
             return self.set_status("Not on a moved or copied line");
@@ -89,7 +103,10 @@ impl App {
         match end.jump {
             Jump::Moved(target) => self.jump_to(target),
             Jump::Copied(target) => {
-                self.copy_return = Some((end.from, target));
+                self.copy_return = Some(CopyReturn {
+                    from: end.from,
+                    landed: target,
+                });
                 self.jump_to(target);
             }
             Jump::Elsewhere(place) => {
@@ -109,22 +126,22 @@ impl App {
         if !same_file {
             self.reveal_file(target.file);
         }
-        self.move_landing = Some((target.file, target.anchor, same_file));
+        self.move_landing = Some(MoveLanding { target, same_file });
     }
 
     /// Finish an `m` jump once its file is rendered.
     pub(super) fn land_on_move(&mut self) {
-        let Some((file, anchor, same_file)) = self.move_landing else {
+        let Some(MoveLanding { target, same_file }) = self.move_landing else {
             return;
         };
-        if self.selected_file() != Some(file) {
+        if self.selected_file() != Some(target.file) {
             self.move_landing = None; // The view has moved on without it.
             return;
         }
         let Some(render) = self.current_render() else {
             return;
         };
-        let line = render.line_map.row_for(anchor);
+        let line = render.line_map.row_for(target.anchor);
         let here = render.code_line(self.diff_cursor);
         let new = line.and_then(|line| render.line_map.get(line).new);
         self.move_landing = None;
@@ -137,8 +154,10 @@ impl App {
         }
         // Come in by a row's old side and `m` has to go back out that way, which
         // isn't the side it would start with.
-        if let (Side::Old, Some(new)) = (anchor.side, new) {
-            self.move_turns.entry((file, new)).or_insert(Side::New);
+        if let (Side::Old, Some(new)) = (target.anchor.side, new) {
+            self.move_turns
+                .entry((target.file, new))
+                .or_insert(Side::New);
         }
         self.land_cursor(line);
     }

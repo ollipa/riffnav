@@ -33,7 +33,7 @@ use crate::diff::FileDiff;
 use crate::forge::{Forge, ReviewSync};
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
-use crate::render::{RenderCache, Request, Target, WAIT};
+use crate::render::{RenderCache, Request, WAIT};
 use crate::review::ReviewStore;
 use crate::session::Session;
 use crate::theme::DiffTheme;
@@ -41,7 +41,8 @@ use crate::tree::{self, Node, Row, RowKind};
 
 use self::cursor::CursorToken;
 use self::files::Finder;
-use self::prefetch::{By, Heading, PrefetchAsked};
+use self::moves::{CopyReturn, MoveLanding};
+use self::prefetch::{By, Heading, Prefetched};
 use self::terminal::{
     disable_enhanced_keys, disable_mouse, enable_enhanced_keys, enable_mouse, init_terminal,
     report_background_panics,
@@ -167,16 +168,14 @@ pub struct App {
     cursor_screen_row: Option<u32>,
     /// A `]`/`[` jump that crossed into another file, waiting for that file to be
     /// rendered before the cursor can be put on the comment it was aimed at:
-    /// `true` for its first comment, `false` for its last.
+    /// coming in forward lands on its first comment, back on its last.
     comment_landing: Option<(usize, Direction)>,
     /// A diff line an `m` jump is heading for, waiting on the event loop to render
-    /// the file it's in, the same way `comment_landing` does, and whether it set out
-    /// from that file.
-    move_landing: Option<(usize, Anchor, bool)>,
-    /// Where the last `m` onto a copy's other end came from, and where it landed, so
-    /// a second press comes back. A source can have several copies, so it can't
-    /// always say which one the reader was on.
-    copy_return: Option<(Target, Target)>,
+    /// the file it's in, the same way `comment_landing` does.
+    move_landing: Option<MoveLanding>,
+    /// The last `m` onto a copy's other end, so a second press comes back. A source
+    /// can have several copies, so it can't always say which one the reader was on.
+    copy_return: Option<CopyReturn>,
     /// The side `m` last followed from a side-by-side row with an end on both sides,
     /// by file and the row's new line number. The cursor has no side of its own, so
     /// this is how the two take turns.
@@ -189,7 +188,7 @@ pub struct App {
     heading: Heading,
     /// What the files to prefetch were worked out from, as they only change with
     /// these, and the files.
-    prefetch_asked: Option<(PrefetchAsked, Vec<usize>)>,
+    prefetch_asked: Option<Prefetched>,
     /// The id `x` has asked about deleting, waiting on the y/N answer. Holds the
     /// next keypress hostage, which is the whole point of it.
     confirm_delete: Option<String>,

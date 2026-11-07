@@ -88,6 +88,14 @@ fn position(render: &Rendered, hit: &Hit) -> Option<(usize, usize, u32)> {
     Some((start.line, start.side, hit.start))
 }
 
+/// How far a search has got: its query, the matches found, and whether it's done.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct Found {
+    query: String,
+    total: usize,
+    done: bool,
+}
+
 impl App {
     /// Whether matches are showing, which is what gives `n`, `N` and Esc their
     /// search meanings.
@@ -649,9 +657,13 @@ impl App {
     }
 
     /// What the search has found so far, which is what decides where `n` goes.
-    pub(super) fn search_found(&self) -> Option<(String, usize, bool)> {
+    pub(super) fn search_found(&self) -> Option<Found> {
         let search = self.find.search.as_ref()?;
-        Some((search.query.clone(), search.total(), search.done()))
+        Some(Found {
+            query: search.query.clone(),
+            total: search.total(),
+            done: search.done(),
+        })
     }
 
     /// What identifies the current match across a reload, along with the path of
