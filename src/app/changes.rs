@@ -206,12 +206,7 @@ impl App {
             first: dir == Direction::Forward,
         });
         if wrapped {
-            let end = if dir == Direction::Forward {
-                "top"
-            } else {
-                "bottom"
-            };
-            self.set_status(format!("Changes wrapped to the {end}"));
+            self.set_status(format!("Changes wrapped to the {}", dir.end()));
         }
     }
 }

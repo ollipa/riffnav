@@ -635,12 +635,7 @@ impl App {
         };
         self.find.landing = Some((file, landing));
         if wrapped {
-            let end = if dir == Direction::Forward {
-                "top"
-            } else {
-                "bottom"
-            };
-            self.set_status(format!("Search wrapped to the {end}"));
+            self.set_status(format!("Search wrapped to the {}", dir.end()));
         }
     }
 

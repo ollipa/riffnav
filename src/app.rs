@@ -97,6 +97,16 @@ pub enum Direction {
     Back,
 }
 
+impl Direction {
+    /// The end of the diff a jump this way comes round to when it wraps.
+    fn end(self) -> &'static str {
+        match self {
+            Self::Forward => "top",
+            Self::Back => "bottom",
+        }
+    }
+}
+
 pub struct App {
     pub files: Vec<FileDiff>,
     pub rows: Vec<Row>,
