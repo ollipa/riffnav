@@ -1,6 +1,9 @@
 //! Handing a file or a comment to `$EDITOR`.
 
-use std::io::IsTerminal;
+use std::ffi::OsStr;
+use std::hash::{BuildHasher, RandomState};
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
@@ -49,13 +52,75 @@ fn strip_scissors(text: &str) -> String {
     text.split(SCISSORS).next().unwrap_or("").trim().to_string()
 }
 
+/// A directory of our own under the temp dir (`$TMPDIR` if set) for the comment
+/// buffer, removed with everything in it when dropped: after the editor exits,
+/// fails or can't start, and when a panic unwinds past it. The editor's swap
+/// and backup files land in it too, so they go with it.
+///
+/// The temp dir is shared with every local user, so nothing in it is trusted.
+/// The directory's name is random, so it can't be guessed ahead of time, and
+/// creating it fails if anything, a symlink included, already has that name.
+/// It's `0700`, so nobody else can plant or swap a file inside it.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> io::Result<Self> {
+        Self::new_in(&std::env::temp_dir())
+    }
+
+    fn new_in(parent: &Path) -> io::Result<Self> {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        // A clash with a random name means someone is squatting on names, or
+        // the dice came up twice; either way a fresh name is the answer.
+        let mut last = None;
+        for _ in 0..16 {
+            let dir = parent.join(format!("riffnav-{}", random_hex()));
+            match builder.create(&dir) {
+                Ok(()) => return Ok(Self(dir)),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| io::Error::other("no free scratch name")))
+    }
+
+    /// Create `name` inside, readable and writable only by us, holding `text`.
+    fn write(&self, name: &str, text: &str) -> io::Result<PathBuf> {
+        let path = self.0.join(name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(&path)?.write_all(text.as_bytes())?;
+        Ok(path)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// 64 bits no other user can predict: `RandomState` hashes with keys the OS's
+/// random source seeded, so its output is unguessable without them.
+fn random_hex() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let n = RandomState::new().hash_one((std::process::id(), nanos));
+    format!("{n:016x}")
+}
+
 impl App {
     /// Suspend the TUI, run `$VISUAL`/`$EDITOR` on `path`, then resume. Returns the
     /// editor's name and how it exited, for the caller to report.
     fn run_editor(
         &mut self,
         terminal: &mut DefaultTerminal,
-        path: &str,
+        path: &OsStr,
     ) -> (String, std::io::Result<std::process::ExitStatus>) {
         disable_enhanced_keys();
         disable_mouse();
@@ -64,7 +129,7 @@ impl App {
             .or_else(|_| std::env::var("EDITOR"))
             .unwrap_or_else(|_| "vi".to_string());
         let mut cmd = Command::new(&editor);
-        cmd.arg(path::to_os(path));
+        cmd.arg(path);
         // A piped diff (`git diff | riffnav`) leaves our stdin a spent pipe; the
         // editor would inherit it and complain that input isn't a terminal. The
         // TUI already talks to /dev/tty, so hand the editor the same.
@@ -85,7 +150,7 @@ impl App {
 
     /// The `o` key: edit the selected file in place.
     pub(super) fn open_editor(&mut self, terminal: &mut DefaultTerminal, path: &str) -> Result<()> {
-        let (editor, status) = self.run_editor(terminal, path);
+        let (editor, status) = self.run_editor(terminal, &path::to_os(path));
         self.set_status(match status {
             Ok(s) if s.success() => format!("Edited {path}"),
             Ok(s) => format!("{editor} exited: {s}"),
@@ -101,14 +166,18 @@ impl App {
         terminal: &mut DefaultTerminal,
         pending: PendingComment,
     ) -> Result<()> {
-        let path = std::env::temp_dir().join(format!("riffnav-comment-{}.md", std::process::id()));
         let template = comment_template(&pending);
-        if let Err(e) = std::fs::write(&path, template) {
-            self.set_status(format!("Couldn't open a comment buffer: {e}"));
-            return Ok(());
-        }
+        // Dropped on the way out, whichever way that is, taking the buffer with it.
+        let buffer = Scratch::new().and_then(|s| Ok((s.write("comment.md", &template)?, s)));
+        let (path, _scratch) = match buffer {
+            Ok(made) => made,
+            Err(e) => {
+                self.set_status(format!("Couldn't open a comment buffer: {e}"));
+                return Ok(());
+            }
+        };
 
-        let (editor, status) = self.run_editor(terminal, &path.to_string_lossy());
+        let (editor, status) = self.run_editor(terminal, path.as_os_str());
         match status {
             Ok(s) if s.success() => {
                 let typed = std::fs::read_to_string(&path).unwrap_or_default();
@@ -117,7 +186,6 @@ impl App {
             Ok(s) => self.set_status(format!("{editor} exited: {s} — comment discarded")),
             Err(e) => self.set_status(format!("Couldn't launch {editor}: {e}")),
         }
-        let _ = std::fs::remove_file(&path);
         Ok(())
     }
 }
@@ -126,6 +194,41 @@ impl App {
 mod tests {
     use super::*;
     use crate::comment::{Anchor, PendingComment};
+
+    /// The buffer goes in a fresh private directory under a name nobody can
+    /// guess, and everything in that directory goes when it's dropped.
+    #[cfg(unix)]
+    #[test]
+    fn the_scratch_buffer_is_private_and_cleaned_up() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = crate::testing::TempDir::new("scratch");
+        let a = Scratch::new_in(&tmp).unwrap();
+        let b = Scratch::new_in(&tmp).unwrap();
+        assert_ne!(a.0, b.0, "every buffer gets a name of its own");
+
+        let path = a.write("comment.md", "hello").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&a.0), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        // A second buffer of the same name isn't written through.
+        assert!(a.write("comment.md", "again").is_err());
+
+        // An editor's swap file goes with it.
+        std::fs::write(a.0.join(".comment.md.swp"), "").unwrap();
+        let dir = a.0.clone();
+        drop(a);
+        assert!(!dir.exists());
+
+        // And on a panic, too.
+        let dir = b.0.clone();
+        let unwound = std::panic::catch_unwind(move || {
+            let _held = b;
+            panic!("the editor round trip blew up");
+        });
+        assert!(unwound.is_err());
+        assert!(!dir.exists());
+    }
 
     /// The editor buffer must round-trip a body containing `#`: review notes
     /// routinely contain markdown headings and shell snippets.
