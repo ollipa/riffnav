@@ -1,10 +1,9 @@
 //! Which diff is shown, and reloading it.
 
+use super::{App, CONTEXT_STEP};
 use crate::autodiff::{DiffSource, GitDiff};
 use crate::diff::FileDiff;
 use crate::tree::{self, RowKind};
-
-use super::{App, CONTEXT_STEP};
 
 impl App {
     /// Record the git command behind the diff (`riffnav diff|show`), so the

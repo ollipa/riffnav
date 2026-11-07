@@ -2,9 +2,8 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::comment::{Comment, Composer, PendingComment};
-
 use super::App;
+use crate::comment::{Comment, Composer, PendingComment};
 
 impl App {
     /// The rows the composer must open clear of, inside the diff pane —

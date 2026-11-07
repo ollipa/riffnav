@@ -3,9 +3,8 @@
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 
-use crate::tree::RowKind;
-
 use super::{App, Focus, MIN_DIFF_WIDTH};
+use crate::tree::RowKind;
 
 impl App {
     /// Route a mouse event to the pane under the cursor. Overlays own the whole

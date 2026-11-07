@@ -5,17 +5,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
+use super::layout::{COPY_MARK, MOVE_MARK, WRAP_MARK};
+use super::marks::Marks;
+use super::spec::CommentLayer;
+use super::wrap::{WRAP, rows_of, skip_rows};
 use crate::comment::LineMap;
 use crate::comment::anchor::Source;
 use crate::comment::render as comment_render;
 use crate::comment::render::CommentBlock;
 use crate::search::Hit;
 use crate::theme::DiffTheme;
-
-use super::layout::{COPY_MARK, MOVE_MARK, WRAP_MARK};
-use super::marks::Marks;
-use super::spec::CommentLayer;
-use super::wrap::{WRAP, rows_of, skip_rows};
 
 /// A rendered file, ready to drop into the diff viewport.
 pub struct Rendered {

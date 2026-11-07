@@ -7,11 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::{mem, thread};
 
+use super::highlight::{MAX_FILE_BYTES, MAX_LINE_BYTES};
 use crate::autodiff::Tree;
 use crate::diff::path;
 use crate::git;
-
-use super::highlight::{MAX_FILE_BYTES, MAX_LINE_BYTES};
 
 /// How often a running git is checked on, to stop it if the job was cancelled.
 const GIT_POLL: Duration = Duration::from_millis(2);

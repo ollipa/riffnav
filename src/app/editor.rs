@@ -6,13 +6,12 @@ use std::process::{Command, Stdio};
 use anyhow::Result;
 use ratatui::DefaultTerminal;
 
-use crate::comment::PendingComment;
-use crate::diff::path;
-
 use super::App;
 use super::terminal::{
     disable_enhanced_keys, disable_mouse, enable_enhanced_keys, enable_mouse, init_terminal,
 };
+use crate::comment::PendingComment;
+use crate::diff::path;
 
 /// Separator between a comment body and the explanatory footer, borrowed from
 /// git's `--verbose` scissors. Everything from this line down is discarded, which

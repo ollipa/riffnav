@@ -1,12 +1,11 @@
 //! The comment store, and the `]` and `[` keys.
 
+use super::App;
+use super::prefetch::By;
 use crate::comment::{CommentStore, CommentWatch};
 use crate::diff::FileDiff;
 use crate::render::CommentLayer;
 use crate::session::Session;
-
-use super::App;
-use super::prefetch::By;
 
 impl App {
     /// Re-read the comment file, discarding what was in memory (every local write

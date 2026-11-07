@@ -1,8 +1,7 @@
 //! The line cursor and scrolling the diff.
 
-use crate::theme::DiffTheme;
-
 use super::{App, CURSOR_PADDING, Focus};
+use crate::theme::DiffTheme;
 
 /// What a render looks like, as far as the line cursor's index into it goes. When
 /// this changes, the index is stale.

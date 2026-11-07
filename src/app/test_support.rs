@@ -2,11 +2,10 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use super::App;
 use crate::comment::CommentStore;
 use crate::config::Config;
 use crate::diff::{FileDiff, FileStatus};
-
-use super::App;
 
 impl App {
     /// Turn comments on with an in-memory store, bypassing disk and git scope

@@ -4,11 +4,10 @@ use std::collections::HashSet;
 
 use fuzzy_matcher::FuzzyMatcher;
 
-use crate::diff::FileStatus;
-use crate::tree::{self, Row, RowKind};
-
 use super::App;
 use super::prefetch::By;
+use crate::diff::FileStatus;
+use crate::tree::{self, Row, RowKind};
 
 /// State of the fuzzy file-finder overlay.
 pub struct Finder {

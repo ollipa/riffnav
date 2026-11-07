@@ -7,10 +7,6 @@ use std::sync::mpsc::Sender;
 
 use ratatui::text::{Line, Span, Text};
 
-use crate::comment::LineMap;
-use crate::comment::store::{Anchor, Comment};
-use crate::diff::{self, FileDiff, Row};
-
 use super::cache::Key;
 use super::copies::CopyIndex;
 use super::highlight::{Parsing, Run};
@@ -23,6 +19,9 @@ use super::test_support;
 use super::tokens::Tokens;
 use super::words::Changes;
 use super::{highlight, layout, starts, words};
+use crate::comment::LineMap;
+use crate::comment::store::{Anchor, Comment};
+use crate::diff::{self, FileDiff, Row};
 
 /// The comments to draw into one file's render.
 ///

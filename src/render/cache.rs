@@ -12,13 +12,6 @@ use std::time::{Duration, Instant};
 use ratatui::text::Text;
 use twox_hash::XxHash3_128;
 
-use crate::autodiff::Tree;
-#[cfg(test)]
-use crate::comment::LineMap;
-use crate::comment::store::Anchor;
-use crate::diff::FileDiff;
-use crate::theme::DiffTheme;
-
 use super::copies::{CopyIndex, Git, Jump};
 use super::jobs::Jobs;
 use super::moves::MoveIndex;
@@ -30,6 +23,12 @@ use super::starts::StartReader;
 #[cfg(test)]
 use super::test_support::{self, Hooks};
 use super::{WAIT, copies};
+use crate::autodiff::Tree;
+#[cfg(test)]
+use crate::comment::LineMap;
+use crate::comment::store::Anchor;
+use crate::diff::FileDiff;
+use crate::theme::DiffTheme;
 
 /// Roughly what the cached renders may take up. Going over drops the ones looked at
 /// longest ago, and the file on screen stays whatever its size.

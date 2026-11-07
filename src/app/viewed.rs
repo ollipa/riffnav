@@ -1,12 +1,11 @@
 //! Viewed marks, and syncing them to the pull request.
 
+use super::prefetch::By;
+use super::{App, SYNC_FLUSH_GRACE};
 use crate::autodiff::{DiffSource, GitDiff};
 use crate::forge::ReviewSync;
 use crate::review::ReviewStore;
 use crate::tree::RowKind;
-
-use super::prefetch::By;
-use super::{App, SYNC_FLUSH_GRACE};
 
 impl App {
     /// Arm one-way "viewed" sync to the branch's GitHub PR (the `review_sync_github`

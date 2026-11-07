@@ -1,9 +1,8 @@
 //! The `m` key: from a moved or copied line to its other end.
 
+use super::App;
 use crate::comment::{Anchor, Side};
 use crate::render::{Jump, Target};
-
-use super::App;
 
 /// One end of what `m` can follow from a row.
 pub(super) struct MoveEnd {
