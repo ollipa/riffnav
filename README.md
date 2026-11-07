@@ -59,7 +59,9 @@ from every parent, which is also what `riffnav diff` shows during a merge confli
 Rows are simply removed, added or context, whichever parents they came from. The
 old line number follows the first parent, so a line only another parent had has
 none. A clean merge has no such lines, so it opens nothing; to read what it brought
-in, use `riffnav show --first-parent <merge>`.
+in, use `riffnav show --first-parent <merge>`. A conflict git can't diff, such as a
+file one side deleted and the other modified, is listed as `U` with how the merge
+left it (`unmerged: a.txt (deleted by them)`).
 
 ### Use it as git's pager
 

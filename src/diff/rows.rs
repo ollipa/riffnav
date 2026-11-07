@@ -325,7 +325,7 @@ fn combined_modes(modes: &str) -> (Option<&str>, Option<&str>) {
 }
 
 /// What a file's diff says beyond its hunks, for the header: `binary file`,
-/// `mode +x`. Several of these changes have no hunks at all, so without a note
+/// `mode +x`, how a merge left an unmerged file. Several of these changes have no hunks at all, so without a note
 /// the pane would be empty.
 pub fn notes(file: &FileDiff) -> Vec<String> {
     let mut notes = Vec::new();
@@ -341,6 +341,8 @@ pub fn notes(file: &FileDiff) -> Vec<String> {
             new_mode = Some(mode);
         } else if let Some(modes) = line.strip_prefix("mode ").filter(|_| combined) {
             (old_mode, new_mode) = combined_modes(modes);
+        } else if let Some(how) = line.strip_prefix("* Conflict: ") {
+            notes.push(how.to_string());
         } else if line == "GIT binary patch"
             || (line.starts_with("Binary files ") && line.ends_with(" differ"))
         {

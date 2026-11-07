@@ -14,8 +14,10 @@
 //! in explicitly (see [`untracked_diff`]) — otherwise a brand-new file would be
 //! invisible until staged.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
@@ -302,11 +304,12 @@ impl GitDiff {
     /// Run the command, returning the raw unified-diff text. Errors carry git's
     /// own stderr.
     pub fn load(&self) -> Result<String> {
-        let tracked = run_git(&self.argv()?);
+        let here = Path::new(".");
+        let tracked = run_git(&self.argv()?).map(|text| describe_unmerged(here, text));
         if self.includes_untracked() {
             // `git diff [HEAD]` fails on an unborn branch (no commits yet); treat
             // that as "no tracked changes" so untracked files still surface.
-            Ok(tracked.unwrap_or_default() + &untracked_diff())
+            Ok(tracked.unwrap_or_default() + &untracked_diff(here))
         } else {
             tracked
         }
@@ -317,13 +320,15 @@ impl GitDiff {
     /// untracked path is diffed against `/dev/null`, but only in a view that folds
     /// them in, so a tracked file that is now unchanged reports no diff.
     pub fn load_file(&self, path: &str) -> Result<String> {
-        if self.includes_untracked() && is_untracked(path) {
-            return Ok(diff_against_devnull(&path::to_os(path)).unwrap_or_default());
+        let here = Path::new(".");
+        if self.includes_untracked() && is_untracked(here, path) {
+            let diff = git::toplevel(here).and_then(|top| diff_against_devnull(&top, path));
+            return Ok(diff.unwrap_or_default());
         }
         let mut argv = self.argv()?;
         argv.push("--".to_string());
         argv.push(literal_pathspec(path));
-        match run_git(&argv) {
+        match run_git(&argv).map(|text| describe_unmerged(here, text)) {
             Ok(text) => Ok(text),
             // An unborn branch, as in `load`.
             Err(_) if self.includes_untracked() => Ok(String::new()),
@@ -419,16 +424,18 @@ fn load(source: DiffSource, base: Option<&str>) -> Result<String> {
 }
 
 /// The pathspec for exactly the file `path`, so that a name like `*.txt` or `:x`
-/// means itself.
+/// means itself. `path` is from the top of the repository, as git's diff names
+/// are, wherever riffnav was started.
 fn literal_pathspec(path: &str) -> String {
-    format!(":(literal){path}")
+    format!(":(top,literal){path}")
 }
 
-/// Whether `path` is an untracked, non-ignored file (so `git diff` omits it).
-fn is_untracked(path: &str) -> bool {
+/// Whether `path` is an untracked, non-ignored file (so `git diff` omits it), asking
+/// git in `dir`.
+fn is_untracked(dir: &Path, path: &str) -> bool {
     let pathspec = path::to_os(&literal_pathspec(path));
     let flags = ["ls-files", "--others", "--exclude-standard", "--"].map(OsStr::new);
-    git::raw(flags.iter().copied().chain([pathspec.as_os_str()]))
+    git::raw(dir, flags.into_iter().chain([pathspec.as_os_str()]))
         .is_some_and(|list| !list.trim_ascii().is_empty())
 }
 
@@ -481,15 +488,22 @@ fn run_git(args: &[String]) -> Result<String> {
 
 /// Synthetic "added file" diffs for every untracked, non-ignored file, so the
 /// working-tree views show brand-new files that `git diff` omits by design.
-fn untracked_diff() -> String {
-    let flags = ["ls-files", "--others", "--exclude-standard", "-z"].map(OsStr::new);
-    let Some(list) = git::raw(flags) else {
+///
+/// Run from the top of the repository: `ls-files` started in a subdirectory lists
+/// only that subdirectory, and names its files from there rather than from the
+/// top, as `git diff` does. `dir` is anywhere in the work tree.
+fn untracked_diff(dir: &Path) -> String {
+    let Some(top) = git::toplevel(dir) else {
+        return String::new();
+    };
+    let flags = ["ls-files", "--others", "--exclude-standard", "-z"];
+    let Some(list) = git::raw(&top, flags) else {
         return String::new();
     };
     // `-z` is NUL-separated and unquoted, so paths with spaces/newlines stay intact.
     let mut out = String::new();
     for name in list.split(|byte| *byte == 0).filter(|p| !p.is_empty()) {
-        if let Some(diff) = diff_against_devnull(&path::to_os(&path::from_bytes(name))) {
+        if let Some(diff) = diff_against_devnull(&top, &path::from_bytes(name)) {
             out.push_str(&diff);
         }
     }
@@ -497,13 +511,114 @@ fn untracked_diff() -> String {
 }
 
 /// `git diff --no-index /dev/null <path>` renders an untracked file as fully
-/// added. `--no-index` exits non-zero whenever the inputs differ (always the
-/// case here), so success is judged by whether it produced output, not by the
-/// exit status.
-fn diff_against_devnull(path: &OsStr) -> Option<String> {
-    let out = Command::new("git").args(devnull_args(path)).output().ok()?;
+/// added, `path` named from the top of the repository at `top`. `--no-index`
+/// exits non-zero whenever the inputs differ (always the case here), so success
+/// is judged by whether it produced output, not by the exit status.
+///
+/// git reads a file named `-` as its stdin, even after `--`, so that one is
+/// passed as `./-` and the name put back in the headers. Stdin is null anyway, so
+/// nothing could ever wait on it.
+fn diff_against_devnull(top: &Path, path: &str) -> Option<String> {
+    let stdin_name = path == "-";
+    let arg = path::to_os(if stdin_name { "./-" } else { path });
+    let out = Command::new("git")
+        .current_dir(top)
+        .stdin(Stdio::null())
+        .args(devnull_args(&arg))
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    (!text.is_empty()).then_some(text)
+    if text.is_empty() {
+        return None;
+    }
+    Some(if stdin_name {
+        unwrap_dot_dash(&text)
+    } else {
+        text
+    })
+}
+
+/// `./-`'s diff, with the name in its headers back to `-`. The other side is
+/// `/dev/null`, so `/./-` can only be the file's name.
+fn unwrap_dot_dash(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_hunk = false;
+    for line in text.split_inclusive('\n') {
+        in_hunk |= line.starts_with("@@");
+        match in_hunk {
+            true => out.push_str(line),
+            false => out.push_str(&line.replace("/./-", "/-")),
+        }
+    }
+    out
+}
+
+/// The diff text with a `* Conflict: <how>` line after each `* Unmerged path <name>`
+/// git wrote, saying how the merge left it, in `git status`'s words. git writes
+/// that line for a path it can't diff, such as one side deleted and the other
+/// modified, and the line alone doesn't say which. `dir` is anywhere in the work
+/// tree.
+fn describe_unmerged(dir: &Path, text: String) -> String {
+    const UNMERGED: &str = "* Unmerged path ";
+    if !text.starts_with(UNMERGED) && !text.contains(&format!("\n{UNMERGED}")) {
+        return text;
+    }
+    let stages = unmerged_stages(dir);
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        out.push_str(line);
+        let Some(name) = line.strip_prefix(UNMERGED) else {
+            continue;
+        };
+        let name = name.strip_suffix('\n').unwrap_or(name);
+        if let Some(how) = stages.get(name).and_then(|&s| conflict(s)) {
+            if !line.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!("* Conflict: {how}\n"));
+        }
+    }
+    out
+}
+
+/// Which index stages each unmerged path has, as bits 1 (base), 2 (ours) and 3
+/// (theirs), by its name from the top of the repository, asking git in `dir`.
+fn unmerged_stages(dir: &Path) -> HashMap<String, u8> {
+    let flags = ["ls-files", "--unmerged", "--full-name", "-z", "--", ":/"];
+    let mut stages = HashMap::new();
+    for entry in git::raw(dir, flags)
+        .unwrap_or_default()
+        .split(|byte| *byte == 0)
+    {
+        // `<mode> <id> <stage>\t<name>`
+        let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
+            continue;
+        };
+        let Some(stage @ b'1'..=b'3') = entry[..tab].last().copied() else {
+            continue;
+        };
+        *stages
+            .entry(path::from_bytes(&entry[tab + 1..]))
+            .or_insert(0) |= 1 << (stage - b'0');
+    }
+    stages
+}
+
+/// `git status`'s words for an unmerged path with these stages.
+fn conflict(stages: u8) -> Option<&'static str> {
+    const BASE: u8 = 1 << 1;
+    const OURS: u8 = 1 << 2;
+    const THEIRS: u8 = 1 << 3;
+    Some(match stages {
+        s if s == BASE | OURS | THEIRS => "both modified",
+        s if s == OURS | THEIRS => "both added",
+        s if s == BASE | OURS => "deleted by them",
+        s if s == BASE | THEIRS => "deleted by us",
+        BASE => "both deleted",
+        OURS => "added by us",
+        THEIRS => "added by them",
+        _ => return None,
+    })
 }
 
 /// The arguments for [`diff_against_devnull`]. `color.ui=never` for the same
@@ -522,6 +637,7 @@ fn devnull_args(path: &OsStr) -> Vec<&OsStr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::FileStatus;
 
     /// The `git` arguments a view runs with, for assertions below.
     fn argv(source: DiffSource, extra: &[&str]) -> Vec<String> {
@@ -742,5 +858,105 @@ mod tests {
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(text.contains("+one"), "{text}");
         assert!(!text.contains("external"), "{text}");
+    }
+
+    /// The untracked files of a repository, named from its top, from a nested
+    /// subdirectory of it. A file named `-` is read, not taken for stdin.
+    #[test]
+    fn untracked_files_are_found_and_named_from_the_top_anywhere_in_the_tree() {
+        let repo = crate::testing::Repo::new();
+        repo.commit("tracked.txt", "x\n");
+        repo.write("top.txt", "top\n");
+        repo.write("a/b/low.txt", "low\n");
+        repo.write("-", "dash\n");
+        let deep = repo.0.join("a/b");
+        let files = crate::diff::parse(&untracked_diff(&deep));
+        let mut got: Vec<(&str, u32)> = files.iter().map(|f| (f.path(), f.additions)).collect();
+        got.sort();
+        assert_eq!(got, [("-", 1), ("a/b/low.txt", 1), ("top.txt", 1)]);
+        let dash = files.iter().find(|f| f.path() == "-").unwrap();
+        assert!(dash.raw.starts_with("diff --git a/- b/-\n"), "{}", dash.raw);
+        assert!(
+            dash.raw.contains("+++ b/-\n@@ -0,0 +1 @@\n+dash\n"),
+            "{}",
+            dash.raw
+        );
+
+        assert!(is_untracked(&deep, "top.txt"));
+        assert!(is_untracked(&deep, "a/b/low.txt"));
+        assert!(!is_untracked(&deep, "low.txt"));
+        assert!(!is_untracked(&deep, "tracked.txt"));
+    }
+
+    /// One file's diff, as `load_file` asks for it, from a subdirectory.
+    #[test]
+    fn one_file_is_diffed_by_its_name_from_the_top() {
+        let repo = crate::testing::Repo::new();
+        repo.commit("top.txt", "x\n");
+        repo.write("top.txt", "y\n");
+        std::fs::create_dir_all(repo.0.join("sub")).unwrap();
+        let out = Command::new("git")
+            .current_dir(repo.0.join("sub"))
+            .args(["diff", "--"])
+            .arg(literal_pathspec("top.txt"))
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("+y"),
+            "{out:?}"
+        );
+    }
+
+    /// Each way a merge can leave a path that `git diff` can only call unmerged
+    /// is named, as `git status` names it.
+    #[test]
+    fn unmerged_paths_say_how_the_merge_left_them() {
+        let repo = crate::testing::Repo::new();
+        let files = ["model", "dus", "ddel", "rn"];
+        for name in files {
+            repo.write(&format!("{name}.txt"), "1\n2\n3\n");
+        }
+        repo.commit("both.txt", "1\n");
+        repo.git(&["checkout", "-q", "-b", "other"]);
+        repo.git(&["rm", "-q", "model.txt", "ddel.txt"]);
+        repo.git(&["mv", "rn.txt", "rn_theirs.txt"]);
+        repo.write("dus.txt", "1\n2\n3\nthem\n");
+        repo.commit("aa.txt", "theirs\n");
+        repo.git(&["checkout", "-q", "-"]);
+        repo.git(&["rm", "-q", "dus.txt", "ddel.txt"]);
+        repo.git(&["mv", "rn.txt", "rn_ours.txt"]);
+        repo.write("model.txt", "1\n2\n3\nours\n");
+        repo.commit("aa.txt", "ours\n");
+        assert!(!repo.run(&["merge", "other"]).status.success());
+
+        std::fs::create_dir_all(repo.0.join("sub")).unwrap();
+        let text = String::from_utf8(repo.run(&["diff", "--staged"]).stdout).unwrap();
+        let described = describe_unmerged(&repo.0.join("sub"), text);
+        let files = crate::diff::parse(&described);
+        let got: Vec<_> = files
+            .iter()
+            .map(|f| (f.path(), f.status, crate::diff::notes(f)))
+            .collect();
+        let want = [
+            ("aa.txt", "both added"),
+            ("ddel.txt", "both deleted"),
+            ("dus.txt", "deleted by us"),
+            ("model.txt", "deleted by them"),
+            ("rn_ours.txt", "added by us"),
+            ("rn_theirs.txt", "added by them"),
+        ];
+        assert_eq!(got.len(), want.len(), "{described}");
+        for ((path, status, notes), (name, how)) in got.iter().zip(want) {
+            assert_eq!((*path, *status), (name, FileStatus::Unmerged));
+            assert_eq!(notes, &[how.to_string()], "{name}");
+        }
+    }
+
+    /// A diff with no unmerged paths comes back untouched, without asking git.
+    #[test]
+    fn a_diff_without_unmerged_paths_is_left_as_it_is() {
+        let text = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-* Unmerged path f\n+x\n";
+        let missing = Path::new("/nonexistent/riffnav");
+        assert_eq!(describe_unmerged(missing, text.to_string()), text);
     }
 }

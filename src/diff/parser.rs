@@ -17,7 +17,10 @@ pub fn parse(input: &str) -> Vec<FileDiff> {
     let mut starts = Vec::new();
     let mut offset = 0;
     for line in input.split_inclusive('\n') {
-        if line.starts_with("diff --git ") || combined_path(line).is_some() {
+        if line.starts_with("diff --git ")
+            || combined_path(line).is_some()
+            || unmerged_path(line).is_some()
+        {
             starts.push(offset);
         }
         offset += line.len();
@@ -34,6 +37,16 @@ pub fn parse(input: &str) -> Vec<FileDiff> {
 }
 
 fn parse_one(raw: &str) -> FileDiff {
+    if let Some(name) = unmerged_path(raw.lines().next().unwrap_or("")) {
+        return FileDiff {
+            old_path: Some(name.to_string()),
+            new_path: Some(name.to_string()),
+            status: FileStatus::Unmerged,
+            additions: 0,
+            deletions: 0,
+            raw: raw.to_string(),
+        };
+    }
     let mut status = FileStatus::Modified;
     let mut old_path = None;
     let mut new_path = None;
@@ -128,6 +141,14 @@ pub fn hunks(raw: &str) -> Vec<Hunk> {
 fn combined_path(line: &str) -> Option<&str> {
     line.strip_prefix("diff --cc ")
         .or_else(|| line.strip_prefix("diff --combined "))
+}
+
+/// The path in git's `* Unmerged path <name>` line, which stands for a file a
+/// merge left in conflict in a way git can't diff. The name is written as is,
+/// never quoted.
+fn unmerged_path(line: &str) -> Option<&str> {
+    let name = line.strip_prefix("* Unmerged path ")?;
+    Some(name.strip_suffix('\n').unwrap_or(name))
 }
 
 /// Whether a file's verbatim diff text is a merge's combined diff.
@@ -337,6 +358,29 @@ fn strip_ab(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A path a merge left in conflict that git can't diff is a file of its own,
+    /// with no hunks, and doesn't trail onto the combined diff before it.
+    #[test]
+    fn an_unmerged_path_is_a_file_with_no_hunks() {
+        let diff = "diff --cc a.txt\nindex 1,2..0\n--- a/a.txt\n+++ b/a.txt\n\
+                    @@@ -1,1 -1,1 +1,2 @@@\n +x\n+ y\n\
+                    * Unmerged path sp ace.txt\n* Conflict: deleted by them\n\
+                    * Unmerged path -d";
+        let files = parse(diff);
+        assert_eq!(files.len(), 3);
+        assert!(!files[0].raw.contains("Unmerged"), "{:?}", files[0].raw);
+        assert_eq!((files[0].additions, files[0].deletions), (2, 0));
+        for (f, name) in files[1..].iter().zip(["sp ace.txt", "-d"]) {
+            assert_eq!(f.status, FileStatus::Unmerged);
+            assert_eq!(f.path(), name);
+            assert_eq!(f.old_path.as_deref(), Some(name));
+            assert_eq!((f.additions, f.deletions), (0, 0));
+            assert!(hunks(&f.raw).is_empty());
+        }
+        assert_eq!(crate::diff::notes(&files[1]), ["deleted by them"]);
+        assert!(crate::diff::notes(&files[2]).is_empty());
+    }
 
     #[test]
     fn splits_multiple_files() {

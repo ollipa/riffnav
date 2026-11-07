@@ -8,6 +8,9 @@ pub enum FileStatus {
     Deleted,
     Renamed,
     Copied,
+    /// Left unmerged by a merge, in a way git can't diff, such as one side
+    /// deleting the file and the other modifying it. It has no hunks.
+    Unmerged,
 }
 
 impl FileStatus {
@@ -19,6 +22,7 @@ impl FileStatus {
             FileStatus::Deleted => 'D',
             FileStatus::Renamed => 'R',
             FileStatus::Copied => 'C',
+            FileStatus::Unmerged => 'U',
         }
     }
 }

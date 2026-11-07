@@ -151,6 +151,7 @@ pub(super) fn status_color(status: FileStatus) -> Color {
         FileStatus::Deleted => Color::Red,
         FileStatus::Renamed => Color::Cyan,
         FileStatus::Copied => Color::Magenta,
+        FileStatus::Unmerged => Color::LightRed,
     }
 }
 

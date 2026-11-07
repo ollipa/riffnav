@@ -504,6 +504,7 @@ fn file_header(file: &FileDiff, width: usize, palette: &DiffPalette) -> Vec<Line
         (FileStatus::Deleted, _) => format!("removed: {path}"),
         (FileStatus::Renamed, Some(old)) => format!("renamed: {} ⟶ {path}", path::shown(old)),
         (FileStatus::Copied, Some(old)) => format!("copied: {} ⟶ {path}", path::shown(old)),
+        (FileStatus::Unmerged, _) => format!("unmerged: {path}"),
         _ => path.to_string(),
     };
     let notes = diff::notes(file);
@@ -990,6 +991,10 @@ mod tests {
             (
                 "diff --git a/o b/n\nsimilarity index 100%\nrename from o\nrename to n\n",
                 "renamed: o ⟶ n",
+            ),
+            (
+                "* Unmerged path m.txt\n* Conflict: deleted by them\n",
+                "unmerged: m.txt (deleted by them)",
             ),
         ] {
             let (text, map) = render(raw);

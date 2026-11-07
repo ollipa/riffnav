@@ -1,7 +1,7 @@
 //! Running git, and reading back what it said.
 
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use anyhow::{Result, bail};
@@ -25,11 +25,24 @@ pub fn ok(args: &[&str]) -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
-/// Untrimmed stdout on success, for output where every byte counts, such as
-/// NUL-separated names.
-pub fn raw<'a>(args: impl IntoIterator<Item = &'a OsStr>) -> Option<Vec<u8>> {
-    let out = Command::new("git").args(args).output().ok()?;
+/// Untrimmed stdout of git run in `dir`, on success, for output where every byte
+/// counts, such as NUL-separated names.
+pub fn raw(dir: &Path, args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Option<Vec<u8>> {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .ok()?;
     out.status.success().then_some(out.stdout)
+}
+
+/// The top of the work tree `dir` is in, which is where git's diff names start
+/// from wherever in it git was run.
+pub fn toplevel(dir: &Path) -> Option<PathBuf> {
+    let out = raw(dir, ["rev-parse", "--show-toplevel"])?;
+    let top = String::from_utf8_lossy(&out);
+    let top = top.strip_suffix('\n').unwrap_or(&top);
+    (!top.is_empty()).then(|| PathBuf::from(top))
 }
 
 /// A git to run in `repo` over pipes, its stderr dropped.
