@@ -6,10 +6,10 @@ use twox_hash::XxHash3_128;
 
 use super::filter::{is_blank, is_code, is_source, says_generated, shape_of};
 use super::{MAX_PLACES, MIN_LINES};
+use crate::diff::change_runs;
 use crate::diff::{self, FileDiff, Row, RowKind};
 use crate::render::moves::MoveIndex;
 use crate::render::starts::{self, lines_above};
-use crate::render::words::change_runs;
 
 /// A line's text with every bit of whitespace taken out, as a number.
 pub(super) type Key = u64;

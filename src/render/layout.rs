@@ -10,9 +10,10 @@ use unicode_width::UnicodeWidthChar;
 use super::copies::FileCopies;
 use super::highlight::Run;
 use super::moves::FileMoves;
-use super::words::{Changes, change_runs};
+use super::words::Changes;
 use crate::comment::LineMap;
 use crate::comment::anchor::{LineNumbers, Source};
+use crate::diff::change_runs;
 use crate::diff::{self, FileDiff, FileStatus, Row, RowKind, path};
 use crate::theme::{DiffPalette, DiffTheme};
 

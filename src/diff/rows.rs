@@ -275,6 +275,33 @@ pub fn change_ids(rows: &[Row]) -> Vec<Option<u32>> {
     ids
 }
 
+/// Each block of removed rows and the added rows straight after it, as row
+/// indices. A `\ No newline` marker can sit between the two, or inside either.
+/// Either side can be empty, for a pure addition or deletion.
+pub fn change_runs(rows: &[Row]) -> Vec<(Vec<usize>, Vec<usize>)> {
+    let mut runs = Vec::new();
+    let (mut removed, mut added) = (Vec::new(), Vec::new());
+    for (i, row) in rows.iter().enumerate() {
+        match row.kind {
+            RowKind::Removed if added.is_empty() => removed.push(i),
+            RowKind::Added => added.push(i),
+            RowKind::NoNewline => {}
+            _ => {
+                if !removed.is_empty() || !added.is_empty() {
+                    runs.push((std::mem::take(&mut removed), std::mem::take(&mut added)));
+                }
+                if row.kind == RowKind::Removed {
+                    removed.push(i);
+                }
+            }
+        }
+    }
+    if !removed.is_empty() || !added.is_empty() {
+        runs.push((removed, added));
+    }
+    runs
+}
+
 /// Whether the file has any added or removed rows, which a binary file, a pure
 /// rename or a mode change doesn't.
 pub fn has_changes(file: &FileDiff) -> bool {
@@ -582,5 +609,12 @@ mod tests {
     fn a_mode_line_inside_a_hunk_is_code_not_a_note() {
         let f = one("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n old mode 100644\n");
         assert!(notes(&f).is_empty());
+    }
+
+    #[test]
+    fn a_pure_addition_is_a_run_of_its_own() {
+        let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n keep\n+new\n";
+        let rows = rows(&one(raw));
+        assert_eq!(change_runs(&rows), [(vec![], vec![2])]);
     }
 }

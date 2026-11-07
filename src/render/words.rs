@@ -19,7 +19,7 @@ use similar::{Algorithm, DiffOp, capture_diff_slices};
 use super::highlight::MAX_LINE_BYTES;
 use super::moves::FileMoves;
 use super::tokens::{self, Tokens};
-use crate::diff::{Row, RowKind};
+use crate::diff::{Row, change_runs};
 
 /// How much of two lines' non-blank text must match to call them one edited line.
 const MIN_SIMILARITY: f32 = 0.4;
@@ -83,33 +83,6 @@ pub fn changes(
         }
     }
     out
-}
-
-/// Each block of removed rows and the added rows straight after it, as row
-/// indices. A `\ No newline` marker can sit between the two, or inside either.
-/// Either side can be empty, for a pure addition or deletion.
-pub fn change_runs(rows: &[Row]) -> Vec<(Vec<usize>, Vec<usize>)> {
-    let mut runs = Vec::new();
-    let (mut removed, mut added) = (Vec::new(), Vec::new());
-    for (i, row) in rows.iter().enumerate() {
-        match row.kind {
-            RowKind::Removed if added.is_empty() => removed.push(i),
-            RowKind::Added => added.push(i),
-            RowKind::NoNewline => {}
-            _ => {
-                if !removed.is_empty() || !added.is_empty() {
-                    runs.push((std::mem::take(&mut removed), std::mem::take(&mut added)));
-                }
-                if row.kind == RowKind::Removed {
-                    removed.push(i);
-                }
-            }
-        }
-    }
-    if !removed.is_empty() || !added.is_empty() {
-        runs.push((removed, added));
-    }
-    runs
 }
 
 /// A row's text cut into tokens, with what its syntax says about them.
@@ -387,8 +360,8 @@ fn bridge_blanks(ranges: Vec<Range<usize>>, text: &str) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::rows;
     use crate::diff::testing::{header, one};
-    use crate::diff::{parse, rows};
     use crate::render::highlight::{Parsing, highlight};
     use crate::theme::DiffTheme;
 
@@ -485,13 +458,6 @@ mod tests {
             "@@ -1,2 +1,2 @@\n-let a = 1;\n-gone\n+let a = 2;\n+other\n",
         );
         assert_eq!(changes.partner, [None, Some(3), None, None, None]);
-    }
-
-    #[test]
-    fn a_pure_addition_is_a_run_of_its_own() {
-        let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1,2 @@\n keep\n+new\n";
-        let rows = rows(&parse(raw).remove(0));
-        assert_eq!(change_runs(&rows), [(vec![], vec![2])]);
     }
 
     #[test]

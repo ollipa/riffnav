@@ -12,8 +12,8 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::words::change_runs;
 use crate::comment::store::{Anchor, Side};
+use crate::diff::change_runs;
 use crate::diff::{self, FileDiff, Row, path};
 
 /// Substantial lines a block needs. See [`Line::is_anchor`].
