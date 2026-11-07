@@ -133,6 +133,36 @@ fn editor_path(path: &str) -> PathBuf {
     Path::new(".").join(path::to_os(path))
 }
 
+/// `$VISUAL`, else `$EDITOR`, else `vi`. One that's set but empty is skipped.
+fn chosen_editor() -> String {
+    ["VISUAL", "EDITOR"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|editor| !editor.trim().is_empty())
+        .unwrap_or_else(|| "vi".to_string())
+}
+
+/// The command that runs `editor` on `args`, the way git runs one: an editor
+/// with spaces or shell characters in it, like `code --wait`, is a shell command,
+/// run as `sh -c '<editor> "$@"'` so the arguments reach it untouched, and
+/// anything else is the program itself. A path to a program that has spaces in
+/// it is run as it is, so it needn't be quoted.
+fn editor_command<'a>(editor: &str, args: impl IntoIterator<Item = &'a OsStr>) -> Command {
+    const SHELL: &str = "|&;<>()$`\\\"' \t\n*?[#~=%";
+    let plain = !editor.contains(|c| SHELL.contains(c)) || Path::new(editor).is_file();
+    if plain {
+        let mut cmd = Command::new(editor);
+        cmd.args(args);
+        return cmd;
+    }
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(format!("{editor} \"$@\""))
+        .arg(editor)
+        .args(args);
+    cmd
+}
+
 impl App {
     /// Suspend the TUI, run `$VISUAL`/`$EDITOR` on `path`, then resume. Returns the
     /// editor's name and how it exited, for the caller to report.
@@ -144,11 +174,8 @@ impl App {
         disable_enhanced_keys();
         disable_mouse();
         ratatui::restore();
-        let editor = std::env::var("VISUAL")
-            .or_else(|_| std::env::var("EDITOR"))
-            .unwrap_or_else(|_| "vi".to_string());
-        let mut cmd = Command::new(&editor);
-        cmd.arg(path);
+        let editor = chosen_editor();
+        let mut cmd = editor_command(&editor, [path]);
         // A piped diff (`git diff | riffnav`) leaves our stdin a spent pipe; the
         // editor would inherit it and complain that input isn't a terminal. The
         // TUI already talks to /dev/tty, so hand the editor the same.
@@ -212,6 +239,38 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the editor command hands over, for an editor `$EDITOR` names.
+    fn run_with(editor: &str, args: &[&str]) -> String {
+        let out = editor_command(editor, args.iter().map(OsStr::new))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{editor}: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// An editor with arguments or shell syntax goes through the shell, and every
+    /// argument, `+line` included, reaches it as one word.
+    #[test]
+    fn an_editor_with_arguments_gets_ours_untouched() {
+        let args = ["+12", "a b", "$HOME", "-n"];
+        assert_eq!(run_with("printf \"<%s>\"", &args), "<+12><a b><$HOME><-n>");
+        assert_eq!(run_with("printf '[%s]'", &args), "[+12][a b][$HOME][-n]");
+        assert_eq!(run_with("echo", &["+3", "x"]), "+3 x\n");
+
+        // A program whose own path has a space in it, quoted or not.
+        let dir = crate::testing::TempDir::new("editor dir");
+        let program = dir.join("my ed");
+        std::fs::write(&program, "#!/bin/sh\nprintf '{%s}' \"$@\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = program.to_str().unwrap();
+        assert_eq!(run_with(path, &["+1", "f g"]), "{+1}{f g}");
+        assert_eq!(run_with(&format!("'{path}' -x"), &["f"]), "{-x}{f}");
+    }
 
     /// A name git gives from the top of the repository is opened there, and none
     /// reaches the editor looking like an option or a `+line`.
