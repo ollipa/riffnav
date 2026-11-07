@@ -77,6 +77,25 @@ pub struct Seed {
     stack: ScopeStack,
 }
 
+/// How a file is parsed: its language, and where each hunk starts. `starts`
+/// lines up with the file's hunks, and a hunk past the end of it starts afresh.
+#[derive(Debug, Clone, Default)]
+pub struct Parsing {
+    /// `None` for a file that gets no color.
+    pub language: Option<&'static SyntaxReference>,
+    pub starts: Vec<HunkStart>,
+}
+
+impl Parsing {
+    /// What the file's name and rows say, with every hunk starting afresh.
+    pub fn of(file: &FileDiff, rows: &[Row]) -> Self {
+        Self {
+            language: language(file, rows),
+            starts: Vec::new(),
+        }
+    }
+}
+
 /// Where one hunk's two sides start. `None` starts a side afresh.
 #[derive(Debug, Clone, Default)]
 pub struct HunkStart {
@@ -128,21 +147,19 @@ impl<'a> Side<'a> {
     }
 }
 
-/// Parse `rows`, each side of the diff on its own. `starts` lines up with the
-/// file's hunks, and a hunk past the end of it starts afresh. Stops short once
-/// `cancelled` is set.
+/// Parse `rows` as `parsing` says, each side of the diff on its own. Stops short
+/// once `cancelled` is set.
 pub fn highlight(
-    file: &FileDiff,
     rows: &[Row],
     theme: DiffTheme,
-    starts: &[HunkStart],
+    parsing: &Parsing,
     cancelled: &AtomicBool,
 ) -> Syntax {
     let mut out = Syntax {
         runs: vec![Vec::new(); rows.len()],
         tokens: vec![Tokens::default(); rows.len()],
     };
-    let Some(syntax) = language(file, rows) else {
+    let Some(syntax) = parsing.language else {
         return out;
     };
     let assets = assets();
@@ -151,7 +168,7 @@ pub fn highlight(
 
     let mut old = Side::new(syntax, None, &highlighter);
     let mut new = Side::new(syntax, None, &highlighter);
-    let mut hunks = starts.iter();
+    let mut hunks = parsing.starts.iter();
     for (at, row) in rows.iter().enumerate() {
         if cancelled.load(Ordering::Relaxed) {
             break;
@@ -187,13 +204,39 @@ pub fn highlight(
     out
 }
 
-/// The syntax `file` is parsed with, or `None` for a file that gets no color:
-/// too big, or of no known language.
+/// The syntax `file` is parsed with, as far as its name and rows say, or `None`
+/// for a file that gets no color: too big, or of no known language.
 pub fn language(file: &FileDiff, rows: &[Row]) -> Option<&'static SyntaxReference> {
     if file.raw.len() > MAX_FILE_BYTES {
         return None;
     }
     find_syntax(&assets().syntaxes, file.path(), rows)
+}
+
+/// Whether the old side's first line could name `file`'s language where its
+/// name and rows don't: it isn't too big, its name means nothing, and the diff
+/// doesn't show that line already.
+pub fn wants_first_line(file: &FileDiff, rows: &[Row]) -> bool {
+    file.raw.len() <= MAX_FILE_BYTES
+        && named(&assets().syntaxes, file.path()).is_none()
+        && !rows.iter().any(|row| row.old == Some(1))
+        && language(file, rows).is_none()
+}
+
+/// [`language`], falling back on `first`, the old side's first line, where
+/// [`wants_first_line`] says it could help.
+pub fn language_with(
+    file: &FileDiff,
+    rows: &[Row],
+    first: Option<&str>,
+) -> Option<&'static SyntaxReference> {
+    language(file, rows).or_else(|| {
+        let first = first.filter(|_| wants_first_line(file, rows))?;
+        assets()
+            .syntaxes
+            .find_syntax_by_first_line(first)
+            .filter(|syntax| syntax.name != "Plain Text")
+    })
 }
 
 /// The parser's state after each count of `lines` in `stops`, which ascend and
@@ -251,16 +294,21 @@ fn syntax_theme(theme: DiffTheme) -> EmbeddedThemeName {
 /// line. `None` for anything else, including plain text, which has nothing to
 /// color and isn't worth parsing.
 fn find_syntax<'a>(set: &'a SyntaxSet, path: &str, rows: &[Row]) -> Option<&'a SyntaxReference> {
-    let path = Path::new(path);
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    set.find_syntax_by_extension(name)
-        .or_else(|| set.find_syntax_by_extension(extension))
+    named(set, path)
         .or_else(|| {
             let first = rows.iter().find(|r| r.old == Some(1) || r.new == Some(1))?;
             set.find_syntax_by_first_line(&first.text)
         })
         .filter(|syntax| syntax.name != "Plain Text")
+}
+
+/// The file's language from its name, then its extension, plain text included.
+fn named<'a>(set: &'a SyntaxSet, path: &str) -> Option<&'a SyntaxReference> {
+    let path = Path::new(path);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    set.find_syntax_by_extension(name)
+        .or_else(|| set.find_syntax_by_extension(extension))
 }
 
 fn to_style(style: highlighting::Style) -> Style {
@@ -292,11 +340,11 @@ mod tests {
     fn highlighted(path: &str, hunk: &str) -> (Vec<Row>, Vec<Vec<Run>>) {
         let file = file(path, hunk);
         let rows = rows(&file);
+        let parsing = Parsing::of(&file, &rows);
         let runs = highlight(
-            &file,
             &rows,
             DiffTheme::GitHubDark,
-            &[],
+            &parsing,
             &AtomicBool::new(false),
         )
         .runs;

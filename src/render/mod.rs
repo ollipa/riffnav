@@ -37,8 +37,10 @@ use twox_hash::XxHash3_128;
 
 pub use self::copies::Jump;
 use self::copies::{CopyIndex, Git};
+#[cfg(test)]
+use self::highlight::HunkStart;
 pub use self::highlight::warm_up;
-use self::highlight::{HunkStart, Run};
+use self::highlight::{Parsing, Run};
 use self::jobs::Jobs;
 use self::layout::{COPY_MARK, Content, MOVE_MARK, WRAP_MARK};
 pub use self::marks::Marks;
@@ -93,7 +95,11 @@ fn laid_out(
 ) -> (Text<'static>, LineMap) {
     let cancelled = AtomicBool::new(false);
     let rows = diff::rows(file);
-    let syntax = highlight::highlight(file, &rows, theme, starts, &cancelled);
+    let parsing = Parsing {
+        starts: starts.to_vec(),
+        ..Parsing::of(file, &rows)
+    };
+    let syntax = highlight::highlight(&rows, theme, &parsing, &cancelled);
     let changes = words::changes(&rows, &syntax.tokens, moves, &cancelled);
     let content = Content {
         rows: &rows,
@@ -773,8 +779,11 @@ impl Spec {
         #[cfg(test)]
         self.test.at_start(self, &ticket.cancelled);
         let rows = diff::rows(&self.diff);
-        // A file that won't be colored is as cheap to finish as to preview.
-        if highlight::language(&self.diff, &rows).is_some() {
+        // A file that won't be colored is as cheap to finish as to preview. One
+        // whose old blob may name its language could be either.
+        let might_color = highlight::language(&self.diff, &rows).is_some()
+            || self.reader.is_some() && starts::reads_language(&self.diff, &rows);
+        if might_color {
             let plain = self.plain(&rows, &ticket.cancelled);
             if ticket.stopped() {
                 return;
@@ -784,22 +793,22 @@ impl Spec {
         #[cfg(test)]
         self.test.before_final(&ticket.cancelled);
 
-        let starts = match &self.reader {
+        let parsing = match &self.reader {
             Some(reader) => match reader.read(&self.diff, &ticket.cancelled) {
-                Some(starts) => starts,
+                Some(parsing) => parsing,
                 None => return,
             },
-            None => Arc::default(),
+            None => Arc::new(Parsing::of(&self.diff, &rows)),
         };
-        let made = self.colored(&rows, &starts, &ticket.cancelled);
+        let made = self.colored(&rows, &parsing, &ticket.cancelled);
         if !ticket.stopped() {
             ticket.send(Outcome::Final(made), None);
         }
     }
 
-    fn colored(&self, rows: &[Row], starts: &[HunkStart], cancelled: &AtomicBool) -> Made {
+    fn colored(&self, rows: &[Row], parsing: &Parsing, cancelled: &AtomicBool) -> Made {
         let theme = self.key.theme;
-        let syntax = highlight::highlight(&self.diff, rows, theme, starts, cancelled);
+        let syntax = highlight::highlight(rows, theme, parsing, cancelled);
         let moves = self.moves.file(self.key.file);
         let changes = words::changes(rows, &syntax.tokens, moves, cancelled);
         self.lay_out(rows, &syntax.runs, &changes, cancelled)
@@ -1897,6 +1906,12 @@ mod tests {
     /// A repository whose last commit changes a line inside a block comment, and
     /// that commit's diff.
     fn edit_in_a_comment(dir: &std::path::Path) -> FileDiff {
+        let text = format!("/*\n{}*/\n", "prose\n".repeat(40));
+        edit_of(dir, "a.rs", &text)
+    }
+
+    /// `name` committed as `text` and then with its first `prose` made code.
+    fn edit_of(dir: &std::path::Path, name: &str, text: &str) -> FileDiff {
         let git = |args: &[&str]| {
             let mut git = std::process::Command::new("git");
             git.args(["-c", "user.name=t", "-c", "user.email=t@t"])
@@ -1907,11 +1922,10 @@ mod tests {
         };
         std::fs::create_dir_all(dir).unwrap();
         git(&["init", "-q"]);
-        let text = format!("/*\n{}*/\n", "prose\n".repeat(40));
-        std::fs::write(dir.join("a.rs"), &text).unwrap();
+        std::fs::write(dir.join(name), text).unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-qm", "x"]);
-        std::fs::write(dir.join("a.rs"), text.replacen("prose", "let x = 1;", 1)).unwrap();
+        std::fs::write(dir.join(name), text.replacen("prose", "let x = 1;", 1)).unwrap();
         git(&["commit", "-qam", "x"]);
         let out = git(&["show", "HEAD"]);
         parse(&String::from_utf8_lossy(&out.stdout)).remove(0)
@@ -1955,6 +1969,27 @@ mod tests {
             right
         );
         assert!(!cache.busy());
+    }
+
+    #[test]
+    fn a_script_whose_first_line_is_out_of_sight_is_colored_from_its_blob() {
+        let dir = std::env::temp_dir().join(format!("riffnav-script-{}", std::process::id()));
+        let text = format!(
+            "#!/bin/sh\n{}",
+            "echo hi\n".repeat(20) + &"prose\n".repeat(20)
+        );
+        let file = edit_of(&dir, "run", &text);
+        let colors = |reader: bool| {
+            let mut cache = RenderCache::new(4, false, false);
+            if reader {
+                cache.read_starts_in(&dir);
+            }
+            cache.ensure(&request(0, &file, WIDTH, GitHubDark));
+            colors_of_the_edit(&cache, WIDTH, GitHubDark)
+        };
+        let piped = colors(false);
+        assert!(colors(true) > piped, "colored only once the blob is read");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2331,7 +2366,9 @@ mod tests {
                     };
                     let rows = diff::rows(&diff);
                     let plain = spec.plain(&rows, &cancelled).rendered;
-                    let real = spec.colored(&rows, &[], &cancelled).rendered;
+                    let real = spec
+                        .colored(&rows, &Parsing::of(&diff, &rows), &cancelled)
+                        .rendered;
                     let what = format!("{} at {width}, sbs {side_by_side}", diff.raw);
                     assert_same_shape(&plain, &real, &what);
                 }

@@ -368,6 +368,11 @@ each side down to each hunk as the first step of rendering the file. A diff pipe
 in, or a blob that's missing, over the size limit or isn't the text shown (a
 `textconv` diff), starts each hunk afresh.
 
+A file's language comes from its name or extension, or else from a `#!` or
+`-*- mode: -*-` first line. When the diff doesn't show that line, as for a change
+far down `bin/deploy`, the same blob read supplies it, so a script with no
+extension is colored whichever of its lines changed.
+
 Rendering happens off the UI thread, so a big file never holds up a key. A frame
 waits up to 25ms for a render, which covers most files. A slower file shows its
 text without syntax colors, already in its final layout, until the real render

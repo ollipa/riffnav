@@ -388,7 +388,7 @@ fn bridge_blanks(ranges: Vec<Range<usize>>, text: &str) -> Vec<Range<usize>> {
 mod tests {
     use super::*;
     use crate::diff::{parse, rows};
-    use crate::render::highlight::highlight;
+    use crate::render::highlight::{Parsing, highlight};
     use crate::theme::DiffTheme;
 
     /// The word pass over `hunk` in a file named `name`.
@@ -397,7 +397,8 @@ mod tests {
         let file = parse(&raw).remove(0);
         let rows = rows(&file);
         let cancelled = AtomicBool::new(false);
-        let syntax = highlight(&file, &rows, DiffTheme::GitHubDark, &[], &cancelled);
+        let parsing = Parsing::of(&file, &rows);
+        let syntax = highlight(&rows, DiffTheme::GitHubDark, &parsing, &cancelled);
         let changes = changes(&rows, &syntax.tokens, &FileMoves::default(), &cancelled);
         (rows, changes)
     }

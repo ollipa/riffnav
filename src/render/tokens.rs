@@ -170,7 +170,7 @@ pub fn split(text: &str) -> Vec<Range<usize>> {
 mod tests {
     use super::*;
     use crate::diff::{parse, rows};
-    use crate::render::highlight::highlight;
+    use crate::render::highlight::{Parsing, highlight};
     use crate::theme::DiffTheme;
 
     /// What the parser finds in `line`, added to a file named `name`.
@@ -180,15 +180,10 @@ mod tests {
         );
         let file = parse(&raw).remove(0);
         let rows = rows(&file);
-        let tokens = highlight(
-            &file,
-            &rows,
-            DiffTheme::GitHubDark,
-            &[],
-            &Default::default(),
-        )
-        .tokens
-        .remove(1);
+        let parsing = Parsing::of(&file, &rows);
+        let tokens = highlight(&rows, DiffTheme::GitHubDark, &parsing, &Default::default())
+            .tokens
+            .remove(1);
         let text =
             |ranges: Vec<Range<usize>>| ranges.into_iter().map(|r| line[r].to_string()).collect();
         (text(tokens.whole), text(tokens.literal))

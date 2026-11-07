@@ -13,6 +13,11 @@
 //! happens as the first step of rendering the file, off the UI thread, so the
 //! render that comes out of it is the right one and there's no second to make.
 //!
+//! The same blob names the language of a file whose name doesn't and whose diff
+//! doesn't show its first line, such as a script with no extension changed far
+//! down: its `#!` line is the blob's first. That's why the language is worked
+//! out here, before the starts, and kept with them.
+//!
 //! The answer is kept by the hash of the diff text, which names the blob and every
 //! hunk, so resizing or changing theme costs nothing. A file the diff can't be
 //! matched to, for any reason, keeps its hunks starting afresh.
@@ -30,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use twox_hash::XxHash3_128;
 
-use super::highlight::{self, HunkStart, MAX_FILE_BYTES};
+use super::highlight::{self, HunkStart, MAX_FILE_BYTES, MAX_LINE_BYTES, Parsing};
 use crate::autodiff::Tree;
 use crate::diff::{self, FileDiff, Hunk, Row, RowKind, path};
 
@@ -40,8 +45,9 @@ const GIT_POLL: Duration = Duration::from_millis(2);
 /// removing any, so they're dropped wholesale at this many.
 const MAX_KNOWN: usize = 512;
 
-/// One file's hunk starts. Empty when there's nothing better than starting afresh.
-pub type Starts = Arc<Vec<HunkStart>>;
+/// How to parse one file. Its starts are empty when there's nothing better than
+/// starting afresh.
+pub type Starts = Arc<Parsing>;
 
 /// Works out hunk starts and remembers them. Shared by the render threads.
 pub struct StartReader {
@@ -62,8 +68,9 @@ impl StartReader {
         self.known.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The starts of `file`, or `None` if `cancelled` was set first. A file that
-    /// panics gets none, as trying again would only repeat it, and renders without.
+    /// How to parse `file`, or `None` if `cancelled` was set first. A file that
+    /// panics gets what its name and rows say with no starts, as trying again
+    /// would only repeat it.
     pub fn read(&self, file: &FileDiff, cancelled: &AtomicBool) -> Option<Starts> {
         let source = XxHash3_128::oneshot(file.raw.as_bytes());
         if let Some(starts) = self.known().get(&source) {
@@ -73,7 +80,7 @@ impl StartReader {
         let starts = match panic::catch_unwind(read) {
             Ok(None) => return None,
             Ok(Some(starts)) => Arc::new(starts),
-            Err(_) => Starts::default(),
+            Err(_) => Arc::new(Parsing::of(file, &diff::rows(file))),
         };
         let mut known = self.known();
         if known.len() >= MAX_KNOWN {
@@ -95,8 +102,14 @@ pub(super) fn lines_above(start: u32, len: u32) -> usize {
     }
 }
 
-/// Work out `file`'s hunk starts, running git in `repo`. `None` if `cancelled`.
-fn read(file: &FileDiff, repo: &Path, cancelled: &AtomicBool) -> Option<Vec<HunkStart>> {
+/// Whether reading `file` would read its old blob for the first line, to name
+/// its language.
+pub(super) fn reads_language(file: &FileDiff, rows: &[Row]) -> bool {
+    highlight::wants_first_line(file, rows) && old_blob(&file.raw).is_some()
+}
+
+/// Work out how to parse `file`, running git in `repo`. `None` if `cancelled`.
+fn read(file: &FileDiff, repo: &Path, cancelled: &AtomicBool) -> Option<Parsing> {
     #[cfg(test)]
     assert_ne!(file.path(), tests::PANIC_PATH, "injected");
     let rows = diff::rows(file);
@@ -106,19 +119,36 @@ fn read(file: &FileDiff, repo: &Path, cancelled: &AtomicBool) -> Option<Vec<Hunk
         .map(|hunk| lines_above(hunk.old_start, hunk.old_len))
         .collect();
     let headers = rows.iter().filter(|row| is_header(row)).count();
-    let Some(syntax) = highlight::language(file, &rows).filter(|_| hunks.len() == headers) else {
-        return Some(Vec::new());
-    };
+    let matched = hunks.len() == headers;
     // A hunk at the top of the file, as every hunk of an added or deleted file
     // is, has nothing above it to read.
     let needed = stops.iter().any(|&stop| stop > 0);
-    let blob = old_blob(&file.raw).filter(|_| needed);
-    let Some(text) = blob.and_then(|id| read_blob(repo, id, cancelled)) else {
-        return (!cancelled.load(Ordering::Relaxed)).then(Vec::new);
+    let named = highlight::language(file, &rows);
+    // One read serves both: a file its name and rows don't place reads the blob
+    // for its first line, and keeps the rest for its hunk starts.
+    let wanted = (named.is_some() && matched && needed) || reads_language(file, &rows);
+    let blob = match old_blob(&file.raw).filter(|_| wanted) {
+        Some(id) => read_blob(repo, id, cancelled),
+        None => None,
+    };
+    if blob.is_none() && cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let first = blob.as_ref().and_then(|blob| blob.first.as_deref());
+    let language = named.or_else(|| highlight::language_with(file, &rows, first));
+    let no_starts = Parsing {
+        language,
+        starts: Vec::new(),
+    };
+    let Some(syntax) = language.filter(|_| matched && needed) else {
+        return Some(no_starts);
+    };
+    let Some(text) = blob.and_then(|blob| blob.text) else {
+        return Some(no_starts);
     };
     let old: Vec<&str> = text.lines().collect();
     if !shows(&old, &stops, &rows) {
-        return Some(Vec::new());
+        return Some(no_starts);
     }
     let (new, new_stops) = patched(&old, &stops, &hunks, &rows);
 
@@ -136,7 +166,10 @@ fn read(file: &FileDiff, repo: &Path, cancelled: &AtomicBool) -> Option<Vec<Hunk
         old: old.next().flatten(),
         new: new.next().flatten(),
     });
-    Some(starts.collect())
+    Some(Parsing {
+        language,
+        starts: starts.collect(),
+    })
 }
 
 fn is_header(row: &Row) -> bool {
@@ -207,9 +240,19 @@ pub(super) fn old_blob(raw: &str) -> Option<&str> {
     (hex && id.bytes().any(|b| b != b'0')).then_some(id)
 }
 
-/// A blob's text, if git has it and it isn't over the size limit. A cancelled job
-/// doesn't wait for git, and neither does quitting, so nothing's left running.
-fn read_blob(repo: &Path, id: &str, cancelled: &AtomicBool) -> Option<String> {
+/// What reading a blob found.
+struct Blob {
+    /// The whole text, if it isn't over the size limit.
+    text: Option<String>,
+    /// The first line, if the blob is text and the line isn't too long to look
+    /// at. Read even from a blob over the size limit, as it's all a language
+    /// needs.
+    first: Option<String>,
+}
+
+/// A blob, if git has it. A cancelled job doesn't wait for git, and neither does
+/// quitting, so nothing's left running.
+fn read_blob(repo: &Path, id: &str, cancelled: &AtomicBool) -> Option<Blob> {
     let mut git = Command::new("git")
         .args(["cat-file", "--batch"])
         .current_dir(repo)
@@ -420,7 +463,7 @@ fn field<'a>(bytes: &mut &'a [u8], end: u8) -> Option<&'a [u8]> {
     Some(field)
 }
 
-fn blob_text(mut stdin: ChildStdin, stdout: ChildStdout, id: &str) -> Option<String> {
+fn blob_text(mut stdin: ChildStdin, stdout: ChildStdout, id: &str) -> Option<Blob> {
     writeln!(stdin, "{id}").ok()?;
     drop(stdin);
     let mut out = BufReader::new(stdout);
@@ -431,12 +474,31 @@ fn blob_text(mut stdin: ChildStdin, stdout: ChildStdout, id: &str) -> Option<Str
     let size: usize = (fields.next()? == "blob")
         .then(|| fields.next()?.parse().ok())
         .flatten()?;
-    if size > MAX_FILE_BYTES {
+    // A blob too big to read whole is read as far as a first line can go.
+    let whole = size <= MAX_FILE_BYTES;
+    let wanted = if whole {
+        size
+    } else {
+        size.min(MAX_LINE_BYTES + 1)
+    };
+    let mut bytes = Vec::with_capacity(wanted);
+    out.take(wanted as u64).read_to_end(&mut bytes).ok()?;
+    if bytes.len() != wanted {
         return None;
     }
-    let mut bytes = Vec::with_capacity(size);
-    out.take(size as u64).read_to_end(&mut bytes).ok()?;
-    (bytes.len() == size).then(|| String::from_utf8_lossy(&bytes).into_owned())
+    let binary = bytes.iter().take(8000).any(|&byte| byte == 0);
+    let line = bytes
+        .split(|&byte| byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    // A line cut short by the read is too long to be looked at anyway.
+    let first = (!binary && line.len() <= MAX_LINE_BYTES)
+        .then(|| String::from_utf8_lossy(line).into_owned());
+    Some(Blob {
+        text: whole.then(|| String::from_utf8_lossy(&bytes).into_owned()),
+        first,
+    })
 }
 
 #[cfg(test)]
@@ -507,8 +569,12 @@ pub(super) mod tests {
             parse(&String::from_utf8_lossy(&out.stdout)).remove(0)
         }
 
-        fn starts(&self, file: &FileDiff) -> Vec<HunkStart> {
+        fn parsing(&self, file: &FileDiff) -> Parsing {
             read(file, &self.0, &AtomicBool::new(false)).unwrap()
+        }
+
+        fn starts(&self, file: &FileDiff) -> Vec<HunkStart> {
+            self.parsing(file).starts
         }
     }
 
@@ -599,11 +665,14 @@ pub(super) mod tests {
     /// `file` highlighted from `starts`, as `(text, runs)` for each code row.
     fn colored(file: &FileDiff, starts: &[HunkStart]) -> HashMap<String, Vec<Run>> {
         let rows = diff::rows(file);
+        let parsing = Parsing {
+            starts: starts.to_vec(),
+            ..Parsing::of(file, &rows)
+        };
         let runs = highlight(
-            file,
             &rows,
             DiffTheme::GitHubDark,
-            starts,
+            &parsing,
             &AtomicBool::new(false),
         )
         .runs;
@@ -839,7 +908,165 @@ pub(super) mod tests {
         repo.commit("a.rs", &text);
         let out = repo.run(&["rev-parse", "HEAD:a.rs"]);
         let id = String::from_utf8(out.stdout).unwrap();
-        assert_eq!(read_blob(&repo.0, id.trim(), &AtomicBool::new(false)), None);
+        let blob = read_blob(&repo.0, id.trim(), &AtomicBool::new(false)).unwrap();
+        assert_eq!(blob.text, None);
+        assert_eq!(blob.first.as_deref(), Some("x"), "but its first line is");
+    }
+
+    /// A Python script with no extension: a docstring over lines 2 to 40, then
+    /// code to line 80.
+    fn script(first: &str) -> String {
+        let mut text = format!("{first}\n\"\"\"\n");
+        text += &"prose\n".repeat(37);
+        text += "\"\"\"\n";
+        text += &"x = 1\n".repeat(40);
+        text
+    }
+
+    fn language(parsing: &Parsing) -> Option<&str> {
+        parsing.language.map(|syntax| syntax.name.as_str())
+    }
+
+    #[test]
+    fn a_script_changed_below_its_first_line_is_named_by_the_blob() {
+        let repo = Repo::new();
+        repo.commit("bin/deploy", &script("#!/usr/bin/env -S python3 -u"));
+        repo.commit(
+            "bin/deploy",
+            &with_line(&script("#!/usr/bin/env -S python3 -u"), 20, "y = 2"),
+        );
+        let file = repo.diff(&["show", "HEAD"]);
+        assert!(highlight::language(&file, &diff::rows(&file)).is_none());
+
+        let parsing = repo.parsing(&file);
+        assert_eq!(language(&parsing), Some("Python"));
+        // The same read gives the hunk starts, so the change is inside the docstring.
+        assert!(single_color(&colored(&file, &parsing.starts)["y = 2"]));
+    }
+
+    #[test]
+    fn each_shell_is_named_by_the_blob() {
+        for first in ["#!/bin/sh", "#!/bin/bash", "#!/usr/bin/env zsh"] {
+            let repo = Repo::new();
+            repo.commit("run", &script(first));
+            repo.commit("run", &with_line(&script(first), 60, "y=2"));
+            let file = repo.diff(&["show", "HEAD"]);
+            assert!(repo.parsing(&file).language.is_some(), "{first}");
+        }
+    }
+
+    #[test]
+    fn a_first_line_the_diff_shows_wins_over_the_blob() {
+        let repo = Repo::new();
+        repo.commit("run", &script("#!/bin/sh"));
+        repo.commit(
+            "run",
+            &with_line(&script("#!/bin/sh"), 1, "#!/usr/bin/env ruby"),
+        );
+        let file = repo.diff(&["show", "HEAD"]);
+        let parsing = repo.parsing(&file);
+        // The rows' first line 1 is the removed one, as before.
+        assert_eq!(language(&parsing), Some("Bourne Again Shell (bash)"));
+        assert!(!reads_language(&file, &diff::rows(&file)));
+    }
+
+    #[test]
+    fn a_name_that_means_something_needs_no_blob_for_its_language() {
+        let repo = Repo::new();
+        repo.commit("notes.txt", &script("#!/bin/sh"));
+        repo.commit("notes.txt", &with_line(&script("#!/bin/sh"), 60, "y=2"));
+        let file = repo.diff(&["show", "HEAD"]);
+        assert!(
+            !reads_language(&file, &diff::rows(&file)),
+            "plain text, by name"
+        );
+        assert_eq!(language(&repo.parsing(&file)), None);
+
+        repo.git(&["mv", "notes.txt", "tool.rb"]);
+        repo.commit("tool.rb", &with_line(&script("#!/bin/sh"), 60, "y=3"));
+        let file = repo.diff(&["show", "-M", "HEAD"]);
+        assert_eq!(file.path(), "tool.rb");
+        assert!(!reads_language(&file, &diff::rows(&file)));
+        assert_eq!(language(&repo.parsing(&file)), Some("Ruby"));
+    }
+
+    #[test]
+    fn an_added_file_shows_its_own_first_line() {
+        let repo = Repo::new();
+        repo.commit("other", "x\n");
+        repo.commit("run", &script("#!/bin/sh"));
+        let file = repo.diff(&["show", "HEAD"]);
+        assert!(!reads_language(&file, &diff::rows(&file)));
+        assert!(repo.parsing(&file).language.is_some());
+    }
+
+    #[test]
+    fn a_blob_too_big_to_read_still_gives_its_first_line() {
+        let repo = Repo::new();
+        let text = script("#!/usr/bin/env python3") + &"x = 1\n".repeat(MAX_FILE_BYTES / 6);
+        repo.commit("tool", &text);
+        repo.commit("tool", &with_line(&text, 60, "y = 2"));
+        let file = repo.diff(&["show", "HEAD"]);
+        let parsing = repo.parsing(&file);
+        assert_eq!(language(&parsing), Some("Python"));
+        assert!(parsing.starts.is_empty(), "nothing to work them out from");
+    }
+
+    #[test]
+    fn a_binary_or_overlong_or_garbled_first_line_names_nothing_it_should_not() {
+        let long = format!("#!/bin/sh {}", "x".repeat(MAX_LINE_BYTES));
+        let garbled = "#!/usr/bin/env python3 \u{fffd}";
+        for (first, expected) in [
+            ("#!/bin/sh\0", None),
+            (long.as_str(), None),
+            (garbled, Some("Python")),
+            ("# -*- mode: ruby -*-", Some("Ruby")),
+        ] {
+            let repo = Repo::new();
+            repo.commit("run", &script(first));
+            repo.commit("run", &with_line(&script(first), 60, "y = 2"));
+            let file = repo.diff(&["show", "--text", "HEAD"]);
+            assert_eq!(language(&repo.parsing(&file)), expected, "{first:.20}");
+        }
+    }
+
+    #[test]
+    fn a_first_line_that_is_not_utf8_is_read_lossily() {
+        let repo = Repo::new();
+        let mut bytes = b"#!/usr/bin/env python3 \xff\n".to_vec();
+        bytes.extend(
+            script("#")
+                .lines()
+                .skip(1)
+                .flat_map(|l| [l.as_bytes(), b"\n"].concat()),
+        );
+        fs::write(repo.0.join("run"), &bytes).unwrap();
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-qm", "x"]);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        repo.commit("run", &with_line(&text, 60, "y = 2"));
+        let file = repo.diff(&["show", "HEAD"]);
+        assert_eq!(language(&repo.parsing(&file)), Some("Python"));
+    }
+
+    #[test]
+    fn a_merge_has_no_blob_to_name_it() {
+        let repo = Repo::new();
+        let text = script("#!/bin/sh");
+        repo.commit("run", &text);
+        repo.git(&["checkout", "-qb", "side"]);
+        repo.commit("run", &with_line(&text, 60, "side=1"));
+        repo.git(&["checkout", "-q", "-"]);
+        repo.commit("run", &with_line(&text, 60, "main=1"));
+        repo.run(&["merge", "side"]);
+        repo.write("run", &with_line(&text, 60, "both=1"));
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-qm", "merge"]);
+
+        let file = repo.diff(&["show", "HEAD"]);
+        assert!(file.raw.starts_with("diff --cc run"), "{}", file.raw);
+        assert!(!reads_language(&file, &diff::rows(&file)));
+        assert_eq!(language(&repo.parsing(&file)), None);
     }
 
     /// Work out `file`'s starts through `reader`.
@@ -855,10 +1082,10 @@ pub(super) mod tests {
         let file = repo.diff(&["show", "HEAD"]);
 
         let reader = StartReader::new(&repo.0);
-        assert_eq!(answer(&reader, &file).len(), 1);
+        assert_eq!(answer(&reader, &file).starts.len(), 1);
         // With the repository gone, only a remembered answer can come back.
         fs::remove_dir_all(repo.0.join(".git")).unwrap();
-        assert_eq!(answer(&reader, &file).len(), 1);
+        assert_eq!(answer(&reader, &file).starts.len(), 1);
     }
 
     #[test]
@@ -870,7 +1097,11 @@ pub(super) mod tests {
 
         let reader = StartReader::new(&repo.0);
         assert!(reader.read(&file, &AtomicBool::new(true)).is_none());
-        assert_eq!(answer(&reader, &file).len(), 1, "it can be asked again");
+        assert_eq!(
+            answer(&reader, &file).starts.len(),
+            1,
+            "it can be asked again"
+        );
     }
 
     #[test]
@@ -890,9 +1121,9 @@ pub(super) mod tests {
         file.new_path = Some(PANIC_PATH.to_string());
 
         let reader = StartReader::new(&repo.0);
-        assert!(answer(&reader, &file).is_empty());
+        assert!(answer(&reader, &file).starts.is_empty());
         // Remembered, so the panic isn't there to be hit again.
         fs::remove_dir_all(repo.0.join(".git")).unwrap();
-        assert!(answer(&reader, &file).is_empty());
+        assert!(answer(&reader, &file).starts.is_empty());
     }
 }
