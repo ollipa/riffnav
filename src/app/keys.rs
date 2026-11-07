@@ -89,6 +89,7 @@ impl App {
     pub(super) fn keyboard_taken(&self) -> bool {
         self.composer.is_some()
             || self.finder.is_some()
+            || self.picking_agent()
             || self.search_prompt().is_some()
             || self.show_help
             || self.confirm_delete.is_some()
@@ -109,6 +110,12 @@ impl App {
         // So does the finder.
         if self.finder.is_some() {
             self.finder_key(key);
+            return Ok(());
+        }
+
+        // And the agent picker.
+        if self.picking_agent() {
+            self.picker_key(key);
             return Ok(());
         }
 
@@ -231,6 +238,7 @@ impl App {
             KeyCode::Char('-') if self.can_refresh() => self.change_context(false),
             KeyCode::Char('z') if self.herdr.is_some() => self.toggle_herdr_zoom(),
             KeyCode::Char('W') if self.forge.is_some() => self.open_web_diff(),
+            KeyCode::Char('S') => self.send_comments(),
             KeyCode::Char('o') => {
                 if let Some(idx) = self.selected_file() {
                     self.pending_editor = Some(self.files[idx].path().to_string());

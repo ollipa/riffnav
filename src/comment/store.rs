@@ -229,6 +229,16 @@ impl CommentStore {
         self.path.as_deref()
     }
 
+    /// The repository's top folder, empty when session-only.
+    pub fn repo(&self) -> &str {
+        &self.repo
+    }
+
+    /// The branch, `(detached)` off one, empty when session-only.
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
     pub fn all(&self) -> &[Comment] {
         &self.comments
     }

@@ -57,6 +57,19 @@ pub(super) fn render_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(Color::Yellow),
         ));
     }
+    if let Some(queued) = app.queued_label() {
+        spans.push(Span::styled(
+            format!("   {queued}"),
+            Style::new().fg(Color::Magenta),
+        ));
+    }
+    let unsent = app.unsent_count();
+    if unsent > 0 {
+        spans.push(Span::styled(
+            format!("   ✉ {unsent} unsent"),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
     if app.in_herdr() {
         spans.push(Span::styled(
             "   ⧉ herdr",
@@ -154,10 +167,10 @@ pub(super) fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             };
             let web = if app.has_forge() { "W: web · " } else { "" };
             let zoom = if app.in_herdr() { "z: zoom · " } else { "" };
-            let note = if app.comments_enabled() {
-                "c: comment · "
-            } else {
-                ""
+            let note = match (app.comments_enabled(), app.can_send_comments()) {
+                (true, true) => "c: comment · S: send · ",
+                (true, false) => "c: comment · ",
+                (false, _) => "",
             };
             let keys = |changes: &str| {
                 format!(

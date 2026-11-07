@@ -7,6 +7,7 @@ mod files;
 mod keys;
 mod mouse;
 mod moves;
+mod notify;
 mod prefetch;
 mod search;
 mod source;
@@ -43,6 +44,7 @@ use crate::tree::{self, Node, Row, RowKind};
 use self::cursor::CursorToken;
 use self::files::Finder;
 use self::moves::{CopyReturn, MoveLanding};
+use self::notify::Outbox;
 use self::prefetch::{By, Heading, Prefetched};
 use self::terminal::{
     disable_enhanced_keys, disable_mouse, enable_enhanced_keys, enable_mouse, init_terminal,
@@ -77,6 +79,8 @@ const COMMENT_POLL: Duration = Duration::from_millis(250);
 /// While a render is under way, how often to look for it between keypresses. A
 /// key read can't be interrupted, so this is as late as a finished render can land.
 const RENDER_POLL: Duration = Duration::from_millis(5);
+/// While a notice to an agent is on its way, how often to look for news of it.
+const NOTIFY_POLL: Duration = Duration::from_millis(250);
 /// How long the first frame waits for its render. There's nothing on screen yet to
 /// be held up, and the syntaxes it needs may still be loading.
 const FIRST_WAIT: Duration = Duration::from_millis(150);
@@ -232,6 +236,8 @@ pub struct App {
     /// One-way "viewed" sync to the branch's GitHub PR, when armed via config
     /// (and a GitHub forge is present). `None` leaves marks purely local.
     review_sync: Option<ReviewSync>,
+    /// The person's comments on their way to an agent in the herdr tab: `S`.
+    outbox: Outbox,
     /// Whether we've zoomed our own herdr pane, so we can restore it on exit
     /// rather than leaving herdr maximized behind us.
     zoomed: bool,
@@ -324,6 +330,7 @@ impl App {
             herdr: None,
             forge: None,
             review_sync: None,
+            outbox: Outbox::default(),
             zoomed: false,
             status_deadline: None,
         }
@@ -662,6 +669,7 @@ impl App {
         self.expire_status();
         self.drain_review_sync();
         self.poll_comments();
+        self.drain_delivery();
         Ok(())
     }
 
@@ -684,11 +692,13 @@ impl App {
             (false, true) => Some(COMMENT_POLL),
             (false, false) => None,
         };
+        // News of a notice comes over a channel, which can't wake a key read.
+        let sending = self.sending().then_some(NOTIFY_POLL);
         // A frame that ran out of time before the view settled has more to do, and
         // no render on the way is going to say so.
         let unsettled = !self.cache.busy() && !(self.view_settled() && self.held_keys.is_empty());
         let settling = unsettled.then_some(FRAME_MIN);
-        [status, bound, self.search_wait(), settling]
+        [status, bound, sending, self.search_wait(), settling]
             .into_iter()
             .flatten()
             .min()

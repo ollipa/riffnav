@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +19,7 @@ use super::{TIMEOUT, config_base};
 const VIEW_WAIT: Duration = Duration::from_millis(100);
 
 /// riffnav's terminal in the herdr desktop app.
+#[derive(Clone)]
 pub struct AppPane {
     /// `HC_TERMINAL_ID`.
     terminal: String,
@@ -57,7 +58,7 @@ impl AppPane {
         Some(app)
     }
 
-    fn new(terminal: String, program: OsString, view_file: PathBuf) -> Self {
+    pub(super) fn new(terminal: String, program: OsString, view_file: PathBuf) -> Self {
         Self {
             terminal,
             program,
@@ -105,10 +106,25 @@ impl AppPane {
     }
 
     fn place(&self) -> Result<Place> {
-        let out = run_bounded(&self.program, &["ls"])?;
-        let listing: AppListing = serde_json::from_str(&out).context("parsing herdr-app ls")?;
-        find_place(&listing, &self.terminal)
+        find_place(&self.listing()?, &self.terminal)
             .with_context(|| format!("terminal {} isn't in a pane", self.terminal))
+    }
+
+    fn listing(&self) -> Result<AppListing> {
+        let out = run_bounded(&self.program, &["ls"])?;
+        serde_json::from_str(&out).context("parsing herdr-app ls")
+    }
+
+    /// The agents sharing our tab, in the tab's order.
+    pub(super) fn tab_agents(&self) -> Result<Vec<Agent>> {
+        let listing = self.listing()?;
+        tab_agents(&listing, &self.terminal)
+            .with_context(|| format!("terminal {} isn't in a tab", self.terminal))
+    }
+
+    /// The agent in `terminal`, wherever it is now, or `None` once it's gone.
+    pub(super) fn agent(&self, terminal: &str) -> Result<Option<Agent>> {
+        Ok(find_agent(&self.listing()?, terminal))
     }
 
     fn zoom(&self, pane: &str) -> Result<()> {
@@ -138,24 +154,96 @@ fn find_place(listing: &AppListing, terminal: &str) -> Option<Place> {
         })
 }
 
-/// Run `program` and return its stdout, killing it after [`TIMEOUT`]. A thread
-/// drains stdout so a long listing can't fill the pipe and stall the child.
-fn run_bounded(program: &OsString, args: &[&str]) -> Result<String> {
+/// An agent in a terminal the app shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Agent {
+    pub terminal: String,
+    /// The terminal's name, else the agent program (`claude-code`).
+    pub label: String,
+    /// What the agent last reported: `idle`, `working`, `done`, `blocked` or
+    /// `error`. `None` before its first report.
+    pub status: Option<String>,
+}
+
+impl Agent {
+    /// Whether text typed now would land in the middle of something: a turn in
+    /// progress, or a question waiting on the person, which it would answer.
+    pub fn busy(&self) -> bool {
+        matches!(self.status.as_deref(), Some("working" | "blocked"))
+    }
+
+    fn from(t: &AppTerminal) -> Option<Self> {
+        let app = t.app.as_ref()?;
+        Some(Self {
+            terminal: t.terminal.clone(),
+            label: t.name.clone().unwrap_or_else(|| app.clone()),
+            status: t.status.clone(),
+        })
+    }
+}
+
+/// The other terminals in `terminal`'s tab that run an agent, or `None` when
+/// no tab holds `terminal`.
+fn tab_agents(listing: &AppListing, terminal: &str) -> Option<Vec<Agent>> {
+    let tab = listing
+        .spaces
+        .iter()
+        .flat_map(|space| &space.tabs)
+        .find(|tab| tab.terminals.iter().any(|t| t.terminal == terminal))?;
+    Some(
+        tab.terminals
+            .iter()
+            .filter(|t| t.terminal != terminal)
+            .filter_map(Agent::from)
+            .collect(),
+    )
+}
+
+fn find_agent(listing: &AppListing, terminal: &str) -> Option<Agent> {
+    listing
+        .spaces
+        .iter()
+        .flat_map(|space| &space.tabs)
+        .flat_map(|tab| &tab.terminals)
+        .find(|t| t.terminal == terminal)
+        .and_then(Agent::from)
+}
+
+/// Run `program` and return its stdout, failing with its error reply when it
+/// exits non-zero.
+fn run_bounded(program: &OsStr, args: &[&str]) -> Result<String> {
+    let done = run_for(program, args, TIMEOUT)?;
+    if done.status.success() {
+        return Ok(done.stdout);
+    }
+    match serde_json::from_str::<AppError>(&done.stdout) {
+        Ok(reply) => bail!("{}", reply.error),
+        Err(_) => bail!("{} {} failed ({})", name(program), args[0], done.status),
+    }
+}
+
+/// What a finished run printed, and how it ended.
+pub(super) struct Finished {
+    pub status: ExitStatus,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run `program`, killing it after `timeout`. Threads drain its output so a
+/// long reply can't fill a pipe and stall the child.
+pub(super) fn run_for(program: &OsStr, args: &[&str], timeout: Duration) -> Result<Finished> {
+    let name = name(program);
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .context("running herdr-app")?;
-    let mut stdout = child.stdout.take().context("herdr-app has no stdout")?;
-    let (sender, output) = mpsc::channel();
-    thread::spawn(move || {
-        let mut text = String::new();
-        let _ = sender.send(stdout.read_to_string(&mut text).map(|_| text));
-    });
+        .with_context(|| format!("running {name}"))?;
+    let stdout = drain(child.stdout.take().context("no stdout")?);
+    let stderr = drain(child.stderr.take().context("no stderr")?);
 
-    let deadline = Instant::now() + TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -163,23 +251,42 @@ fn run_bounded(program: &OsString, args: &[&str]) -> Result<String> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("herdr-app {} timed out", args[0]);
+            bail!("{name} {} timed out", args[0]);
         }
         thread::sleep(Duration::from_millis(1));
     };
-    let text = output
-        .recv_timeout(TIMEOUT)
-        .context("reading herdr-app output")??;
-    if status.success() {
-        return Ok(text);
-    }
-    match serde_json::from_str::<AppError>(&text) {
-        Ok(reply) => bail!("{}", reply.error),
-        Err(_) => bail!("herdr-app {} failed ({status})", args[0]),
-    }
+    let read = |output: mpsc::Receiver<std::io::Result<String>>| {
+        output
+            .recv_timeout(TIMEOUT)
+            .with_context(|| format!("reading {name} output"))?
+            .with_context(|| format!("reading {name} output"))
+    };
+    Ok(Finished {
+        status,
+        stdout: read(stdout)?,
+        stderr: read(stderr)?,
+    })
 }
 
-/// `herdr-app ls`, keeping only what locates a terminal.
+fn drain(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<std::io::Result<String>> {
+    let (sender, output) = mpsc::channel();
+    thread::spawn(move || {
+        let mut text = String::new();
+        let _ = sender.send(pipe.read_to_string(&mut text).map(|_| text));
+    });
+    output
+}
+
+/// The program's file name, for messages.
+fn name(program: &OsStr) -> String {
+    Path::new(program)
+        .file_name()
+        .unwrap_or(program)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `herdr-app ls`, keeping only what locates a terminal and its agent.
 #[derive(Deserialize)]
 struct AppListing {
     spaces: Vec<AppSpace>,
@@ -200,6 +307,13 @@ struct AppTab {
 struct AppTerminal {
     terminal: String,
     pane: Option<String>,
+    /// The agent program running in it, if the app recognizes one.
+    #[serde(default)]
+    app: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 /// The app's `view.json`, keeping only each tab's zoomed pane.
@@ -452,6 +566,40 @@ mod tests {
         let default = PathBuf::from("/cfg/herdr-app/view.json");
         assert_eq!(view_file(None, cfg), default);
         assert_eq!(view_file(Some(OsStr::new("")), cfg), default);
+    }
+
+    const AGENTS: &str = r#"{"spaces":[{"tabs":[
+        {"id":"a","terminals":[
+            {"terminal":"t1","pane":"p1","app":null,"name":null,"status":null},
+            {"terminal":"t2","pane":"p2","app":"claude-code","name":"review","status":"working"},
+            {"terminal":"t3","pane":"p3","app":"codex","name":null,"status":"done"},
+            {"terminal":"t4","pane":"p4"}]},
+        {"id":"b","terminals":[{"terminal":"t5","pane":"p5","app":"claude-code","status":"idle"}]}
+    ]}]}"#;
+
+    #[test]
+    fn tab_agents_are_the_other_agents_in_our_tab() {
+        let listing: AppListing = serde_json::from_str(AGENTS).unwrap();
+        let agents = tab_agents(&listing, "t1").unwrap();
+        let labels: Vec<_> = agents.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, ["review", "codex"]);
+        assert!(agents[0].busy());
+        assert!(!agents[1].busy());
+        // An agent's own pane isn't a target, and a plain shell isn't an agent.
+        assert_eq!(tab_agents(&listing, "t2").unwrap().len(), 1);
+        assert!(tab_agents(&listing, "t5").unwrap().is_empty());
+        assert_eq!(tab_agents(&listing, "t9"), None);
+    }
+
+    #[test]
+    fn an_agent_is_found_in_any_tab_until_it_goes() {
+        let listing: AppListing = serde_json::from_str(AGENTS).unwrap();
+        assert_eq!(
+            find_agent(&listing, "t5").unwrap().status.as_deref(),
+            Some("idle")
+        );
+        assert_eq!(find_agent(&listing, "t4"), None);
+        assert_eq!(find_agent(&listing, "t9"), None);
     }
 
     #[test]

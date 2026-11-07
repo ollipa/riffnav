@@ -4,6 +4,7 @@ mod diffview;
 mod filetree;
 mod finder;
 mod help;
+mod picker;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -11,7 +12,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use self::bars::{render_diff_title, render_footer, render_header, render_search_prompt};
 use self::composer::render_composer;
 use self::finder::render_finder;
-use self::help::render_help;
+use self::help::{Live, render_help};
+use self::picker::render_picker;
 use crate::app::{App, Focus};
 
 pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
@@ -66,16 +68,18 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
     // Overlays (mutually exclusive): the finder takes precedence over help.
     if app.finder.is_some() {
         render_finder(frame, frame.area(), app);
+    } else if app.agent_picker().is_some() {
+        render_picker(frame, frame.area(), app);
     } else if app.show_help {
-        render_help(
-            frame,
-            frame.area(),
-            app.in_herdr(),
-            app.has_forge(),
-            app.can_cycle_source(),
-            app.can_refresh(),
-            app.comments_enabled(),
-        );
+        let live = Live {
+            in_herdr: app.in_herdr(),
+            has_forge: app.has_forge(),
+            auto_diff: app.can_cycle_source(),
+            can_refresh: app.can_refresh(),
+            comments: app.comments_enabled(),
+            can_send: app.can_send_comments(),
+        };
+        render_help(frame, frame.area(), live);
     }
 }
 
@@ -165,6 +169,24 @@ mod tests {
         };
         let mut app = sample_app(&cfg);
         insta::assert_snapshot!(render(&mut app, 64, 8));
+    }
+
+    #[test]
+    fn agent_picker_lists_each_agent_with_its_terminal_and_status() {
+        let mut app = sample_app(&Config::default());
+        let agent = |terminal: &str, label: &str, status: Option<&str>| crate::herdr::Agent {
+            terminal: terminal.into(),
+            label: label.into(),
+            status: status.map(str::to_string),
+        };
+        app.open_picker_for_test(vec![
+            agent("t2", "review", Some("working")),
+            agent("t11h", "claude-code", None),
+        ]);
+        let screen = render(&mut app, 80, 12);
+        assert!(screen.contains("Send comments to (Enter send · Esc cancel)"));
+        assert!(screen.contains("│ review       t2    working"), "{screen}");
+        assert!(screen.contains("│ claude-code  t11h  -"), "{screen}");
     }
 
     /// Moving down a long list must scroll before the selection reaches the last

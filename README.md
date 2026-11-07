@@ -89,6 +89,7 @@ to show.
 | `]` / `[` | Next / previous comment |
 | `m` | Jump to the other end of a moved or copied line |
 | `z` | Zoom riffnav's pane (in [herdr](#herdr)) |
+| `S` | Send new comments to the agent in this tab (in the [herdr](#herdr) app) |
 | `W` | Open the branch's pull request in the browser (needs `gh`) |
 | `?` | Help |
 | `q` / `Esc` | Quit |
@@ -128,6 +129,12 @@ option.
 
 Inside [herdr](https://herdr.dev), the terminal multiplexer or the desktop app,
 `z` toggles zoom on riffnav's pane. Quitting undoes a zoom riffnav made.
+
+In the desktop app, `S` tells the agent in riffnav's tab about the comments you
+left since the last `S`, by typing a one-line `[riffnav]` notice into its
+terminal. With several agents in the tab, riffnav asks which one and remembers
+the choice. A busy agent gets the notice once it's free; the header shows what
+is unsent or queued.
 
 ## License
 

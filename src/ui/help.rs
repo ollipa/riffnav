@@ -10,15 +10,25 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::centered_rect;
 
-pub(super) fn render_help(
-    frame: &mut Frame,
-    area: Rect,
-    in_herdr: bool,
-    has_forge: bool,
-    auto_diff: bool,
-    can_refresh: bool,
-    comments: bool,
-) {
+/// Which of the keys that come and go are live.
+pub(super) struct Live {
+    pub in_herdr: bool,
+    pub has_forge: bool,
+    pub auto_diff: bool,
+    pub can_refresh: bool,
+    pub comments: bool,
+    pub can_send: bool,
+}
+
+pub(super) fn render_help(frame: &mut Frame, area: Rect, live: Live) {
+    let Live {
+        in_herdr,
+        has_forge,
+        auto_diff,
+        can_refresh,
+        comments,
+        can_send,
+    } = live;
     // With comments on, the diff has a line cursor for j/k to move.
     let move_keys = if comments {
         "move selection / line cursor (per focus)"
@@ -69,6 +79,9 @@ pub(super) fn render_help(
     }
     if in_herdr {
         entries.push(("z", "toggle herdr zoom"));
+    }
+    if can_send && comments {
+        entries.push(("S", "send new comments to the agent in this herdr tab"));
     }
     entries.push(("?", "toggle this help"));
     entries.push(("q / Esc / Ctrl-c", "quit (Esc clears a search first)"));
@@ -196,7 +209,17 @@ mod tests {
     fn drawn(width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|f| render_help(f, f.area(), true, true, true, true, true))
+            .draw(|f| {
+                let live = Live {
+                    in_herdr: true,
+                    has_forge: true,
+                    auto_diff: true,
+                    can_refresh: true,
+                    comments: true,
+                    can_send: true,
+                };
+                render_help(f, f.area(), live)
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..height)
@@ -221,6 +244,7 @@ mod tests {
                 "delete the comment under the cursor (asks first)",
                 "move selection / line cursor (per focus)",
                 "open PR diff in browser",
+                "send new comments to the agent in this herdr tab",
             ];
             for desc in wanted {
                 assert!(

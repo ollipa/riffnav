@@ -5,151 +5,117 @@ description: Leave and read inline review comments on a git diff through the rif
 
 # riffnav review comments
 
-riffnav is a terminal diff viewer the *user* drives. Never run `riffnav diff` or
-`riffnav show` — they take over the terminal. Use the `riffnav comment ...`
-subcommands, which are plain non-interactive processes.
+riffnav is a terminal diff viewer the user drives. Never run `riffnav diff` or
+`riffnav show`: they take over the terminal. Use `riffnav comment ...`, which
+are plain non-interactive commands.
 
-Comments are stored per repo and branch under `$XDG_STATE_HOME/riffnav/comments/`.
-They persist, so you can leave notes whether or not a window is open. If one is
-open, it picks them up within a moment — no daemon, no port, nothing to unblock.
+Comments are kept per repo and branch under `$XDG_STATE_HOME/riffnav/comments/`,
+so they work whether or not a window is open. An open window shows new ones
+within a moment.
 
 ## Workflow
 
 ```bash
-riffnav comment context            # 1. what can be commented on
+riffnav comment context            # 1. files and line ranges you can comment on
 riffnav comment list               # 2. what's already been said
-riffnav comment apply --stdin      # 3. leave your notes in one batch
+riffnav comment apply --stdin      # 3. your notes, in one batch
 ```
 
-Run `context` first. It prints each file with the line ranges that are actually
-in the diff, and it is far smaller than the diff itself. You cannot anchor a
-comment to a line outside those ranges. Run it again whenever you have edited a
-file since — the diff, and so the ranges, will have moved.
-
-Read the code with your normal tools (`git diff`, Read); riffnav's CLI is for
-writing and reading *comments*, not for reading the diff.
-
-## Sign every comment
-
-Always pass `--author` (or `"author"` in a batch), naming yourself — `claude`,
-or whatever the user calls you. Without it the note is recorded under `$USER`,
-so your review arrives looking like something the user wrote themselves: the
-window colors each author differently and draws the user's own name in its own
-color, and a thread is only readable when it says who is speaking.
+Read the code with your usual tools (`git diff`, Read). The CLI handles
+comments, not the diff.
 
 ## Commands
 
 ```bash
 riffnav comment context [--json]
 riffnav comment list [--file <path>] [--author <name>] [--json]
-riffnav comment add --file <path> (--new-line <n> | --old-line <n>) --body <text>
-                    --author <name>
+riffnav comment add --file <path> (--new-line <n> | --old-line <n>) --body <text> --author <name>
 riffnav comment add --reply-to <id> --body <text> --author <name>
 riffnav comment apply --stdin
 riffnav comment rm <id>
 riffnav comment clear [--file <path>] --yes
 ```
 
-### Anchors
+`--body -` reads the text from stdin, for long or heavily quoted text.
 
-Every comment names one file and exactly one line:
+**Always sign with `--author`** (`"author"` in a batch), e.g. `claude`.
+Without it the note is filed under `$USER` and looks like the user wrote it.
 
-- `--new-line <n>` — a line number on the **post-image** side: added or context
-  lines. This is what you almost always want.
-- `--old-line <n>` — a line number on the **pre-image** side: removed or context
-  lines. Use this to comment on code that was deleted.
+## Anchors
 
-Line numbers are the ones git prints in the hunk header, 1-based, and are the
-same ones the user sees in riffnav's gutter. On a merge the pre-image side is the
-first parent, so a line only another parent had can't be commented on.
+Each comment names one file and one line:
 
-A reply is the exception: it takes no anchor at all. See [Replying](#replying).
+- `--new-line <n>`: post-image side (added or context lines). The usual choice.
+- `--old-line <n>`: pre-image side (removed or context lines), for deleted code.
 
-**Editing files changes the diff.** Comment, fix, reply is the normal loop, and
-each fix moves the hunks — so line numbers from an earlier `context` run go
-stale, and the diff riffnav is showing can flip on its own (a clean tree shows
-the branch against its base; the first edit widens that to everything since the
-branch forked). Re-run `riffnav comment context` after you touch the code.
+Numbers are git's 1-based hunk line numbers, the same ones in riffnav's gutter.
+On a merge the old side is the first parent.
 
-**If an anchor is rejected, stop and report it.** Never hunt for a nearby line
-that the CLI will accept. The error means the line you meant is not in the diff
-in force; a comment re-anchored to a different line is filed against code it
-isn't about, and the user has no way to tell.
+Only lines inside the ranges `context` prints can take a comment.
 
-### One comment
+**Editing files moves the diff.** After you change code, earlier line numbers
+are stale, and the diff riffnav shows can switch on its own (a clean tree shows
+the branch against its base; the first edit widens it to everything since the
+fork). Re-run `riffnav comment context` before commenting again.
 
-```bash
-riffnav comment add --file src/app.rs --new-line 103 --author claude \
-  --body "This retry loop has no backoff."
-```
+**If an anchor is rejected, stop and report it.** Never move the comment to a
+nearby line the CLI accepts: it would be filed against code it isn't about.
 
-Pass `--body -` to read the text from stdin when it is long or full of quotes.
+## Batches
 
-### Several comments
-
-Prefer one batch over many invocations. The whole batch is validated before any
-of it is written, so a bad line number fails cleanly instead of half-applying.
+Prefer one `apply` over many `add`s. The whole batch is checked before anything
+is written, so one bad line fails it cleanly.
 
 ```bash
 printf '%s' '{"comments":[
   {"file":"src/app.rs","newLine":103,"author":"claude","body":"This retry loop has no backoff."},
   {"file":"src/app.rs","oldLine":88,"author":"claude","body":"Why was the guard here dropped?"},
-  {"file":"README.md","newLine":12,"author":"claude","body":"Stale: the flag is now --diff."}
+  {"replyTo":"a3f1c2","author":"claude","body":"Fixed: added exponential backoff."}
 ]}' | riffnav comment apply --stdin
 ```
 
-Each item needs `body`, `author`, and either an anchor (`file` plus exactly one
-of `newLine` or `oldLine`) or a `replyTo` — never both. Field names are
-camelCase. `apply` takes no flags but `--stdin`, so every item carries its own
-author.
+Each item has `body`, `author`, and either an anchor (`file` plus one of
+`newLine`/`oldLine`) or `replyTo`, never both. Fields are camelCase. `apply`
+takes no flag but `--stdin`.
 
-### Replying
+## Replies
 
-`comment list` shows each note's short id. Thread under one with `--reply-to`:
+`comment list` shows each comment's short id. `--reply-to <id>` threads under it.
+A reply takes no anchor: it inherits the parent's file and line, and passing
+`--file` or a line flag with it is an error. So you can reply after a fix even
+when the parent's line has left the diff.
 
-```bash
-riffnav comment add --reply-to a3f1c2 \
-  --author claude --body "Agreed — I'll add exponential backoff."
+## Reading the user's comments
+
+The user writes comments in the window with `c`. Read them with
+`riffnav comment list --json` when they say they've left notes, and before
+revising code they reviewed.
+
+In the herdr desktop app, the user can send you a notice like this, typed into
+your terminal by riffnav, not by the user:
+
+```
+[riffnav] The user left 2 new review comments for you in /path/to/repo (branch main). Read them with `riffnav comment list` from that folder. ...
 ```
 
-**A reply takes no anchor.** It inherits the file and line of the comment it
-answers; passing `--file`, `--new-line` or `--old-line` alongside `--reply-to`
-is an error. This is what lets you reply after fixing the code: the parent's
-line may no longer be in the diff, and the reply still lands in its thread.
+Run `riffnav comment list` in that folder (it may differ from your working
+directory or branch) and act on the comments.
 
-Replies render inside the same box as the comment they answer, marked `↳`.
+## Good review comments
 
-## Reading what the user wrote
-
-The user leaves comments in the TUI with `c`. Read them back with:
-
-```bash
-riffnav comment list --json
-```
-
-That is the channel for the user to hand you review feedback to act on. Check it
-when the user says they've left notes, or before revising code they reviewed.
-
-## Writing good review comments
-
-- Comment on what the user would not spot themselves: intent, risk, a subtle
-  interaction, a follow-up. Not every hunk.
-- One idea per comment, anchored to the exact line it's about.
-- Say what and why, not just what. "No backoff here, so a flapping upstream
-  turns into a tight loop" beats "add backoff".
-- Prefer `--new-line` unless you're specifically discussing deleted code.
+- Flag what the user wouldn't spot: intent, risk, subtle interactions, follow-ups.
+  Not every hunk.
+- One idea per comment, on the exact line it's about.
+- Say what and why: "No backoff, so a flapping upstream becomes a tight loop"
+  beats "add backoff".
 
 ## Errors
 
-- **"no file `x` in this diff"** — the path isn't in the changeset. The error
-  lists what is; or run `riffnav comment context`.
-- **"line N is not in ...'s diff"** — the line exists in the file but not in the
-  diff. The error lists the commentable ranges, names the diff in force, and
-  says whether it moved since the earlier comments were written. Re-run
-  `context` and re-read; don't pick a nearby line to make the write succeed.
-- **"pass one of --new-line or --old-line"** — exactly one side, never both.
-- **"a reply carries no anchor of its own"** — drop `--file` and the line flags;
-  `--reply-to` is the whole anchor.
-- **"no riffnav session and not inside a git repository"** — run from inside the
-  repo you're reviewing.
-- **"no comment with id X to reply to"** — check `riffnav comment list`.
+- **no file `x` in this diff**: the path isn't in the changeset; the error lists
+  what is.
+- **line N is not in ...'s diff**: the line isn't in a hunk. The error lists the
+  ranges and the diff in force. Re-run `context`; don't pick a nearby line.
+- **pass one of --new-line or --old-line**: exactly one, never both.
+- **a reply carries no anchor of its own**: drop `--file` and the line flags.
+- **no riffnav session and not inside a git repository**: run it from the repo.
+- **no comment with id X to reply to**: check `riffnav comment list`.

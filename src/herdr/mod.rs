@@ -10,16 +10,22 @@
 //! pane, so each toggle first finds our pane with `herdr-app ls`, then runs
 //! `herdr-app do pane.zoom`. That command only ever answers `ok`, and nothing it
 //! offers reports zoom, so the state comes from the app's `view.json`.
+//!
+//! In the app, `S` also tells an agent in riffnav's tab about the person's new
+//! review comments: see [`notify`].
 
 mod desktop;
+mod notify;
 mod socket;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
+pub use self::desktop::Agent;
 use self::desktop::AppPane;
+pub use self::notify::{Delivery, Notice, Progress};
 use self::socket::TuiSocket;
 
 /// How long a single request may block on connect/read/write, or a single
@@ -48,6 +54,28 @@ impl Herdr {
         match self {
             Self::Tui(tui) => tui.toggle_zoom(),
             Self::App(app) => app.toggle_zoom(),
+        }
+    }
+
+    /// Whether comments can be sent to an agent from here: only the desktop app
+    /// knows which terminals run one.
+    pub fn can_send(&self) -> bool {
+        matches!(self, Self::App(_))
+    }
+
+    /// The agents in riffnav's tab, other than riffnav itself.
+    pub fn tab_agents(&self) -> Result<Vec<Agent>> {
+        match self {
+            Self::App(app) => app.tab_agents(),
+            Self::Tui(_) => bail!("sending comments needs the herdr app"),
+        }
+    }
+
+    /// Start sending `notice`, waiting for its agent to be free first.
+    pub fn deliver(&self, notice: Notice) -> Result<Delivery> {
+        match self {
+            Self::App(app) => Ok(Delivery::start(app.clone(), "hc".into(), notice)),
+            Self::Tui(_) => bail!("sending comments needs the herdr app"),
         }
     }
 

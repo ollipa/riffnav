@@ -226,10 +226,13 @@ impl App {
         let saved = self.comments.update(|store| store.add(comment));
         self.bump_comments();
         match saved {
-            Ok(id) => self.set_status(format!(
-                "💬 Commented on {}:{}  (#{id})",
-                pending.file, pending.anchor.line
-            )),
+            Ok(id) => {
+                self.set_status(format!(
+                    "💬 Commented on {}:{}  (#{id})",
+                    pending.file, pending.anchor.line
+                ));
+                self.record_written(id);
+            }
             Err(e) => {
                 self.composer = Some(Composer::new(PendingComment {
                     draft: body.to_string(),
