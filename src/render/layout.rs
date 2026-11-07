@@ -745,14 +745,74 @@ mod tests {
     use crate::comment::store::{Anchor, Side};
     use crate::diff::parse;
     use crate::diff::testing::header;
-    use crate::render;
-    use crate::render::moves::MoveIndex;
+    use crate::render::highlight::{self, HunkStart, Parsing};
+    use crate::render::moves::{self, MoveIndex};
+    use crate::render::words;
+
+    /// Lay a file out with nothing else going on, for the tests of the layout.
+    fn laid_out(
+        file: &FileDiff,
+        moves: &moves::FileMoves,
+        width: u16,
+        theme: DiffTheme,
+        tab_width: u8,
+        starts: &[HunkStart],
+        side_by_side: bool,
+    ) -> (Text<'static>, LineMap) {
+        let cancelled = AtomicBool::new(false);
+        let rows = diff::rows(file);
+        let parsing = Parsing {
+            starts: starts.to_vec(),
+            ..Parsing::of(file, &rows)
+        };
+        let syntax = highlight::highlight(&rows, theme, &parsing, &cancelled);
+        let changes = words::changes(&rows, &syntax.tokens, moves, &cancelled);
+        let content = Content {
+            rows: &rows,
+            syntax: &syntax.runs,
+            changes: &changes,
+            moves,
+            copies: &Default::default(),
+            cancelled: &cancelled,
+        };
+        let lay_out = if side_by_side {
+            super::side_by_side
+        } else {
+            super::unified
+        };
+        let (text, map) = lay_out(file, &content, width, theme, tab_width);
+        (text, map.with_changes(diff::change_ids(&rows)))
+    }
+
+    /// Render one file as a unified diff, `width` columns wide.
+    fn unified_text(
+        file: &FileDiff,
+        moves: &moves::FileMoves,
+        width: u16,
+        theme: DiffTheme,
+        tab_width: u8,
+        starts: &[HunkStart],
+    ) -> (Text<'static>, LineMap) {
+        laid_out(file, moves, width, theme, tab_width, starts, false)
+    }
+
+    /// Render one file side by side, `width` columns wide.
+    fn side_by_side_text(
+        file: &FileDiff,
+        moves: &moves::FileMoves,
+        width: u16,
+        theme: DiffTheme,
+        tab_width: u8,
+        starts: &[HunkStart],
+    ) -> (Text<'static>, LineMap) {
+        laid_out(file, moves, width, theme, tab_width, starts, true)
+    }
 
     const WIDTH: u16 = 40;
 
     fn render(raw: &str) -> (Text<'static>, LineMap) {
         let file = parse(raw).remove(0);
-        render::unified(
+        unified_text(
             &file,
             &FileMoves::default(),
             WIDTH,
@@ -936,7 +996,7 @@ mod tests {
 
     fn sbs(raw: &str) -> (Text<'static>, LineMap) {
         let file = parse(raw).remove(0);
-        render::side_by_side(
+        side_by_side_text(
             &file,
             &FileMoves::default(),
             WIDTH,
@@ -1102,7 +1162,7 @@ mod tests {
     #[test]
     fn a_pane_too_narrow_for_the_gutter_still_terminates() {
         let file = parse(&file_with("@@ -1 +1 @@\n-abcdef\n+ghijkl\n")).remove(0);
-        let (text, map) = render::side_by_side(
+        let (text, map) = side_by_side_text(
             &file,
             &FileMoves::default(),
             8,
@@ -1240,9 +1300,9 @@ mod tests {
         let files = parse(&file_with(MOVED));
         let index = MoveIndex::build(&files);
         let draw = if side_by_side {
-            render::side_by_side
+            side_by_side_text
         } else {
-            render::unified
+            unified_text
         };
         draw(
             &files[0],
@@ -1320,7 +1380,7 @@ mod tests {
         );
         let files = parse(&raw);
         let index = MoveIndex::build(&files);
-        let (text, _) = render::unified(
+        let (text, _) = unified_text(
             &files[0],
             index.file(0),
             WIDTH,
@@ -1340,7 +1400,7 @@ mod tests {
              +    first_call(1);\n+    second_call(2);\n",
         ));
         let index = MoveIndex::build(&files);
-        let (text, map) = render::side_by_side(
+        let (text, map) = side_by_side_text(
             &files[0],
             index.file(0),
             WIDTH,
@@ -1378,7 +1438,7 @@ mod tests {
         ));
         let files = parse(&raw);
         let index = MoveIndex::build(&files);
-        let (_, map) = render::side_by_side(
+        let (_, map) = side_by_side_text(
             &files[0],
             index.file(0),
             WIDTH,
@@ -1479,9 +1539,9 @@ mod tests {
         let files = parse(raw);
         let index = MoveIndex::build(&files);
         let lay_out = if side_by_side {
-            render::side_by_side
+            side_by_side_text
         } else {
-            render::unified
+            unified_text
         };
         let (text, _) = lay_out(
             &files[0],
@@ -1520,7 +1580,7 @@ mod tests {
              +fn alpha_value() {\n+    first_call(1);  \n",
         ));
         let index = MoveIndex::build(&files);
-        let (text, _) = render::unified(
+        let (text, _) = unified_text(
             &files[0],
             index.file(0),
             WIDTH,
