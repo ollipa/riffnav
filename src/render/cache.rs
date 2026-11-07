@@ -940,6 +940,7 @@ mod tests {
     use super::*;
     use crate::comment::testing;
     use crate::diff::testing::{hunk, one};
+    use crate::testing::Repo;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
@@ -1037,30 +1038,18 @@ mod tests {
 
     /// A repository whose last commit changes a line inside a block comment, and
     /// that commit's diff.
-    fn edit_in_a_comment(dir: &std::path::Path) -> FileDiff {
+    fn edit_in_a_comment(repo: &Repo) -> FileDiff {
         let text = format!("/*\n{}*/\n", "prose\n".repeat(40));
-        edit_of(dir, "a.rs", &text)
+        edit_of(repo, "a.rs", &text)
     }
 
     /// `name` committed as `text` and then with its first `prose` made code.
-    fn edit_of(dir: &std::path::Path, name: &str, text: &str) -> FileDiff {
-        let git = |args: &[&str]| {
-            let mut git = std::process::Command::new("git");
-            git.args(["-c", "user.name=t", "-c", "user.email=t@t"])
-                .args(["-c", "commit.gpgsign=false"])
-                .args(args)
-                .current_dir(dir);
-            git.output().unwrap()
-        };
-        std::fs::create_dir_all(dir).unwrap();
-        git(&["init", "-q"]);
-        std::fs::write(dir.join(name), text).unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "-qm", "x"]);
-        std::fs::write(dir.join(name), text.replacen("prose", "let x = 1;", 1)).unwrap();
-        git(&["commit", "-qam", "x"]);
-        let out = git(&["show", "HEAD"]);
-        parse(&String::from_utf8_lossy(&out.stdout)).remove(0)
+    fn edit_of(repo: &Repo, name: &str, text: &str) -> FileDiff {
+        repo.commit(name, text);
+        repo.commit(name, &text.replacen("prose", "let x = 1;", 1));
+        one(&String::from_utf8_lossy(
+            &repo.run(&["show", "HEAD"]).stdout,
+        ))
     }
 
     /// The colors of the `let x = 1;` row, which are all one if it's a comment.
@@ -1078,10 +1067,10 @@ mod tests {
 
     #[test]
     fn hunk_starts_reach_the_render_and_outlive_a_resize_and_a_theme_change() {
-        let dir = std::env::temp_dir().join(format!("riffnav-render-{}", std::process::id()));
-        let file = edit_in_a_comment(&dir);
+        let repo = Repo::new();
+        let file = edit_in_a_comment(&repo);
         let mut cache = RenderCache::new(4, false, false);
-        cache.read_starts_in(&dir);
+        cache.read_starts_in(&repo.0);
         let draw = |cache: &mut RenderCache, width, theme| {
             cache.ensure(&request(0, &file, width, theme));
         };
@@ -1091,7 +1080,6 @@ mod tests {
         assert_eq!(right, 3, "the gutter, one color of comment, the padding");
 
         // With the repository gone, the only way to stay right is the cache.
-        std::fs::remove_dir_all(&dir).unwrap();
         cache.clear();
         draw(&mut cache, WIDTH + 10, GitHubDark);
         assert_eq!(colors_of_the_edit(&cache, WIDTH + 10, GitHubDark), right);
@@ -1105,32 +1093,30 @@ mod tests {
 
     #[test]
     fn a_script_whose_first_line_is_out_of_sight_is_colored_from_its_blob() {
-        let dir = std::env::temp_dir().join(format!("riffnav-script-{}", std::process::id()));
+        let repo = Repo::new();
         let text = format!(
             "#!/bin/sh\n{}",
             "echo hi\n".repeat(20) + &"prose\n".repeat(20)
         );
-        let file = edit_of(&dir, "run", &text);
+        let file = edit_of(&repo, "run", &text);
         let colors = |reader: bool| {
             let mut cache = RenderCache::new(4, false, false);
             if reader {
-                cache.read_starts_in(&dir);
+                cache.read_starts_in(&repo.0);
             }
             cache.ensure(&request(0, &file, WIDTH, GitHubDark));
             colors_of_the_edit(&cache, WIDTH, GitHubDark)
         };
         let piped = colors(false);
         assert!(colors(true) > piped, "colored only once the blob is read");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_cache_without_a_reader_leaves_hunks_starting_afresh() {
-        let dir = std::env::temp_dir().join(format!("riffnav-piped-{}", std::process::id()));
-        let file = edit_in_a_comment(&dir);
+        let repo = Repo::new();
+        let file = edit_in_a_comment(&repo);
         let mut cache = RenderCache::new(4, false, false);
         cache.ensure(&request(0, &file, WIDTH, GitHubDark));
-        std::fs::remove_dir_all(&dir).unwrap();
         assert!(!cache.busy());
         assert!(colors_of_the_edit(&cache, WIDTH, GitHubDark) > 1);
     }

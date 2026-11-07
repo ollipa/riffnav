@@ -153,6 +153,7 @@ pub fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TempDir;
 
     #[test]
     fn scope_path_hashes_both_components() {
@@ -168,7 +169,7 @@ mod tests {
 
     #[test]
     fn write_atomic_creates_parents_and_leaves_no_temp() {
-        let dir = std::env::temp_dir().join(format!("riffnav-state-{}", std::process::id()));
+        let dir = TempDir::new("state");
         let path = dir.join("nested").join("scope.json");
         assert!(write_atomic(&path, b"{}"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
@@ -179,7 +180,6 @@ mod tests {
             .map(|e| e.file_name())
             .collect();
         assert_eq!(leftovers, ["scope.json"]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A scope holds no file until its first comment, and the window watching it
@@ -187,8 +187,7 @@ mod tests {
     /// the watch, so the scope being opened keeps its directory.
     #[test]
     fn sweep_keeps_the_directory_of_the_scope_being_opened() {
-        let dir = std::env::temp_dir().join(format!("riffnav-sweep-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TempDir::new("sweep");
         let keep = scope_path(&dir, "/repo", "branch");
         let other = scope_path(&dir, "/elsewhere", "branch");
         std::fs::create_dir_all(keep.parent().unwrap()).unwrap();
@@ -203,7 +202,6 @@ mod tests {
             !other.parent().unwrap().exists(),
             "an unrelated empty directory is still swept"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Two writers of the same scope — an agent's `comment add` and the open

@@ -261,7 +261,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
-    use crate::render::starts::tests::Repo;
+    use crate::testing::Repo;
 
     fn read_all(repo: &Repo, specs: &[&str], budget: &mut usize) -> Vec<Option<String>> {
         let specs: Vec<String> = specs.iter().map(|spec| spec.to_string()).collect();

@@ -420,6 +420,7 @@ impl CommentStore {
 mod tests {
     use super::*;
     use crate::comment::testing::note;
+    use crate::testing::TempDir;
 
     fn draft(file: &str, line: u32, body: &str) -> Comment {
         Comment {
@@ -613,7 +614,7 @@ mod tests {
 
     #[test]
     fn save_round_trips_and_emptying_removes_the_file() {
-        let dir = std::env::temp_dir().join(format!("riffnav-comments-{}", std::process::id()));
+        let dir = TempDir::new("comments");
         let path = dir.join("nested").join("scope.json");
         let mut store = CommentStore::with_path(path.clone());
         let id = store.add(draft("src/app.rs", 103, "why the retry here?"));
@@ -629,18 +630,14 @@ mod tests {
         reloaded.remove(&id);
         reloaded.save();
         assert!(!path.exists(), "an emptied scope deletes its file");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn save_is_a_noop_without_changes() {
-        let dir =
-            std::env::temp_dir().join(format!("riffnav-comments-clean-{}", std::process::id()));
+        let dir = TempDir::new("comments-clean");
         let path = dir.join("scope.json");
         let mut store = CommentStore::with_path(path.clone());
         store.save();
         assert!(!path.exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -237,65 +237,17 @@ pub(super) fn old_blob(raw: &str) -> Option<&str> {
 #[cfg(test)]
 pub(super) mod tests {
     use std::fs;
-    use std::process::{Command, Output};
-    use std::sync::atomic::AtomicUsize;
 
     use super::*;
     use crate::diff::parse;
     use crate::render::highlight::{MAX_FILE_BYTES, MAX_LINE_BYTES, Run, highlight};
+    use crate::testing::Repo;
     use crate::theme::DiffTheme;
 
     /// A file whose read panics, to show what that does.
     pub const PANIC_PATH: &str = "panics-reading-starts.rs";
 
-    /// A throwaway repository.
-    pub struct Repo(pub PathBuf);
-
-    impl Drop for Repo {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     impl Repo {
-        pub fn new() -> Self {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let id = NEXT.fetch_add(1, Ordering::Relaxed);
-            let dir =
-                std::env::temp_dir().join(format!("riffnav-starts-{}-{id}", std::process::id()));
-            fs::create_dir_all(&dir).unwrap();
-            let repo = Self(dir);
-            repo.git(&["init", "-q"]);
-            repo
-        }
-
-        pub fn run(&self, args: &[&str]) -> Output {
-            Command::new("git")
-                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-                .args(["-c", "commit.gpgsign=false"])
-                .args(args)
-                .current_dir(&self.0)
-                .output()
-                .unwrap()
-        }
-
-        pub fn git(&self, args: &[&str]) {
-            let out = self.run(args);
-            assert!(out.status.success(), "git {args:?}: {out:?}");
-        }
-
-        pub fn write(&self, path: &str, text: &str) {
-            let path = self.0.join(path);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, text).unwrap();
-        }
-
-        pub fn commit(&self, path: &str, text: &str) {
-            self.write(path, text);
-            self.git(&["add", "-A"]);
-            self.git(&["commit", "-qm", "x"]);
-        }
-
         /// The first file of `git <args>`.
         fn diff(&self, args: &[&str]) -> FileDiff {
             let out = self.run(args);
@@ -746,7 +698,7 @@ pub(super) mod tests {
         repo.commit("a.rs", &with_line(&commented(), 20, "let x = 1;"));
         let file = repo.diff(&["show", "HEAD"]);
 
-        let reader = StartReader::new(&repo.0);
+        let reader = StartReader::new(repo.0.to_path_buf());
         assert_eq!(answer(&reader, &file).starts.len(), 1);
         // With the repository gone, only a remembered answer can come back.
         fs::remove_dir_all(repo.0.join(".git")).unwrap();
@@ -760,7 +712,7 @@ pub(super) mod tests {
         repo.commit("a.rs", &with_line(&commented(), 20, "let x = 1;"));
         let file = repo.diff(&["show", "HEAD"]);
 
-        let reader = StartReader::new(&repo.0);
+        let reader = StartReader::new(repo.0.to_path_buf());
         assert!(reader.read(&file, &AtomicBool::new(true)).is_none());
         assert_eq!(
             answer(&reader, &file).starts.len(),
@@ -777,7 +729,7 @@ pub(super) mod tests {
         let mut file = repo.diff(&["show", "HEAD"]);
         file.new_path = Some(PANIC_PATH.to_string());
 
-        let reader = StartReader::new(&repo.0);
+        let reader = StartReader::new(repo.0.to_path_buf());
         assert!(answer(&reader, &file).starts.is_empty());
         // Remembered, so the panic isn't there to be hit again.
         fs::remove_dir_all(repo.0.join(".git")).unwrap();

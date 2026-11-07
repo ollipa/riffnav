@@ -233,6 +233,7 @@ mod tests {
     use crate::app::{App, Focus};
     use crate::comment::testing::note;
     use crate::comment::{Comment, CommentStore};
+    use crate::testing::TempDir;
     use crate::tree;
 
     /// `r` re-reads the notes as well as the diff. The filesystem watcher usually
@@ -240,9 +241,8 @@ mod tests {
     /// stale-looking screen fixable by hand.
     #[test]
     fn refreshing_re_reads_notes_written_by_another_process() {
-        let dir = std::env::temp_dir().join(format!("riffnav-refresh-{}", std::process::id()));
+        let dir = TempDir::new("refresh");
         let path = dir.join("scope.json");
-        let _ = std::fs::remove_file(&path);
 
         let mut app = app_with(vec![file_with_raw("a.rs")]);
         app.install_comments_for_test(CommentStore::with_path(path.clone()));
@@ -262,8 +262,6 @@ mod tests {
         assert_eq!(app.comments.all()[0].body, "written elsewhere");
         assert_ne!(app.comment_rev, rev, "and the renders re-splice");
         assert_eq!(app.reload_comments(), None, "a second pass adds nothing");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     /// Two files, one note each, both rendered — the state `]` crosses a file

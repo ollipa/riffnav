@@ -14,6 +14,8 @@ mod review;
 mod search;
 mod session;
 mod state;
+#[cfg(test)]
+mod testing;
 mod theme;
 mod tree;
 mod ui;

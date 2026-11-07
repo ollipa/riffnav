@@ -202,6 +202,7 @@ impl ReviewStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TempDir;
 
     const RAW: &str = "diff --git a/f b/f\nindex 1111111..2222222 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n";
 
@@ -256,7 +257,7 @@ mod tests {
     #[test]
     fn save_persists_and_empties_clean_up() {
         // A unique dir per test process; the save path creates missing parents.
-        let dir = std::env::temp_dir().join(format!("riffnav-review-{}", std::process::id()));
+        let dir = TempDir::new("review");
         let path = dir.join("nested").join("scope.json");
         let mut store = ReviewStore::with_path(path.clone());
         let hash = file_hash(RAW);
@@ -272,17 +273,14 @@ mod tests {
         store.toggle(hash, "f");
         store.save();
         assert!(!path.exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn save_is_a_noop_without_changes() {
-        let dir = std::env::temp_dir().join(format!("riffnav-review-clean-{}", std::process::id()));
+        let dir = TempDir::new("review-clean");
         let path = dir.join("scope.json");
         let mut store = ReviewStore::with_path(path.clone());
         store.save(); // nothing dirty
         assert!(!path.exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

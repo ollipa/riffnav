@@ -1,7 +1,7 @@
 use super::*;
 use crate::diff::parse;
 use crate::diff::testing::header;
-use crate::render::starts::tests::Repo;
+use crate::testing::Repo;
 
 /// Real code, with nothing in common from line to line.
 const FUNCTION: [&str; 6] = [
@@ -339,7 +339,7 @@ fn git_notes(repo: &Repo, args: &[&str], tree: Option<Tree>) -> Vec<String> {
     let files = parse(&String::from_utf8_lossy(&out.stdout));
     let moves = MoveIndex::build(&files);
     let git = Git {
-        repo: repo.0.clone(),
+        repo: repo.0.to_path_buf(),
         tree,
     };
     let index = build(&files, &moves, Some(&git), &AtomicBool::new(false)).unwrap();
@@ -606,7 +606,7 @@ fn a_blob_that_isnt_what_the_diff_shows_is_left_alone() {
     let files = parse(&text);
     let moves = MoveIndex::build(&files);
     let git = Git {
-        repo: repo.0.clone(),
+        repo: repo.0.to_path_buf(),
         tree: None,
     };
     let index = build(&files, &moves, Some(&git), &AtomicBool::new(false)).unwrap();
@@ -622,7 +622,7 @@ fn cancelling_stops_it() {
     let out = repo.run(&["show", "HEAD"]);
     let files = parse(&String::from_utf8_lossy(&out.stdout));
     let git = Git {
-        repo: repo.0.clone(),
+        repo: repo.0.to_path_buf(),
         tree: None,
     };
     let moves = MoveIndex::build(&files);

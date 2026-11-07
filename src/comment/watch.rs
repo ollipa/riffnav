@@ -75,6 +75,7 @@ impl CommentWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TempDir;
     use std::time::{Duration, Instant};
 
     /// Wait for the watch to report a change, or give up. Filesystem events are
@@ -98,8 +99,7 @@ mod tests {
     /// which is what watching the tree's root instead is for.
     #[test]
     fn a_note_written_after_the_scope_directory_was_swept_still_wakes_the_watch() {
-        let root = std::env::temp_dir().join(format!("riffnav-watch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = TempDir::new("watch");
         let path = root.join("repo").join("branch.json");
 
         let watch = CommentWatch::new(&path).expect("the watch is established");
@@ -115,7 +115,5 @@ mod tests {
         watch.changed(); // drain the tail of the first write
         assert!(crate::state::write_atomic(&path, b"{\"n\":1}"));
         assert!(woke(&watch), "and so must the next one");
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 }
