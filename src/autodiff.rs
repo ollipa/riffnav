@@ -497,16 +497,22 @@ fn untracked_diff() -> String {
 /// case here), so success is judged by whether it produced output, not by the
 /// exit status.
 fn diff_against_devnull(path: &OsStr) -> Option<String> {
-    let out = Command::new("git")
-        .args(QUOTE_ARGS)
-        .args(["diff", "--no-index"])
-        .args(PREFIX_ARGS)
-        .args(["--", "/dev/null"])
-        .arg(path)
-        .output()
-        .ok()?;
+    let out = Command::new("git").args(devnull_args(path)).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     (!text.is_empty()).then_some(text)
+}
+
+/// The arguments for [`diff_against_devnull`]. `color.ui=never` for the same
+/// reason as [`GitDiff`]'s.
+fn devnull_args(path: &OsStr) -> Vec<&OsStr> {
+    let mut args = ["-c", "color.ui=never"].to_vec();
+    args.extend(QUOTE_ARGS);
+    args.extend(["diff", "--no-index"]);
+    args.extend(PREFIX_ARGS);
+    args.extend(["--", "/dev/null"]);
+    let mut args: Vec<&OsStr> = args.into_iter().map(OsStr::new).collect();
+    args.push(path);
+    args
 }
 
 #[cfg(test)]
@@ -698,5 +704,22 @@ mod tests {
         let labels: Vec<_> = DiffSource::CYCLE.iter().map(|s| s.label()).collect();
         let unique: std::collections::HashSet<_> = labels.iter().collect();
         assert_eq!(unique.len(), labels.len());
+    }
+
+    /// A `color.ui = always` config would hand the parser an untracked file's
+    /// diff with ANSI codes in it.
+    #[test]
+    fn an_untracked_file_comes_back_without_color() {
+        let dir = crate::testing::TempDir::new("devnull");
+        let file = dir.join("new.txt");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        let out = Command::new("git")
+            .args(["-c", "color.ui=always"])
+            .args(devnull_args(file.as_os_str()))
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("+one"), "{text}");
+        assert!(!text.contains('\x1b'), "{text:?}");
     }
 }
