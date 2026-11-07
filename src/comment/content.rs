@@ -69,6 +69,9 @@ impl FileBlobs {
     }
 }
 
+/// How many blobs a [`BlobReader`] remembers before it forgets them all.
+const MAX_KNOWN: usize = 256;
+
 /// Reads blobs by id, remembering each: an id names its content for good.
 pub struct BlobReader {
     /// The repository's top, which diff paths start from. `None` outside one.
@@ -101,6 +104,11 @@ impl BlobReader {
     /// Read every blob of `wants` not read yet, with one git for the object
     /// store and one more for any it doesn't have.
     pub fn read(&mut self, wants: &[(Option<&str>, &str)]) {
+        // Every version of a file read in a long session is kept, so start over
+        // now and then rather than grow without end.
+        if self.known.len() > MAX_KNOWN {
+            self.known.clear();
+        }
         let mut fresh: Vec<(Option<&str>, &str)> = Vec::new();
         for &(path, id) in wants {
             if !self.known.contains_key(id) && !fresh.iter().any(|(_, i)| *i == id) {

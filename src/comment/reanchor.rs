@@ -12,7 +12,9 @@
 //! A comment without a snapshot (written before snapshots, or swept) looks for its
 //! line's text near where it was, and stays put if it isn't found.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,16 +42,40 @@ pub struct Moved {
 
 /// Where line `line` (1-based) of `old` is in `new`. `None` if `old` has no such
 /// line or `new` has no lines at all.
+#[cfg(test)]
 pub fn map_line(old: &str, new: &str, line: u32) -> Option<Moved> {
-    let old: Vec<&str> = old.lines().collect();
-    let new: Vec<&str> = new.lines().collect();
-    let at = (line as usize).checked_sub(1).filter(|&i| i < old.len())?;
-    if new.is_empty() {
+    map_with(&LineDiff::new(old, new), line)
+}
+
+/// A diff of two versions of a file, line by line.
+pub struct LineDiff {
+    ops: Vec<DiffOp>,
+    old_len: usize,
+    new_len: usize,
+}
+
+impl LineDiff {
+    pub fn new(old: &str, new: &str) -> Self {
+        let old: Vec<&str> = old.lines().collect();
+        let new: Vec<&str> = new.lines().collect();
+        let deadline = Some(Instant::now() + DIFF_DEADLINE);
+        Self {
+            ops: capture_diff_slices_deadline(Algorithm::Patience, &old, &new, deadline),
+            old_len: old.len(),
+            new_len: new.len(),
+        }
+    }
+}
+
+/// [`map_line`] over a diff already made.
+fn map_with(diff: &LineDiff, line: u32) -> Option<Moved> {
+    let at = (line as usize)
+        .checked_sub(1)
+        .filter(|&i| i < diff.old_len)?;
+    if diff.new_len == 0 {
         return None;
     }
-    let deadline = Some(Instant::now() + DIFF_DEADLINE);
-    let ops = capture_diff_slices_deadline(Algorithm::Patience, &old, &new, deadline);
-    let op = ops.iter().find(|op| op.old_range().contains(&at))?;
+    let op = diff.ops.iter().find(|op| op.old_range().contains(&at))?;
     let (index, outdated) = match *op {
         DiffOp::Equal {
             old_index,
@@ -64,7 +90,7 @@ pub fn map_line(old: &str, new: &str, line: u32) -> Option<Moved> {
             ..
         } => (new_index + (at - old_index).min(new_len - 1), true),
         // Deleted: to the line that now follows, or precedes at the end.
-        DiffOp::Delete { new_index, .. } => (new_index.min(new.len() - 1), true),
+        DiffOp::Delete { new_index, .. } => (new_index.min(diff.new_len - 1), true),
         DiffOp::Insert { .. } => unreachable!("an insert covers no old line"),
     };
     Some(Moved {
@@ -103,14 +129,18 @@ struct Change {
 /// The files of the diff on screen, and what each side of them holds now.
 pub struct Current<'r> {
     files: HashMap<String, FileBlobs>,
-    reader: std::cell::RefCell<&'r mut BlobReader>,
+    reader: RefCell<&'r mut BlobReader>,
+    /// Diffs made so far, by the keys of the texts diffed: planning outside the
+    /// store's lock makes them, so applying under it doesn't have to.
+    diffs: RefCell<HashMap<(String, String), Rc<LineDiff>>>,
 }
 
 impl<'r> Current<'r> {
     pub fn new(files: impl IntoIterator<Item = FileBlobs>, reader: &'r mut BlobReader) -> Self {
         Self {
             files: files.into_iter().map(|f| (f.path.clone(), f)).collect(),
-            reader: std::cell::RefCell::new(reader),
+            reader: RefCell::new(reader),
+            diffs: RefCell::default(),
         }
     }
 
@@ -143,23 +173,44 @@ impl<'r> Current<'r> {
         roots(store).any(|c| self.plan(store, c).is_some())
     }
 
-    /// Move every thread in `store` whose code moved. Returns how many did. Run
-    /// it inside [`CommentStore::update`], so it applies to the store as it is.
+    /// Move every thread in `store` whose code moved, replies and all. Returns
+    /// how many did. Run it inside [`CommentStore::update`], so it applies to the
+    /// store as it is, after [`Self::needs`] outside it, so the diffs are made.
     pub fn apply(&self, store: &mut CommentStore) -> usize {
         let plans: Vec<(String, Change)> = roots(store)
             .filter_map(|c| Some((c.id.clone(), self.plan(store, c)?)))
             .collect();
-        for (id, change) in &plans {
+        for (root, change) in &plans {
             store.snapshots().save(&change.text);
-            store.edit(id, |c| {
-                c.line = change.line;
-                c.snapshot = Some(change.text.key.clone());
-                c.code.clone_from(&change.code);
-                c.outdated = change.outdated;
-                c.diff_hash = Some(change.diff_hash.clone());
-            });
+            let (file, side) = store
+                .get(root)
+                .map(|c| (c.file.clone(), c.side))
+                .expect("planned from the store");
+            for id in store.thread_ids(root) {
+                store.edit(&id, |c| {
+                    c.file.clone_from(&file);
+                    c.side = side;
+                    c.line = change.line;
+                    c.snapshot = Some(change.text.key.clone());
+                    c.code.clone_from(&change.code);
+                    c.outdated = change.outdated;
+                    c.diff_hash = Some(change.diff_hash.clone());
+                });
+            }
         }
         plans.len()
+    }
+
+    /// The diff from the text stored under `then` to `now`, made once.
+    fn diff(&self, store: &CommentStore, then: &str, now: &Text) -> Option<Rc<LineDiff>> {
+        let key = (then.to_string(), now.key.clone());
+        if let Some(diff) = self.diffs.borrow().get(&key) {
+            return Some(diff.clone());
+        }
+        let old = store.snapshots().load(then)?;
+        let diff = Rc::new(LineDiff::new(&old, &now.text));
+        self.diffs.borrow_mut().insert(key, diff.clone());
+        Some(diff)
     }
 
     /// How `c` changes to follow its code, or `None` if it stays as it is.
@@ -180,12 +231,12 @@ impl<'r> Current<'r> {
             let stale = c.diff_hash.as_ref().is_some_and(|h| *h != diff_hash);
             return stale.then(|| change(c.line, c.code.clone(), c.outdated));
         }
-        if let Some(then) = c
+        if let Some(diff) = c
             .snapshot
             .as_deref()
-            .and_then(|k| store.snapshots().load(k))
+            .and_then(|then| self.diff(store, then, &now))
         {
-            let moved = map_line(&then, &now.text, c.line)?;
+            let moved = map_with(&diff, c.line)?;
             let code = match moved.outdated {
                 // What was commented on, not what replaced it.
                 true => c.code.clone(),
@@ -442,9 +493,11 @@ mod tests {
         reply.reply_to = Some(root.clone());
         fx.store.add(reply);
         fx.sides("", &format!("// 1\n{BEFORE}"));
-        assert_eq!(fx.follow(), 1, "only the root is moved");
+        assert_eq!(fx.follow(), 1, "one thread moved");
         assert_eq!(fx.store.threads("f.rs")[0].0.line, 4);
         assert_eq!(fx.store.threads("f.rs")[0].1.len(), 2);
+        let lines: Vec<u32> = fx.store.all().iter().map(|c| c.line).collect();
+        assert_eq!(lines, [4, 4], "the reply is stored where it renders");
     }
 
     /// No snapshot: the stored line text is looked for near the old line, and a

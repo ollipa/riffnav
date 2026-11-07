@@ -100,6 +100,11 @@ pub struct Session {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// Whether this is one of riffnav's own views of the branch, which comments
+    /// follow their code in. Any other diff (a commit, a pipe, a git command of
+    /// the user's own) shows a version they don't follow, so they stay put.
+    #[serde(default)]
+    pub follows: bool,
     pub files: Vec<SessionFile>,
 }
 
@@ -111,6 +116,7 @@ impl Session {
             started: state::now_unix(),
             source: source.to_string(),
             base,
+            follows: false,
             files: files.iter().map(describe).collect(),
         }
     }

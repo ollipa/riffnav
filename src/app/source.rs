@@ -105,7 +105,9 @@ impl App {
                 return;
             }
         }
-        if let Some(new) = self.reload_comments() {
+        let new = self.reload_comments();
+        self.follow_code(true);
+        if let Some(new) = new {
             self.set_status(format!("💬 {new} new comment(s)"));
         }
     }
@@ -239,7 +241,7 @@ impl App {
         self.diff_scroll = 0;
         self.reset_cursor();
         self.publish_session(); // the file set changed; keep the CLI's view current
-        self.follow_code();
+        self.follow_code(true);
         self.set_status(format!("↻ refreshed · {} files", self.files.len()));
     }
 
@@ -299,7 +301,7 @@ impl App {
         self.cursor_token = None; // and let the cursor re-resolve from its anchor
         self.forget_view_render();
         self.publish_session();
-        self.follow_code();
+        self.follow_code(true);
     }
 }
 

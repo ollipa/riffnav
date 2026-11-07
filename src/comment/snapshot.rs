@@ -69,16 +69,15 @@ impl Snapshots {
     /// Keep `text` under its key, best-effort: a snapshot that can't be written
     /// only means the comment falls back to finding its line by its text.
     pub fn save(&self, text: &Text) {
-        let mut known = self.known.borrow_mut();
-        if matches!(known.get(&text.key), Some(Some(_))) {
-            return;
-        }
+        // Checked on disk even when known: another process's sweep may have
+        // taken it since, while nothing here referred to it.
         if let Some(dir) = &self.dir {
             let path = dir.join(&text.key);
             if !path.exists() {
                 state::write_atomic(&path, text.text.as_bytes());
             }
         }
+        let mut known = self.known.borrow_mut();
         known.insert(text.key.clone(), Some(Rc::from(text.text.as_str())));
     }
 

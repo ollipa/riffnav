@@ -227,6 +227,8 @@ impl App {
             outdated: false,
         };
         let current = Self::current_code(&self.files, &mut self.blobs);
+        // Read before the store's lock is taken, rather than under it.
+        current.text(&comment.file, comment.side);
         let saved = self.comments.update(|store| {
             let mut comment = comment;
             // A reply moves with its thread; a new thread follows its own code.

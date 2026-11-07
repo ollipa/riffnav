@@ -16,7 +16,6 @@ impl App {
     pub(super) fn reload_comments(&mut self) -> Option<usize> {
         let before = self.comments.all().len();
         self.comments.reload();
-        self.follow_code();
         self.bump_comments();
         let new = self.comments.all().len().checked_sub(before)?;
         (new > 0).then_some(new)
@@ -38,7 +37,7 @@ impl App {
         self.comments = CommentStore::load(retention_days);
         self.comment_watch = self.comments.path().and_then(CommentWatch::new);
         self.publish_session();
-        self.follow_code();
+        self.follow_code(true);
         self.bump_comments();
     }
 
@@ -53,16 +52,28 @@ impl App {
         Current::new(files, blobs.get_or_insert_with(BlobReader::here))
     }
 
-    /// Move the comments whose code moved since they were written or last moved,
-    /// writing the store only when one did.
-    pub(super) fn follow_code(&mut self) {
-        if !self.comments_on {
+    /// Whether comments follow their code in the diff on screen: only in one of
+    /// riffnav's own views of the branch, never a commit, a pipe, or a git
+    /// command of the user's own, which show versions they don't follow.
+    fn follows_code(&self) -> bool {
+        self.git
+            .as_ref()
+            .is_some_and(|g| g.plain_source().is_some())
+    }
+
+    /// Move the comments whose code moved since they were written or last moved.
+    /// `save` writes the store when one did; otherwise they're only placed here,
+    /// as for notes another process just wrote: saving those could undo what a
+    /// window on another view of the branch saved, and that one would answer.
+    pub(super) fn follow_code(&mut self, save: bool) {
+        if !self.comments_on || !self.follows_code() {
             return;
         }
         let current = Self::current_code(&self.files, &mut self.blobs);
         current.prefetch(&self.comments);
         let moved = match current.needs(&self.comments) {
-            true => self.comments.update(|store| current.apply(store)),
+            true if save => self.comments.update(|store| current.apply(store)),
+            true => Ok(current.apply(&mut self.comments)),
             false => Ok(0),
         };
         match moved {
@@ -81,7 +92,9 @@ impl App {
         }
         let source = self.diff_label().unwrap_or_else(|| "stdin".to_string());
         let base = self.git.as_ref().and_then(|g| g.base.clone());
-        Session::new(&self.files, &source, base).save();
+        let mut session = Session::new(&self.files, &source, base);
+        session.follows = self.follows_code();
+        session.save();
     }
 
     pub fn comments_enabled(&self) -> bool {
@@ -146,7 +159,9 @@ impl App {
         {
             return;
         }
-        if let Some(new) = self.reload_comments() {
+        let new = self.reload_comments();
+        self.follow_code(false);
+        if let Some(new) = new {
             self.set_status(format!("💬 {new} new comment(s)"));
         }
     }

@@ -101,10 +101,11 @@ fn add(args: AddArgs) -> Result<()> {
     let mut store = CommentStore::load(CLI_RETENTION_DAYS);
     let mut reader = BlobReader::here();
     let current = following(session.as_ref(), &store, &mut reader);
+    let moves = moves(session.as_ref(), current.as_ref(), &store);
     // Validated inside the update, against the store as it is when written: a
     // parent deleted since the load is caught rather than replied to.
     let (id, resolved) = write(&mut store, |store| {
-        if let Some(current) = &current {
+        if let Some(current) = current.as_ref().filter(|_| moves) {
             current.apply(store);
         }
         let resolved = anchor(
@@ -137,16 +138,24 @@ fn following<'r>(
     Some(current)
 }
 
+/// Whether threads in `store` move with their code in `session`'s diff: only in
+/// one of riffnav's own views of the branch (see [`Session::follows`]). Asked
+/// before taking the store's lock, so the diffs it makes aren't made under it.
+fn moves(session: Option<&Session>, current: Option<&Current>, store: &CommentStore) -> bool {
+    session.is_some_and(|s| s.follows) && current.is_some_and(|c| c.needs(store))
+}
+
 /// Move the comments in `store` whose code moved, writing only if one did, so
-/// what's printed is where they hang now, as the window shows them.
-fn follow(store: &mut CommentStore, session: Option<&Session>) -> Result<()> {
+/// what's printed is where they hang now, as the window shows them. Best-effort:
+/// a store that can't be written is listed as it is, with a warning.
+fn follow(store: &mut CommentStore, session: Option<&Session>) {
     let mut reader = BlobReader::here();
-    if let Some(current) = following(session, store, &mut reader)
-        && current.needs(store)
+    let current = following(session, store, &mut reader);
+    if let Some(current) = current.filter(|c| moves(session, Some(c), store))
+        && let Err(e) = write(store, |store| Ok(current.apply(store)))
     {
-        write(store, |store| Ok(current.apply(store)))?;
+        eprintln!("riffnav: comments not moved with their code: {e:#}");
     }
-    Ok(())
 }
 
 /// `c` with what lets a new thread follow its code. A reply already carries its
@@ -202,9 +211,10 @@ fn apply(stdin: bool) -> Result<()> {
     let mut store = CommentStore::load(CLI_RETENTION_DAYS);
     let mut reader = BlobReader::here();
     let current = following(session.as_ref(), &store, &mut reader);
+    let moves = moves(session.as_ref(), current.as_ref(), &store);
 
     let added = write(&mut store, |store| {
-        if let Some(current) = &current {
+        if let Some(current) = current.as_ref().filter(|_| moves) {
             current.apply(store);
         }
         // Resolve everything first: a batch that half-applies would leave the
@@ -245,7 +255,7 @@ fn apply(stdin: bool) -> Result<()> {
 
 fn list(file: Option<String>, author: Option<String>, json: bool) -> Result<()> {
     let mut store = CommentStore::load(CLI_RETENTION_DAYS);
-    follow(&mut store, require_session().ok().as_ref())?;
+    follow(&mut store, require_session().ok().as_ref());
     let selected: Vec<&Comment> = store
         .all()
         .iter()
@@ -319,7 +329,7 @@ fn clear(file: Option<String>, yes: bool) -> Result<()> {
 fn context(json: bool) -> Result<()> {
     let session = require_session()?;
     let mut store = CommentStore::load(CLI_RETENTION_DAYS);
-    follow(&mut store, Some(&session))?;
+    follow(&mut store, Some(&session));
     if json {
         say!("{}", serde_json::to_string_pretty(&session)?)?;
         return Ok(());
@@ -374,7 +384,9 @@ fn require_session() -> Result<Session> {
     if files.is_empty() {
         bail!("no changes to comment on in this repository");
     }
-    Ok(Session::new(&files, source.label(), base))
+    let mut session = Session::new(&files, source.label(), base);
+    session.follows = true; // one of riffnav's own views
+    Ok(session)
 }
 
 /// Where one comment will hang: the anchor it names, or — for a reply — the one
@@ -822,6 +834,30 @@ mod tests {
         // The same item without the line applies, though the parent's line is no
         // longer anywhere in the diff.
         assert_eq!(resolve_item(&batch.comments[1]).unwrap().line, 999);
+    }
+
+    /// Threads move only in riffnav's own views of the branch: a commit or a pipe
+    /// shows a version of the file they don't follow.
+    #[test]
+    fn threads_move_only_in_a_view_that_follows_the_branch() {
+        let raw = "diff --git a/f b/f\nindex 1111111..2222222 100644\n--- a/f\n+++ b/f\n\
+                   @@ -1 +1,2 @@\n+top\n x\n";
+        let mut session = Session::new(&crate::diff::parse(raw), "stdin", None);
+        let mut reader = BlobReader::new(None);
+        reader.prime("1111111", "x\n".to_string());
+        reader.prime("2222222", "top\nx\n".to_string());
+        let mut store = CommentStore::disabled();
+        let mut c = note("f", 1, "on x");
+        c.snapshot = Some(crate::comment::snapshot::Text::new("x\n").key);
+        store
+            .snapshots()
+            .save(&crate::comment::snapshot::Text::new("x\n"));
+        store.add(c);
+
+        let current = following(Some(&session), &store, &mut reader);
+        assert!(!moves(Some(&session), current.as_ref(), &store));
+        session.follows = true;
+        assert!(moves(Some(&session), current.as_ref(), &store));
     }
 
     #[test]
