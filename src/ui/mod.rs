@@ -93,6 +93,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Direction;
     use crate::comment::Comment;
     use crate::comment::testing::note;
     use crate::config::Config;
@@ -403,7 +404,7 @@ mod tests {
 
         let (mut app, width, height) = app_with_comments(&[(2, "claude", "why the retry here?")]);
         render(&mut app, width, height);
-        app.jump_comment(true); // onto the thread, where `c` replies
+        app.jump_comment(Direction::Forward); // onto the thread, where `c` replies
         app.press_for_test(KeyCode::Char('c'), false);
         let out = render(&mut app, width, height);
         let rows: Vec<&str> = out.lines().collect();
@@ -469,7 +470,7 @@ mod tests {
         let height = 14;
         render(&mut app, width, height);
 
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         let render = app
             .cache
             .get(Key {
@@ -522,15 +523,15 @@ mod tests {
         // block is pushed down by the three rows the first one added.
         assert_eq!(starts, vec![2, 8], "one block per anchored thread");
 
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         assert_eq!(app.diff_cursor, starts[0]);
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         assert_eq!(app.diff_cursor, starts[1]);
         // Past the last one, wrap back to the first.
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         assert_eq!(app.diff_cursor, starts[0]);
         // And backwards from the first wraps to the last.
-        app.jump_comment(false);
+        app.jump_comment(Direction::Back);
         assert_eq!(app.diff_cursor, starts[1]);
     }
 }

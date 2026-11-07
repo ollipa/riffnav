@@ -1,7 +1,7 @@
 //! The comment store, and the `]` and `[` keys.
 
-use super::App;
 use super::prefetch::By;
+use super::{App, Direction};
 use crate::comment::{CommentStore, CommentWatch};
 use crate::diff::FileDiff;
 use crate::render::CommentLayer;
@@ -136,14 +136,14 @@ impl App {
     /// this file into the next commented one and wrapping around the whole diff,
     /// so `]` held down visits every note in the review exactly once per lap.
     /// Reports when there's nothing to jump to.
-    pub(crate) fn jump_comment(&mut self, forward: bool) {
-        self.head(forward, By::Comment);
+    pub(crate) fn jump_comment(&mut self, dir: Direction) {
+        self.head(dir, By::Comment);
         let starts: Vec<usize> = self
             .current_render()
             .map(|r| r.comment_rows.iter().map(|b| b.start).collect())
             .unwrap_or_default();
         let cursor = self.diff_cursor;
-        let here = if forward {
+        let here = if dir == Direction::Forward {
             starts.iter().find(|&&s| s > cursor).copied()
         } else {
             starts.iter().rev().find(|&&s| s < cursor).copied()
@@ -153,12 +153,12 @@ impl App {
             return;
         }
         // Off the end of this file: carry on into the next file that has notes.
-        if self.jump_commented_file(forward) {
+        if self.jump_commented_file(dir) {
             return;
         }
         // Nowhere else to go — this file holds every comment there is, so wrap
         // inside it, or say there are none at all.
-        let wrapped = if forward {
+        let wrapped = if dir == Direction::Forward {
             starts.first()
         } else {
             starts.last()
@@ -176,7 +176,7 @@ impl App {
     /// The landing is deferred because the target file isn't rendered yet: the
     /// event loop renders whatever is selected, so the row a comment occupies is
     /// only known on the next pass through it.
-    fn jump_commented_file(&mut self, forward: bool) -> bool {
+    fn jump_commented_file(&mut self, dir: Direction) -> bool {
         let order = self.tree_order();
         let n = order.len();
         if n == 0 {
@@ -187,16 +187,22 @@ impl App {
             .and_then(|idx| order.iter().position(|&d| d == idx))
             // A folder row is selected, so there's no file to start from: sweep
             // the whole list from its far end instead.
-            .unwrap_or(if forward { n - 1 } else { 0 });
+            .unwrap_or(if dir == Direction::Forward { n - 1 } else { 0 });
         // Every file but the one we're on, in the direction of travel.
         let target = (1..=n)
-            .map(|off| order[(if forward { from + off } else { from + n - off }) % n])
+            .map(|off| {
+                order[(if dir == Direction::Forward {
+                    from + off
+                } else {
+                    from + n - off
+                }) % n]
+            })
             .find(|&idx| Some(idx) != here && self.comment_count(idx) > 0);
         let Some(idx) = target else {
             return false;
         };
         self.reveal_file(idx);
-        self.comment_landing = Some((idx, forward));
+        self.comment_landing = Some((idx, dir));
         true
     }
 
@@ -204,7 +210,7 @@ impl App {
     /// has rendered it: the cursor goes on that file's first comment when we came
     /// in going forward, its last when going back.
     pub(super) fn land_on_comment(&mut self) {
-        let Some((file, first)) = self.comment_landing else {
+        let Some((file, dir)) = self.comment_landing else {
             return;
         };
         if self.selected_file() != Some(file) {
@@ -214,7 +220,7 @@ impl App {
         let Some(render) = self.current_render() else {
             return;
         };
-        let block = if first {
+        let block = if dir == Direction::Forward {
             render.comment_rows.first()
         } else {
             render.comment_rows.last()
@@ -229,6 +235,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use crate::app::Direction;
     use crate::app::test_support::{app_with, file, file_with_raw, seed_text};
     use crate::app::{App, Focus};
     use crate::comment::testing::note;
@@ -302,24 +309,24 @@ mod tests {
     fn jumping_walks_off_the_end_of_a_file_into_the_next_commented_one() {
         let mut app = app_with_a_note_in_two_files();
 
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         assert_eq!(app.selected_file(), Some(0), "the note in a.rs comes first");
         assert_eq!(app.diff_cursor, 1, "the block under diff line 1");
 
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         settle(&mut app);
         assert_eq!(app.selected_file(), Some(1), "`]` crossed into b.rs");
         assert_eq!(app.diff_cursor, 2, "onto its note, not the top of the file");
 
         // Past the last note in the last file, the lap starts over.
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         settle(&mut app);
         assert_eq!(app.selected_file(), Some(0));
         assert_eq!(app.diff_cursor, 1);
 
         // And `[` off the top of a file lands on the *last* note in the one before
         // it, which here is b.rs again.
-        app.jump_comment(false);
+        app.jump_comment(Direction::Back);
         settle(&mut app);
         assert_eq!(app.selected_file(), Some(1));
         assert_eq!(app.diff_cursor, 2);
@@ -341,7 +348,7 @@ mod tests {
         app.rows = tree::flatten(&app.nodes, &app.collapsed);
         assert_eq!(app.selected_file(), Some(0), "a.rs is open, src is folded");
 
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         assert_eq!(app.selected_file(), Some(1), "the fold was opened");
         assert!(app.comment_landing.is_some(), "and the landing is armed");
     }
@@ -356,9 +363,9 @@ mod tests {
         app.seed_render_for_test(60, seed_text());
         app.resync_cursor();
 
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         assert_eq!(app.diff_cursor, 1);
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         assert_eq!(app.selected_file(), Some(0), "stayed in a.rs");
         assert_eq!(app.diff_cursor, 1, "wrapped back onto the only note");
     }

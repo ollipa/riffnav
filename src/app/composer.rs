@@ -242,6 +242,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use crate::app::Direction;
 
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -352,7 +353,7 @@ mod tests {
         // Re-splice so the stored note occupies rows, then jump onto it.
         app.seed_render_for_test(60, seed_text());
         app.resync_cursor();
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         assert!(
             app.current_render()
                 .unwrap()
@@ -397,7 +398,7 @@ mod tests {
         app.press_for_test(KeyCode::Enter, false);
         app.seed_render_for_test(60, seed_text()); // splice the note into rows
         app.resync_cursor();
-        app.jump_comment(true);
+        app.jump_comment(Direction::Forward);
         app
     }
 
@@ -441,7 +442,7 @@ mod tests {
         app.press_for_test(KeyCode::Enter, false);
         app.seed_render_for_test(60, seed_text());
         app.resync_cursor();
-        app.jump_comment(true); // onto the thread's first row: its root
+        app.jump_comment(Direction::Forward); // onto the thread's first row: its root
 
         app.press_for_test(KeyCode::Char('x'), false);
         let prompt = app.status.clone().expect("the question is on screen");

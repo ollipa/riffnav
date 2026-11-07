@@ -89,6 +89,13 @@ pub enum Focus {
     Diff,
 }
 
+/// Which way a jump goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Forward,
+    Back,
+}
+
 pub struct App {
     pub files: Vec<FileDiff>,
     pub rows: Vec<Row>,
@@ -161,7 +168,7 @@ pub struct App {
     /// A `]`/`[` jump that crossed into another file, waiting for that file to be
     /// rendered before the cursor can be put on the comment it was aimed at:
     /// `true` for its first comment, `false` for its last.
-    comment_landing: Option<(usize, bool)>,
+    comment_landing: Option<(usize, Direction)>,
     /// A diff line an `m` jump is heading for, waiting on the event loop to render
     /// the file it's in, the same way `comment_landing` does, and whether it set out
     /// from that file.
@@ -281,7 +288,7 @@ impl App {
             move_turns: HashMap::new(),
             held_keys: VecDeque::new(),
             heading: Heading {
-                forward: true,
+                dir: Direction::Forward,
                 by: By::File,
             },
             prefetch_asked: None,

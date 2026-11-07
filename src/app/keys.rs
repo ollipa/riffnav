@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use super::{App, Focus, HALF_PAGE};
+use super::{App, Direction, Focus, HALF_PAGE};
 
 impl App {
     /// Whether `key` has to wait its turn. A key that only makes sense against the
@@ -209,12 +209,12 @@ impl App {
                 (Focus::Diff, true) => self.move_cursor(-1),
                 (Focus::Diff, false) => self.scroll_diff(-1),
             },
-            KeyCode::Char('n') if self.searching() => self.step_match(true),
-            KeyCode::Char('N') if self.searching() => self.step_match(false),
-            KeyCode::Char('n') => self.jump_file(true),
-            KeyCode::Char('p') | KeyCode::Char('N') => self.jump_file(false),
-            KeyCode::Char('J') => self.jump_change(true),
-            KeyCode::Char('K') => self.jump_change(false),
+            KeyCode::Char('n') if self.searching() => self.step_match(Direction::Forward),
+            KeyCode::Char('N') if self.searching() => self.step_match(Direction::Back),
+            KeyCode::Char('n') => self.jump_file(Direction::Forward),
+            KeyCode::Char('p') | KeyCode::Char('N') => self.jump_file(Direction::Back),
+            KeyCode::Char('J') => self.jump_change(Direction::Forward),
+            KeyCode::Char('K') => self.jump_change(Direction::Back),
             KeyCode::Char('d') if ctrl => self.scroll_diff(HALF_PAGE),
             KeyCode::Char('u') if ctrl => self.scroll_diff(-HALF_PAGE),
             KeyCode::PageDown => self.page_move(true),
@@ -292,8 +292,8 @@ impl App {
             KeyCode::Char('c') if self.comments_on => self.start_comment(),
             KeyCode::Char('x') if self.comments_on => self.delete_comment(),
             KeyCode::Char('m') if self.focus == Focus::Diff => self.jump_move(),
-            KeyCode::Char(']') if self.comments_on => self.jump_comment(true),
-            KeyCode::Char('[') if self.comments_on => self.jump_comment(false),
+            KeyCode::Char(']') if self.comments_on => self.jump_comment(Direction::Forward),
+            KeyCode::Char('[') if self.comments_on => self.jump_comment(Direction::Back),
             KeyCode::Char('?') => self.show_help = true,
             _ => {}
         }

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{App, By, CursorToken, Focus};
+use super::{App, By, CursorToken, Direction, Focus};
 use crate::comment::Anchor;
 use crate::diff::RowWalk;
 use crate::render::{Marks, Rendered};
@@ -210,24 +210,24 @@ impl App {
     /// getting there goes past an end of the diff.
     pub(super) fn ranks_onward(
         &self,
-        forward: bool,
+        dir: Direction,
         count: usize,
     ) -> impl Iterator<Item = (usize, bool)> + use<> {
         let here = self.selected_file().is_some();
         let from = self.start_rank();
         // With a folder selected, the file at `from` hasn't been visited yet.
-        let skip = usize::from(here || !forward);
+        let skip = usize::from(here || dir == Direction::Back);
         (0..count).map(move |step| {
             let step = step + skip;
-            let rank = if forward {
+            let rank = if dir == Direction::Forward {
                 (from + step) % count
             } else {
                 (from + count - step % count) % count
             };
-            let wrapped = match (forward, here) {
-                (true, true) => rank <= from,
-                (true, false) => rank < from,
-                (false, _) => rank >= from,
+            let wrapped = match (dir, here) {
+                (Direction::Forward, true) => rank <= from,
+                (Direction::Forward, false) => rank < from,
+                (Direction::Back, _) => rank >= from,
             };
             (rank, wrapped)
         })
@@ -311,7 +311,7 @@ impl App {
             return;
         };
         self.focus = Focus::Diff;
-        self.head(true, By::Match);
+        self.head(Direction::Forward, By::Match);
         self.find.fallback = Some(prompt.origin);
         self.settle_search();
     }
@@ -554,7 +554,7 @@ impl App {
     /// The `n` and `N` keys. Starts from the current match if the cursor is still
     /// on it, otherwise from the cursor, and walks off the end of a file into the
     /// next one with a match, wrapping at the ends of the diff.
-    pub(super) fn step_match(&mut self, forward: bool) {
+    pub(super) fn step_match(&mut self, dir: Direction) {
         let Some(search) = &self.find.search else {
             return;
         };
@@ -567,15 +567,15 @@ impl App {
             return self.set_status(note);
         }
         self.focus = Focus::Diff;
-        self.head(forward, By::Match);
-        if let Some(index) = self.next_in_file(forward) {
+        self.head(dir, By::Match);
+        if let Some(index) = self.next_in_file(dir) {
             return self.show_match(index);
         }
-        self.step_file(forward);
+        self.step_file(dir);
     }
 
     /// The next match in the selected file, as an index into the whole list.
-    fn next_in_file(&self, forward: bool) -> Option<usize> {
+    fn next_in_file(&self, dir: Direction) -> Option<usize> {
         let file = self.selected_file()?;
         let render = self.current_render()?;
         let search = self.find.search.as_ref()?;
@@ -591,23 +591,23 @@ impl App {
             .enumerate()
             .filter_map(|(at, hit)| Some((position(render, hit)?, at)));
         let line_start = (cursor, 0, 0);
-        let picked = match (forward, from) {
-            (true, Some(from)) => ranked.filter(|(at, _)| *at > from).min(),
-            (true, None) => ranked.filter(|(at, _)| *at >= line_start).min(),
-            (false, Some(from)) => ranked.filter(|(at, _)| *at < from).max(),
-            (false, None) => ranked.filter(|(at, _)| *at < line_start).max(),
+        let picked = match (dir, from) {
+            (Direction::Forward, Some(from)) => ranked.filter(|(at, _)| *at > from).min(),
+            (Direction::Forward, None) => ranked.filter(|(at, _)| *at >= line_start).min(),
+            (Direction::Back, Some(from)) => ranked.filter(|(at, _)| *at < from).max(),
+            (Direction::Back, None) => ranked.filter(|(at, _)| *at < line_start).max(),
         };
         picked.map(|(_, at)| search.first_in_file(file) + at)
     }
 
     /// Go on to the nearest file with matches in the direction of travel, which
     /// may be this one again, the long way round.
-    fn step_file(&mut self, forward: bool) {
+    fn step_file(&mut self, dir: Direction) {
         let Some(search) = &self.find.search else {
             return;
         };
         let target = self
-            .ranks_onward(forward, search.file_count())
+            .ranks_onward(dir, search.file_count())
             .filter_map(|(rank, wrapped)| Some((search.file_at(rank)?, wrapped)))
             .find(|&(file, _)| !search.in_file(file).is_empty());
         let Some((file, wrapped)) = target else {
@@ -620,24 +620,28 @@ impl App {
         if self.selected_file() != Some(file) {
             self.reveal_file(file);
         }
-        let landing = if forward {
+        let landing = if dir == Direction::Forward {
             Landing::First
         } else {
             Landing::Last
         };
         self.find.landing = Some((file, landing));
         if wrapped {
-            let end = if forward { "top" } else { "bottom" };
+            let end = if dir == Direction::Forward {
+                "top"
+            } else {
+                "bottom"
+            };
             self.set_status(format!("Search wrapped to the {end}"));
         }
     }
 
     /// The file `n` would go on to after this one, or `N`, short of a wrap that
     /// the scan hasn't got to yet.
-    pub(super) fn next_file_with_matches(&self, forward: bool) -> Option<usize> {
+    pub(super) fn next_file_with_matches(&self, dir: Direction) -> Option<usize> {
         let search = self.find.search.as_ref()?;
         let here = self.selected_file();
-        let ranks = self.ranks_onward(forward, search.file_count());
+        let ranks = self.ranks_onward(dir, search.file_count());
         let ranks = ranks.take_while(|&(_, wrapped)| !wrapped || search.done());
         ranks
             .filter_map(|(rank, _)| search.file_at(rank))

@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use fuzzy_matcher::FuzzyMatcher;
 
-use super::App;
 use super::prefetch::By;
+use super::{App, Direction};
 use crate::diff::FileStatus;
 use crate::tree::{self, Row, RowKind};
 
@@ -66,16 +66,21 @@ impl App {
             return;
         }
         let max = self.rows.len() as isize - 1;
-        self.head(delta > 0, By::File);
+        let dir = if delta > 0 {
+            Direction::Forward
+        } else {
+            Direction::Back
+        };
+        self.head(dir, By::File);
         self.select((self.selected_index() as isize + delta).clamp(0, max) as usize);
     }
 
     /// Jump to the next/previous file row, skipping directories.
-    pub(super) fn jump_file(&mut self, forward: bool) {
-        self.head(forward, By::File);
+    pub(super) fn jump_file(&mut self, dir: Direction) {
+        self.head(dir, By::File);
         let cur = self.selected_index();
         let is_file = |i: &usize| matches!(self.rows[*i].kind, RowKind::File { .. });
-        let next = if forward {
+        let next = if dir == Direction::Forward {
             (cur + 1..self.rows.len()).find(is_file)
         } else {
             (0..cur).rev().find(is_file)

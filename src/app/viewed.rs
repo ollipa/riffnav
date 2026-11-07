@@ -1,7 +1,7 @@
 //! Viewed marks, and syncing them to the pull request.
 
 use super::prefetch::By;
-use super::{App, SYNC_FLUSH_GRACE};
+use super::{App, Direction, SYNC_FLUSH_GRACE};
 use crate::autodiff::{DiffSource, GitDiff};
 use crate::forge::ReviewSync;
 use crate::review::ReviewStore;
@@ -91,7 +91,7 @@ impl App {
             && self.review_auto_advance
             && let Some(i) = self.next_unviewed_after(self.selected_index())
         {
-            self.head(true, By::Unviewed);
+            self.head(Direction::Forward, By::Unviewed);
             self.select(i);
         }
     }
@@ -149,7 +149,7 @@ impl App {
     /// Select the next unviewed file after the cursor, reporting when everything
     /// has been reviewed.
     pub(super) fn jump_unviewed(&mut self) {
-        self.head(true, By::Unviewed);
+        self.head(Direction::Forward, By::Unviewed);
         match self.next_unviewed_after(self.selected_index()) {
             Some(i) => self.select(i),
             None => self.set_status("All files reviewed ✓"),

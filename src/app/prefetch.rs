@@ -6,7 +6,7 @@
 //! on. The file `m` would jump to from the line under the cursor comes after it.
 //! See [`RenderCache::prefetch`].
 
-use super::{App, Focus};
+use super::{App, Direction, Focus};
 use crate::render::{Jump, Prefetch, RenderCache};
 use crate::theme::DiffTheme;
 use crate::tree::{Row, RowKind};
@@ -15,7 +15,7 @@ use crate::tree::{Row, RowKind};
 /// which file is next.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Heading {
-    pub(super) forward: bool,
+    pub(super) dir: Direction,
     pub(super) by: By,
 }
 
@@ -95,11 +95,11 @@ impl App {
 
     /// The file the next press in the direction of travel would open.
     fn next_file(&self) -> Option<usize> {
-        let Heading { forward, by } = self.heading;
+        let Heading { dir, by } = self.heading;
         let here = self.selected_file();
         let in_order = |wanted: &dyn Fn(usize) -> bool| {
             let order = self.tree_order();
-            let ranks = self.ranks_onward(forward, order.len());
+            let ranks = self.ranks_onward(dir, order.len());
             ranks
                 .map(|(rank, _)| order[rank])
                 .find(|&file| Some(file) != here && wanted(file))
@@ -118,8 +118,10 @@ impl App {
                 let mut rows = (1..=n).map(|step| &self.rows[(at + step) % n]);
                 rows.find_map(|row| file(row).filter(|&f| Some(f) != here && !self.is_viewed(f)))
             }
-            By::Match if self.searching() => self.next_file_with_matches(forward),
-            By::File | By::Match if forward => self.rows.iter().skip(at + 1).find_map(file),
+            By::Match if self.searching() => self.next_file_with_matches(dir),
+            By::File | By::Match if dir == Direction::Forward => {
+                self.rows.iter().skip(at + 1).find_map(file)
+            }
             By::File | By::Match => self.rows.iter().take(at).rev().find_map(file),
         }
     }
@@ -144,8 +146,8 @@ impl App {
     }
 
     /// Note the way the reader is going, for [`App::likely_next`].
-    pub(super) fn head(&mut self, forward: bool, by: By) {
-        self.heading = Heading { forward, by };
+    pub(super) fn head(&mut self, dir: Direction, by: By) {
+        self.heading = Heading { dir, by };
     }
 }
 

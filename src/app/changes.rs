@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use super::{App, By, Focus};
+use super::{App, By, Direction, Focus};
 use crate::comment::Anchor;
 use crate::diff;
 use crate::render::Rendered;
@@ -10,10 +10,10 @@ use crate::render::Rendered;
 /// Jumps in progress.
 #[derive(Default)]
 pub(super) struct ChangeJumps {
-    /// Presses still to be acted on, oldest first, `true` for `J`. One has to wait
+    /// Presses still to be acted on, oldest first. One has to wait
     /// when the render it would read is out of date, so a burst of them is never
     /// cut short by a file that's slow to render.
-    queued: VecDeque<bool>,
+    queued: VecDeque<Direction>,
     /// A change waiting on the event loop to render the file it's in.
     landing: Option<Landing>,
     /// The file and line the last jump stopped on, so a new layout can keep the
@@ -35,10 +35,10 @@ struct Landing {
 
 impl App {
     /// The `J` and `K` keys. They act on the diff from either pane.
-    pub(super) fn jump_change(&mut self, forward: bool) {
+    pub(super) fn jump_change(&mut self, dir: Direction) {
         self.focus = Focus::Diff;
-        self.head(forward, By::Change);
-        self.change_jumps.queued.push_back(forward);
+        self.head(dir, By::Change);
+        self.change_jumps.queued.push_back(dir);
         // A jump on its way somewhere goes first, as it was asked for first.
         if self.comment_landing.is_none()
             && self.move_landing.is_none()
@@ -54,8 +54,8 @@ impl App {
         while self.render_ready() {
             if let Some(landing) = self.change_jumps.landing.take() {
                 self.land_on_change(landing);
-            } else if let Some(forward) = self.change_jumps.queued.pop_front() {
-                self.step_change(forward);
+            } else if let Some(dir) = self.change_jumps.queued.pop_front() {
+                self.step_change(dir);
             } else {
                 return;
             }
@@ -119,20 +119,20 @@ impl App {
     }
 
     /// One press: the next change in this file, or the next file with one.
-    fn step_change(&mut self, forward: bool) {
-        match self.next_change_here(forward) {
+    fn step_change(&mut self, dir: Direction) {
+        match self.next_change_here(dir) {
             Some(line) => self.stop_at_change(line),
-            None => self.step_change_file(forward),
+            None => self.step_change_file(dir),
         }
     }
 
     /// The line to go to in the selected file. `K` inside a change finds its start,
     /// as that's the nearest one before the cursor.
-    fn next_change_here(&self, forward: bool) -> Option<usize> {
+    fn next_change_here(&self, dir: Direction) -> Option<usize> {
         let render = self.current_render()?;
         let here = self.change_position(render);
         let changes = &render.changes;
-        if forward {
+        if dir == Direction::Forward {
             let next = changes.partition_point(|&line| line <= here);
             changes.get(next).copied()
         } else {
@@ -188,10 +188,10 @@ impl App {
 
     /// Go on to the nearest file with a change in the direction of travel, which
     /// may be this one again, the long way round.
-    fn step_change_file(&mut self, forward: bool) {
+    fn step_change_file(&mut self, dir: Direction) {
         let order = self.tree_order();
         let target = self
-            .ranks_onward(forward, order.len())
+            .ranks_onward(dir, order.len())
             .map(|(rank, wrapped)| (order[rank], wrapped))
             .find(|&(file, _)| diff::has_changes(&self.files[file]));
         let Some((file, wrapped)) = target else {
@@ -203,10 +203,14 @@ impl App {
         }
         self.change_jumps.landing = Some(Landing {
             file,
-            first: forward,
+            first: dir == Direction::Forward,
         });
         if wrapped {
-            let end = if forward { "top" } else { "bottom" };
+            let end = if dir == Direction::Forward {
+                "top"
+            } else {
+                "bottom"
+            };
             self.set_status(format!("Changes wrapped to the {end}"));
         }
     }
