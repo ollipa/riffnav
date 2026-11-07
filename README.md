@@ -54,6 +54,13 @@ git diff | riffnav
 git show <commit> | riffnav
 ```
 
+A merge reads the way git shows it, as a combined diff: only the lines that differ
+from every parent, which is also what `riffnav diff` shows during a merge conflict.
+Rows are simply removed, added or context, whichever parents they came from. The
+old line number follows the first parent, so a line only another parent had has
+none. A clean merge has no such lines, so it opens nothing; to read what it brought
+in, use `riffnav show --first-parent <merge>`.
+
 ### Use it as git's pager
 
 ```sh
@@ -333,7 +340,7 @@ does nothing and isn't shown in the footer or help.
 ## How it works
 
 A unified diff — from `git diff`/`git show` run by riffnav, or piped in on stdin
-— is split per file (`diff --git`) into a tree. On selection the file's hunks
+— is split per file (`diff --git`, or `diff --cc` for a merge) into a tree. On selection the file's hunks
 become rows, highlighted with [syntect][syntect] and marked token by token where a
 line was edited, so `==` becoming `!=` or `sum(a)` becoming `total(b)` reads as one
 change. Removed and added lines are matched across the whole diff to find

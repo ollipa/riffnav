@@ -97,6 +97,24 @@ fn diff_input(args: cli::DiffArgs, config: &config::Config) -> Result<Input> {
     })
 }
 
+/// What to say about a diff with no files in it. git's view of a merge is what
+/// the merge did beyond its parents, which for a clean one is nothing, and that's
+/// no reason to think it changed nothing.
+fn nothing_to_display(text: &str) -> String {
+    if !text.lines().any(|line| line.starts_with("Merge: ")) {
+        return "no changes to display".to_string();
+    }
+    let rev = text
+        .lines()
+        .find_map(|line| line.strip_prefix("commit "))
+        .and_then(|line| line.split_whitespace().next())
+        .map_or("<merge>", |id| &id[..id.len().min(10)]);
+    format!(
+        "no changes to display: a clean merge has no lines that differ from all its \
+         parents.\nTo see what it brought in: riffnav show --first-parent {rev}"
+    )
+}
+
 /// Read the unified diff piped or redirected in on stdin (the pager path).
 fn read_stdin() -> Result<Input> {
     let mut text = String::new();
@@ -152,7 +170,7 @@ fn main() -> Result<()> {
     let files = diff::parse(&input.text);
 
     if files.is_empty() {
-        eprintln!("riffnav: no changes to display");
+        eprintln!("riffnav: {}", nothing_to_display(&input.text));
         return Ok(());
     }
 
@@ -189,6 +207,24 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use autodiff::View;
+
+    #[test]
+    fn an_empty_merge_says_why_and_how_to_see_it() {
+        let text = "commit 0123456789abcdef\nMerge: 1234 5678\nAuthor: a\n\n    Merge\n";
+        let said = nothing_to_display(text);
+        assert!(said.contains("clean merge"), "{said}");
+        assert!(
+            said.ends_with("riffnav show --first-parent 0123456789"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn anything_else_empty_has_nothing_to_explain() {
+        for text in ["", "commit 0123\nAuthor: a\n\n    Merge: not really\n"] {
+            assert_eq!(nothing_to_display(text), "no changes to display");
+        }
+    }
 
     /// The view `riffnav diff` resolves to for a command line, under a config
     /// that sets `diff_source`. `base_branch` is pinned so nothing shells out to

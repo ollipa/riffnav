@@ -1,9 +1,10 @@
 use std::borrow::Cow;
 
 use super::model::{FileDiff, FileStatus, Hunk};
+use super::rows::count_changes;
 
-/// Split a unified diff into per-file sections. Anything before the first
-/// `diff --git` line (e.g. a `git show` commit header) is ignored.
+/// Split a unified diff into per-file sections. Anything before the first file
+/// header (e.g. a `git show` commit header) is ignored.
 pub fn parse(input: &str) -> Vec<FileDiff> {
     // git colorizes diffs when piping to a pager, so `pager.diff = riffnav` feeds
     // us ANSI-wrapped lines the markers below wouldn't match. Strip the codes up
@@ -15,7 +16,7 @@ pub fn parse(input: &str) -> Vec<FileDiff> {
     let mut starts = Vec::new();
     let mut offset = 0;
     for line in input.split_inclusive('\n') {
-        if line.starts_with("diff --git ") {
+        if line.starts_with("diff --git ") || combined_path(line).is_some() {
             starts.push(offset);
         }
         offset += line.len();
@@ -77,8 +78,12 @@ fn parse_one(raw: &str) -> FileDiff {
         } else if line.starts_with("deleted file mode") {
             status = FileStatus::Deleted;
         } else if let Some(p) = line.strip_prefix("--- ") {
+            // `--combined-all-paths` gives a line per parent, and the old side
+            // follows the first.
+            if !saw_minus {
+                old_path = side_path(p).or(old_path);
+            }
             saw_minus = true;
-            old_path = side_path(p).or(old_path);
         } else if let Some(p) = line.strip_prefix("+++ ") {
             saw_plus = true;
             new_path = side_path(p).or(new_path);
@@ -102,6 +107,11 @@ fn parse_one(raw: &str) -> FileDiff {
         }
     }
 
+    // The marker columns can't be read without knowing where a combined hunk ends.
+    if is_combined(raw) {
+        (additions, deletions) = count_changes(raw);
+    }
+
     FileDiff {
         old_path,
         new_path,
@@ -116,10 +126,72 @@ fn parse_one(raw: &str) -> FileDiff {
 ///
 /// Computed on demand rather than during [`parse`], since only the comment CLI
 /// needs it — the TUI works from [`super::rows`].
-/// Combined (merge) diffs use `@@@` headers and are skipped: they have no single
-/// pre-image side to anchor a comment to.
+/// A combined (merge) diff's old side is its first parent, as it is on its rows.
 pub fn hunks(raw: &str) -> Vec<Hunk> {
+    if is_combined(raw) {
+        let headers = raw.lines().filter_map(parse_combined_header);
+        return headers.map(|combined| combined.hunk).collect();
+    }
     raw.lines().filter_map(parse_hunk_header).collect()
+}
+
+/// The path in a combined diff's file header, which has just the one, unprefixed.
+fn combined_path(line: &str) -> Option<&str> {
+    line.strip_prefix("diff --cc ")
+        .or_else(|| line.strip_prefix("diff --combined "))
+}
+
+/// Whether a file's verbatim diff text is a merge's combined diff.
+pub(super) fn is_combined(raw: &str) -> bool {
+    combined_path(raw).is_some()
+}
+
+/// The start of a combined diff's hunk, from a header like
+/// `@@@ -1,6 -1,6 +1,10 @@@ fn foo()`, with one more `@` and one more range for
+/// each parent past the first.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct CombinedHunk<'a> {
+    /// The hunk as the first parent and the result see it.
+    pub hunk: Hunk,
+    /// How many lines git says the hunk has in each parent.
+    pub parents: Vec<u32>,
+    /// The enclosing-function text after the closing `@@@`, or `""`.
+    pub context: &'a str,
+}
+
+pub(super) fn parse_combined_header(line: &str) -> Option<CombinedHunk<'_>> {
+    let ats = line.bytes().take_while(|b| *b == b'@').count();
+    if ats < 3 {
+        return None;
+    }
+    let (ranges, tail) = line[ats..].split_once(&line[..ats])?;
+    let mut ranges: Vec<&str> = ranges.split_whitespace().collect();
+    let (new_start, new_len) = combined_range(ranges.pop()?.strip_prefix('+')?)?;
+    let parents = ranges
+        .iter()
+        .map(|range| combined_range(range.strip_prefix('-')?))
+        .collect::<Option<Vec<_>>>()?;
+    let (old_start, old_len) = *parents.first()?;
+    (parents.len() == ats - 1).then(|| CombinedHunk {
+        hunk: Hunk {
+            old_start,
+            old_len,
+            new_start,
+            new_len,
+            header: line.to_string(),
+        },
+        parents: parents.iter().map(|(_, len)| *len).collect(),
+        context: tail.trim_start(),
+    })
+}
+
+/// One range of a combined header. With `-U0` git can wrap a length below zero and
+/// print 18446744073709551615, which is read as nothing.
+fn combined_range(s: &str) -> Option<(u32, u32)> {
+    match s.split_once(',') {
+        Some((start, len)) => Some((start.parse().ok()?, len.parse().unwrap_or(0))),
+        None => Some((s.parse().ok()?, 1)),
+    }
 }
 
 /// `@@ -1,5 +1,7 @@ fn foo()` -> its four ranges. A side written without a comma
@@ -217,6 +289,9 @@ fn binary_paths(line: &str) -> Option<(Option<String>, Option<String>)> {
 /// Heuristic fallback: split `diff --git a/<old> b/<new>` at the ` b/` boundary.
 /// Good enough for paths without spaces; quoted/spaced paths are a known gap.
 fn diff_git_paths(line: &str) -> Option<(String, String)> {
+    if let Some(path) = combined_path(line) {
+        return Some((path.to_string(), path.to_string()));
+    }
     let rest = line.strip_prefix("diff --git ")?;
     let idx = rest.find(" b/")?;
     let a = strip_ab(&rest[..idx]);
@@ -343,12 +418,102 @@ mod tests {
     }
 
     #[test]
-    fn hunk_parser_skips_combined_and_malformed_headers() {
-        // Merge diffs use `@@@` and have two pre-image sides — nothing to anchor to.
+    fn hunk_parser_skips_malformed_headers() {
+        // Outside a combined diff, `@@@` means nothing.
         assert!(hunks("@@@ -1,2 -1,2 +1,3 @@@\n").is_empty());
         assert!(hunks("@@ not a range @@\n").is_empty());
         // A bare `@@` inside a hunk body (as file content) must not parse.
         assert!(hunks("@@ -1 +1 @@\n-@@ oops\n").len() == 1);
+    }
+
+    /// What `git show` prints for a merge, around the body of its one hunk.
+    fn merge(body: &str) -> String {
+        format!(
+            "commit abc\nMerge: 1 2\n\n    merge\n\ndiff --cc f\nindex 1,2..3\n--- a/f\n+++ b/f\n\
+             @@@ -1,9 -1,9 +1,9 @@@ fn top()\n{body}"
+        )
+    }
+
+    #[test]
+    fn a_combined_diff_has_one_file_per_header() {
+        let raw = format!("{}diff --combined g h\nindex 1,2..3\n", merge("  a\n"));
+        let files = parse(&raw);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path(), "f");
+        assert_eq!(files[0].status, FileStatus::Modified);
+        assert_eq!(files[1].path(), "g h");
+        assert_eq!(files[1].old_path.as_deref(), Some("g h"));
+    }
+
+    #[test]
+    fn a_combined_diff_counts_the_rows_it_shows() {
+        let f = &parse(&merge("  a\n- b\n -c\n--d\n +e\n+ f\n++g\n\ncommit def\n"))[0];
+        assert_eq!((f.additions, f.deletions), (3, 3));
+    }
+
+    #[test]
+    fn a_merge_can_add_and_delete_a_file() {
+        let added = "diff --cc n\nindex 0,0..1\nnew file mode 100644\n--- /dev/null\n+++ b/n\n\
+                     @@@ -1,0 -1,0 +1,1 @@@\n++x\n";
+        let f = &parse(added)[0];
+        assert_eq!(f.status, FileStatus::Added);
+        assert_eq!((f.old_path.as_deref(), f.path()), (None, "n"));
+        assert_eq!(f.additions, 1);
+
+        let deleted = "diff --cc d\nindex 1,2..0\ndeleted file mode 100644,100644\n--- a/d\n\
+                       +++ /dev/null\n@@@ -1,1 -1,2 +1,0 @@@\n--x\n -y\n";
+        let f = &parse(deleted)[0];
+        assert_eq!(f.status, FileStatus::Deleted);
+        assert_eq!((f.new_path.as_deref(), f.path()), (None, "d"));
+        assert_eq!(f.deletions, 2);
+    }
+
+    #[test]
+    fn the_first_parent_names_the_old_side() {
+        let raw = "diff --cc new\nindex 1,2..3\n--- a/one\n--- a/two\n+++ b/new\n";
+        let f = &parse(raw)[0];
+        assert_eq!(f.old_path.as_deref(), Some("one"));
+        assert_eq!(f.path(), "new");
+
+        let raw = "diff --cc new\nindex 0,2..3\n--- /dev/null\n--- a/two\n+++ b/new\n";
+        assert_eq!(parse(raw)[0].old_path, None);
+    }
+
+    #[test]
+    fn a_combined_binary_file_takes_its_path_from_the_header() {
+        let raw = "diff --cc i.png\nindex 1,2..3\nBinary files differ\n";
+        assert_eq!(parse(raw)[0].path(), "i.png");
+    }
+
+    #[test]
+    fn combined_hunks_are_the_first_parents() {
+        let hs = hunks(
+            "diff --cc f\n@@@ -2,7 -3,8 +4,9 @@@ fn top()\n  a\n\
+             @@@@ -10 -20,0 -30,2 +40,5 @@@@\n   b\n",
+        );
+        assert_eq!(hs.len(), 2);
+        assert_eq!((hs[0].old_start, hs[0].old_len), (2, 7));
+        assert_eq!((hs[0].new_start, hs[0].new_len), (4, 9));
+        assert_eq!((hs[1].old_start, hs[1].old_len), (10, 1));
+        assert_eq!((hs[1].new_start, hs[1].new_len), (40, 5));
+    }
+
+    #[test]
+    fn a_combined_header_gives_each_parent_a_range() {
+        let parsed = parse_combined_header("@@@@ -1,2 -3 -5,6 +7,8 @@@@ fn top() @@@@").unwrap();
+        assert_eq!(parsed.parents, [2, 1, 6]);
+        assert_eq!(parsed.context, "fn top() @@@@");
+        // One `@` past the first for each parent, or it isn't a header.
+        assert_eq!(parse_combined_header("@@@ -1 -2 -3 +4 @@@"), None);
+        assert_eq!(parse_combined_header("@@ -1 +1 @@"), None);
+        assert_eq!(parse_combined_header("@@@ -1 -2 +x @@@"), None);
+        assert_eq!(parse_combined_header("@@@ -1 -2 +3"), None);
+    }
+
+    #[test]
+    fn a_length_git_wrapped_below_zero_reads_as_none() {
+        let parsed = parse_combined_header("@@@ -13,1 -11,1 +9,18446744073709551615 @@@").unwrap();
+        assert_eq!((parsed.hunk.new_start, parsed.hunk.new_len), (9, 0));
     }
 
     #[test]

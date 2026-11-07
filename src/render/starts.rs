@@ -193,7 +193,9 @@ fn patched<'a>(
 
 /// The old side's id in an `index abc123..def456 100644` line, as abbreviated as
 /// git left it, which git can still resolve. `None` if the line is missing, or
-/// names the all-zero id of a file that wasn't there.
+/// names the all-zero id of a file that wasn't there. A merge's `index a,b..c`
+/// is `None` too, on purpose: no one blob turns into its result, so a combined
+/// diff keeps its hunks starting afresh and looks for copies in its context alone.
 pub(super) fn old_blob(raw: &str) -> Option<&str> {
     let (id, _) = raw
         .lines()
@@ -791,6 +793,7 @@ pub(super) mod tests {
             Some("12ab")
         );
         assert_eq!(old_blob("diff --git a/a b/a\nindex 0000000..34cd\n"), None);
+        assert_eq!(old_blob("diff --cc a\nindex 12ab,56ef..34cd\n"), None);
         assert_eq!(
             old_blob("diff --git a/a b/a\n@@ -1 +1 @@\nindex 12ab..34cd\n"),
             None

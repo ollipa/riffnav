@@ -2003,7 +2003,14 @@ impl App {
             {
                 Some(anchor) => (anchor, None),
                 None => {
-                    self.set_status("Put the cursor on a diff line to comment on it");
+                    let on_code = self.current_render().is_some_and(|render| {
+                        render.line_map.sources(self.diff_cursor)[0].is_some()
+                    });
+                    self.set_status(if on_code {
+                        "Only another parent of this merge had this line, so it has no number to comment on"
+                    } else {
+                        "Put the cursor on a diff line to comment on it"
+                    });
                     return;
                 }
             },

@@ -20,6 +20,9 @@ pub(super) struct ChangeJumps {
     /// cursor at the start of that change and comments off can tell the view has
     /// left it.
     stopped: Option<(usize, Anchor)>,
+    /// The file and line it stopped on instead, if that line has no number, as a
+    /// line only a merge's other parent lost doesn't. Good for this render only.
+    stopped_unnumbered: Option<(usize, usize)>,
 }
 
 /// Which of a file's changes to go to, once it's rendered.
@@ -152,7 +155,8 @@ impl App {
                 Some(file) == self.selected_file() && Some(line) == anchor
             })
         };
-        if self.comments_on || on_it() {
+        let unnumbered = self.selected_file().map(|file| (file, here));
+        if self.comments_on || on_it() || self.change_jumps.stopped_unnumbered == unnumbered {
             here
         } else {
             render.line_at(self.diff_scroll)
@@ -169,6 +173,17 @@ impl App {
             self.diff_scroll = top.saturating_sub(self.diff_height / 3);
         }
         self.change_jumps.stopped = self.selected_file().zip(self.cursor_anchor);
+        let numbered = self.current_render().is_some_and(|render| {
+            render
+                .line_map
+                .get(render.code_line(line))
+                .anchor()
+                .is_some()
+        });
+        self.change_jumps.stopped_unnumbered = self
+            .selected_file()
+            .map(|file| (file, line))
+            .filter(|_| !numbered);
     }
 
     /// Go on to the nearest file with a change in the direction of travel, which
@@ -303,6 +318,41 @@ mod tests {
             stops.push(stop);
         }
         panic!("never came back round: {stops:?}");
+    }
+
+    /// A merge in which three changes are lines only the second parent lost, so
+    /// they carry no number, each with enough context around it to scroll.
+    fn unnumbered_changes() -> String {
+        let context = "  x\n".repeat(20);
+        let body = format!("{context} -a\n{context} -b\n{context} -c\n{context}");
+        format!("diff --cc f\nindex 1,2..3\n--- a/f\n+++ b/f\n@@@ -1,80 -1,83 +1,80 @@@\n{body}")
+    }
+
+    #[test]
+    fn a_line_with_no_number_says_why_it_takes_no_comment() {
+        let mut app = app(&unnumbered_changes());
+        press(&mut app, Char('J'));
+        assert_eq!(at(&app), (None, None));
+        press(&mut app, Char('c'));
+        assert!(app.composer.is_none());
+        let status = app.status.clone().unwrap();
+        assert!(status.contains("another parent"), "{status}");
+    }
+
+    #[test]
+    fn j_stops_on_each_change_that_has_no_line_number() {
+        for comments in [true, false] {
+            for side_by_side in [true, false] {
+                let mut app = app(&unnumbered_changes());
+                app.comments_on = comments;
+                app.side_by_side = side_by_side;
+                frame(&mut app);
+                let stops = lap(&mut app, 'J');
+                assert_eq!(stops.len(), 3, "{comments} {side_by_side}: {stops:?}");
+                let back = lap(&mut app, 'K');
+                assert_eq!(back.len(), 3, "{comments} {side_by_side}: {back:?}");
+            }
+        }
     }
 
     #[test]

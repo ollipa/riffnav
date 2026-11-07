@@ -60,7 +60,8 @@ Every comment names one file and exactly one line:
   lines. Use this to comment on code that was deleted.
 
 Line numbers are the ones git prints in the hunk header, 1-based, and are the
-same ones the user sees in riffnav's gutter.
+same ones the user sees in riffnav's gutter. On a merge the pre-image side is the
+first parent, so a line only another parent had can't be commented on.
 
 A reply is the exception: it takes no anchor at all. See [Replying](#replying).
 
