@@ -144,6 +144,20 @@ impl App {
         }
     }
 
+    /// Scroll the cursor line into view if it has left it, as a new width can push
+    /// it off the foot of the pane. One still in view stays where it is.
+    pub(super) fn keep_cursor_in_view(&mut self) {
+        let (Some(render), height) = (self.current_render(), u32::from(self.diff_height)) else {
+            return;
+        };
+        let top = render.row_of(self.diff_cursor);
+        let bottom = render.row_of(self.diff_cursor + 1).max(top + 1);
+        let scroll = self.diff_scroll.min(render.height.saturating_sub(height));
+        if top < scroll || bottom > scroll.saturating_add(height) {
+            self.scroll_cursor_into_view();
+        }
+    }
+
     /// Scroll the minimum needed to keep the cursor line — all of it, when it
     /// wraps onto several rows — inside the viewport, with [`CURSOR_PADDING`].
     fn scroll_cursor_into_view(&mut self) {
@@ -220,8 +234,157 @@ impl App {
 #[cfg(test)]
 mod tests {
 
-    use crate::app::Focus;
-    use crate::app::test_support::{app_with, file};
+    use crossterm::event::KeyCode::Char;
+
+    use crate::app::test_support::{HEIGHT, app_with, file, frame_at};
+    use crate::app::{App, Focus};
+    use crate::comment::CommentStore;
+    use crate::config::Config;
+    use crate::diff::parse;
+    use crate::diff::testing::hunk;
+    use crate::render::test_support::Gate;
+
+    /// `lines` lines of context in `path`, long enough to wrap differently at every
+    /// width, then a change.
+    fn wrapping(path: &str, lines: usize) -> App {
+        let mut body: String = (1..=lines)
+            .map(|i| format!(" line {i} {}\n", "word ".repeat(i * 7 % 40)))
+            .collect();
+        body.push_str("-old\n+new\n");
+        let mut app = App::new(parse(&hunk(path, &body)), false, &Config::default());
+        app.install_comments_for_test(CommentStore::disabled());
+        app.focus = Focus::Diff;
+        app
+    }
+
+    /// The new number of the line at the top of the view, and of the cursor's.
+    fn top_and_cursor(app: &App) -> (Option<u32>, Option<u32>) {
+        let render = app.current_render().unwrap();
+        let top = render.code_line(render.line_at(app.diff_scroll));
+        let at = |line| render.line_map.get(line).new;
+        (at(top), at(app.diff_cursor))
+    }
+
+    /// Scroll so the line numbered `line` starts at the top, with the cursor on it.
+    fn scroll_to_line(app: &mut App, line: usize) {
+        let render = app.current_render().unwrap();
+        let at = (0..render.lines())
+            .find(|&at| render.line_map.get(at).new == Some(line as u32))
+            .unwrap();
+        app.diff_scroll = render.row_of(at);
+        app.diff_cursor = at;
+        app.remember_cursor_anchor();
+    }
+
+    #[test]
+    fn the_top_line_stays_at_the_top_through_new_widths() {
+        let mut app = wrapping("a.txt", 3000);
+        frame_at(&mut app, 120, 40);
+        scroll_to_line(&mut app, 1994);
+        frame_at(&mut app, 120, 40);
+        let kept = top_and_cursor(&app);
+        assert_eq!(kept, (Some(1994), Some(1994)));
+        for (width, height) in [(100, 30), (70, 40), (120, 40), (45, 20)] {
+            frame_at(&mut app, width, height);
+            assert_eq!(top_and_cursor(&app), kept, "at {width}x{height}");
+        }
+        for key in ['e', 's', 'e', 's'] {
+            app.press_for_test(Char(key), false);
+            frame_at(&mut app, 120, 40);
+            assert_eq!(top_and_cursor(&app), kept, "after {key}");
+        }
+    }
+
+    /// A line partly scrolled past keeps as much of itself scrolled past, in
+    /// proportion to how many rows it wraps onto now.
+    #[test]
+    fn a_line_partly_scrolled_past_stays_partly_scrolled_past() {
+        let mut app = wrapping("a.txt", 50);
+        frame_at(&mut app, 60, 20);
+        scroll_to_line(&mut app, 39); // `line 39` and 33 words: several rows at 60.
+        app.diff_scroll += 2;
+        frame_at(&mut app, 60, 20);
+        frame_at(&mut app, 40, 20);
+        let render = app.current_render().unwrap();
+        let top = render.line_at(app.diff_scroll);
+        assert_eq!(render.line_map.get(top).new, Some(39));
+        assert!(app.diff_scroll > render.row_of(top), "still partway in");
+    }
+
+    #[test]
+    fn a_cursor_a_new_width_pushes_off_the_pane_is_brought_back() {
+        let mut app = wrapping("a.txt", 400);
+        frame_at(&mut app, 120, 30);
+        scroll_to_line(&mut app, 200);
+        app.set_cursor(app.diff_cursor + 20);
+        frame_at(&mut app, 120, 30);
+        let cursor = top_and_cursor(&app).1;
+        frame_at(&mut app, 40, 30);
+        let render = app.current_render().unwrap();
+        let row = render.row_of(app.diff_cursor);
+        assert_eq!(top_and_cursor(&app).1, cursor);
+        assert!(row >= app.diff_scroll && row < app.diff_scroll + u32::from(app.diff_height));
+    }
+
+    #[test]
+    fn rows_past_a_u16_carry_over_too() {
+        let mut app = wrapping("a.txt", 30_000);
+        frame_at(&mut app, 60, HEIGHT);
+        scroll_to_line(&mut app, 29_000);
+        frame_at(&mut app, 60, HEIGHT);
+        assert!(app.diff_scroll > u32::from(u16::MAX), "{}", app.diff_scroll);
+        let kept = top_and_cursor(&app);
+        for width in [50, 90, 60] {
+            frame_at(&mut app, width, HEIGHT);
+            assert_eq!(top_and_cursor(&app), kept, "at {width}");
+        }
+    }
+
+    /// A render that's late is waited for, and its preview puts the view where its
+    /// real render keeps it.
+    #[test]
+    fn a_late_render_and_its_preview_land_on_the_same_line() {
+        let mut app = wrapping("a.rs", 3000);
+        frame_at(&mut app, 120, 40);
+        scroll_to_line(&mut app, 1994);
+        frame_at(&mut app, 120, 40);
+        let kept = top_and_cursor(&app);
+        let (start, real) = (Gate::default(), Gate::default());
+        app.cache.wait(std::time::Duration::ZERO);
+        app.cache.hooks().start = Some(start.clone());
+        app.cache.hooks().real = Some(real.clone());
+        frame_at(&mut app, 70, 40);
+        assert!(app.current_render().is_none());
+        frame_at(&mut app, 80, 40); // Changed again before anything landed.
+        start.open();
+        while app.current_render().is_none() {
+            app.cache.collect();
+            frame_at(&mut app, 80, 40);
+        }
+        assert!(app.cache.is_preview(0, app.last_width, false));
+        let scroll = app.diff_scroll;
+        assert_eq!(top_and_cursor(&app), kept, "the preview");
+        real.open();
+        app.cache.finish();
+        frame_at(&mut app, 80, 40);
+        assert!(!app.cache.is_preview(0, app.last_width, false));
+        assert_eq!((top_and_cursor(&app), app.diff_scroll), (kept, scroll));
+    }
+
+    /// A reload keeps the row it was on, as before, rather than following line
+    /// numbers that may now be other code.
+    #[test]
+    fn a_reload_keeps_the_scroll_it_had() {
+        let mut app = wrapping("a.txt", 400);
+        frame_at(&mut app, 120, 30);
+        scroll_to_line(&mut app, 200);
+        frame_at(&mut app, 120, 30);
+        let scroll = app.diff_scroll;
+        let files = app.files.clone();
+        app.reload_in_place(files);
+        frame_at(&mut app, 120, 30);
+        assert_eq!(app.diff_scroll, scroll);
+    }
 
     #[test]
     fn page_keys_scroll_diff_by_a_screenful() {

@@ -728,6 +728,17 @@ impl RenderCache {
         self.entry(key).map(|e| e.rendered.as_ref())
     }
 
+    /// What [`Self::get`] returns, to hold on to after the cache has let it go.
+    /// Hand it back to [`Self::discard`] when done, as it can be big to free.
+    pub fn shared(&self, key: Key) -> Option<Arc<Rendered>> {
+        self.entry(key).map(|e| e.rendered.clone())
+    }
+
+    /// Let go of a render from [`Self::shared`], off this thread.
+    pub fn discard(&mut self, rendered: Arc<Rendered>) {
+        self.jobs.discard(rendered);
+    }
+
     /// The copies behind what [`Self::get`] returns, which it can trail while its
     /// new render is being made. Its lines change when these do.
     pub fn copies_rev(&self, key: Key) -> Option<u64> {

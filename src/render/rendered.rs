@@ -9,10 +9,10 @@ use super::layout::{COPY_MARK, MOVE_MARK, WRAP_MARK};
 use super::marks::Marks;
 use super::spec::CommentLayer;
 use super::wrap::{WRAP, rows_of, skip_rows};
-use crate::comment::LineMap;
-use crate::comment::anchor::Source;
+use crate::comment::anchor::{LineNumbers, Source};
 use crate::comment::render::CommentBlock;
 use crate::comment::render::{self as comment_render, Card};
+use crate::comment::{Anchor, LineMap, Side};
 use crate::search::Hit;
 use crate::theme::DiffTheme;
 
@@ -42,6 +42,19 @@ pub struct Rendered {
     /// out from the final lines, so comments, move notes and wrapping can't throw
     /// it off, and every new render has its own.
     pub changes: Vec<usize>,
+}
+
+/// The code at the top of a view, kept as diff line numbers so another render of
+/// the file, at a new width or in the other layout, can be scrolled to show it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ViewTop {
+    numbers: LineNumbers,
+    /// The rows of the line above the top of the view, when it starts partway in.
+    into: u32,
+    /// The rows the line takes.
+    rows: u32,
+    /// The rows above the line at the top of the view, when it starts lower down.
+    above: u32,
 }
 
 /// Where a row's code starts in a render.
@@ -93,36 +106,88 @@ impl Rendered {
     /// a moved or copied block stands for its first line, and a wrapped side-by-side
     /// row for the row it continues. Anything else unnumbered is left as it is.
     pub fn code_line(&self, line: usize) -> usize {
-        let numbered = |at: usize| self.line_map.get(at).anchor().is_some();
-        let has = |at: usize, wanted: &dyn Fn(&str) -> bool| {
-            let line = self.text.lines.get(at);
-            line.is_some_and(|l| l.spans.iter().any(|s| wanted(&s.content)))
-        };
-        if numbered(line) {
+        if self.numbered(line) {
             return line;
         }
-        if has(line, &|text| text.starts_with([MOVE_MARK, COPY_MARK])) {
+        let note = self.text.lines.get(line).is_some_and(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.starts_with([MOVE_MARK, COPY_MARK]))
+        });
+        if note {
             return line + 1;
         }
         let mut at = line;
-        while at > 0 && !numbered(at) && has(at - 1, &|text| text.chars().eq([WRAP_MARK])) {
+        while self.continues(at) {
             at -= 1;
         }
         at
     }
 
-    /// Where to scroll this render to show what `old` shows at `scroll`, going by
-    /// the first numbered line in view. The top of the file stays the top.
-    pub(super) fn scroll_like(&self, old: &Rendered, scroll: u32) -> Option<u32> {
+    fn numbered(&self, line: usize) -> bool {
+        self.line_map.get(line).anchor().is_some()
+    }
+
+    /// Whether `line` is the rest of a side-by-side row wrapped onto the line above.
+    fn continues(&self, line: usize) -> bool {
+        let wraps = |at: usize| {
+            let spans = self.text.lines.get(at).map_or(&[][..], |l| &l.spans[..]);
+            spans.iter().any(|s| s.content.chars().eq([WRAP_MARK]))
+        };
+        line > 0 && !self.numbered(line) && wraps(line - 1)
+    }
+
+    /// The rows code line `line` takes, with the lines a side-by-side row wrapped
+    /// onto.
+    fn code_rows(&self, line: usize) -> u32 {
+        let mut end = line + 1;
+        while end < self.lines() && self.continues(end) {
+            end += 1;
+        }
+        self.row_of(end).saturating_sub(self.row_of(line)).max(1)
+    }
+
+    /// What this render shows at the top when scrolled to `scroll`, in terms that
+    /// hold for any render of the file: the first numbered line in view, or the one
+    /// the view starts partway into.
+    fn top_at(&self, scroll: u32) -> Option<ViewTop> {
+        let at = self.line_at(scroll);
+        let line = match self.code_line(at) {
+            line if self.numbered(line) => line,
+            _ => (at..self.lines()).find(|&line| self.numbered(line))?,
+        };
+        let start = self.row_of(line);
+        Some(ViewTop {
+            numbers: self.line_map.get(line),
+            into: scroll.saturating_sub(start),
+            rows: self.code_rows(line),
+            above: start.saturating_sub(scroll),
+        })
+    }
+
+    /// Where to scroll this render to show `top` at the top. A line wrapped onto a
+    /// different number of rows is started as far into as it was, in proportion.
+    fn scroll_to(&self, top: ViewTop) -> Option<u32> {
+        let find = |side, line| self.line_map.row_for(Anchor { side, line });
+        let old = top.numbers.old.and_then(|line| find(Side::Old, line));
+        let new = top.numbers.new.and_then(|line| find(Side::New, line));
+        // Side by side, a row can hold an old line and a new one that unified shows
+        // apart. Starting from whichever comes first keeps both in view.
+        let line = old.into_iter().chain(new).min()?;
+        let rows = u64::from(self.code_rows(line));
+        let into = u64::from(top.into) * rows / u64::from(top.rows.max(1));
+        let into = into.min(rows - 1) as u32;
+        let start = self.row_of(line).saturating_add(into);
+        Some(start.saturating_sub(top.above))
+    }
+
+    /// Where to scroll this render to show what `old` shows at `scroll`. The top of
+    /// the file stays the top.
+    pub fn scroll_like(&self, old: &Rendered, scroll: u32) -> Option<u32> {
         if scroll == 0 {
             return None;
         }
-        let top = old.line_at(scroll);
-        let (line, anchor) =
-            (top..old.lines()).find_map(|line| Some((line, old.line_map.get(line).anchor()?)))?;
-        let here = self.row_of(self.line_map.row_for(anchor)?);
-        let above = i64::from(old.row_of(line)) - i64::from(scroll);
-        Some((i64::from(here) - above).clamp(0, i64::from(u32::MAX)) as u32)
+        self.scroll_to(old.top_at(scroll)?)
     }
 
     pub fn row_of(&self, line: usize) -> u32 {

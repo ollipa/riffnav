@@ -16,6 +16,7 @@ mod test_support;
 mod viewed;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -33,7 +34,7 @@ use crate::diff::FileDiff;
 use crate::forge::{Forge, ReviewSync};
 use crate::herdr::Herdr;
 use crate::icons::IconStyle;
-use crate::render::{RenderCache, Request, WAIT};
+use crate::render::{Key, RenderCache, Rendered, Request, WAIT};
 use crate::review::ReviewStore;
 use crate::session::Session;
 use crate::theme::DiffTheme;
@@ -171,6 +172,9 @@ pub struct App {
     /// it back there once the new render exists. Widening the context pushes the
     /// cursor's line down the render; without this it would slide off screen.
     cursor_screen_row: Option<u32>,
+    /// The render the scroll was last measured against, to carry the view over
+    /// to the next one when the width or the layout changes.
+    view_render: Option<(Key, Arc<Rendered>)>,
     /// A `]`/`[` jump that crossed into another file, waiting for that file to be
     /// rendered before the cursor can be put on the comment it was aimed at:
     /// coming in forward lands on its first comment, back on its last.
@@ -282,6 +286,7 @@ impl App {
             cursor_anchor: None,
             cursor_token: None,
             cursor_screen_row: None,
+            view_render: None,
             comment_landing: None,
             move_landing: None,
             copy_return: None,
@@ -518,9 +523,13 @@ impl App {
             None => self.cache.release(),
         }
         self.keep_view_on_copies();
+        let cursor_shown = self.carry_view();
         // The render may have changed shape (new comments, new theme, new
         // width), so put the cursor back on the line it was on.
         self.resync_cursor();
+        if cursor_shown {
+            self.keep_cursor_in_view();
+        }
         self.restore_cursor_screen_row();
         self.follow_change();
         // Jumps into this file have been waiting for that render.
@@ -540,6 +549,50 @@ impl App {
         let key = self.render_key(file);
         if let Some(scroll) = self.cache.kept_scroll(key, self.diff_scroll) {
             self.diff_scroll = scroll;
+        }
+    }
+
+    /// A new width or layout wraps the file onto other rows, so the scroll is
+    /// moved to keep the same code at the top. Waits until the new render is
+    /// there, scrolling from the one the view was on. Whether the line cursor was
+    /// in view on that one, to be kept in view on this.
+    fn carry_view(&mut self) -> bool {
+        let Some(file) = self.selected_file() else {
+            return false;
+        };
+        let key = self.render_key(file);
+        let Some(now) = self.cache.shared(key) else {
+            return false;
+        };
+        let Some((was, old)) = self.view_render.replace((key, now.clone())) else {
+            return false;
+        };
+        let carried = was.file == file && was != key;
+        let mut cursor_shown = false;
+        if carried {
+            let top = old.row_of(self.diff_cursor);
+            let bottom = self.diff_scroll.saturating_add(self.diff_height.into());
+            cursor_shown = self.comments_enabled() && (self.diff_scroll..bottom).contains(&top);
+            if let Some(scroll) = now.scroll_like(&old, self.diff_scroll) {
+                self.diff_scroll = scroll;
+            }
+        }
+        self.forget_render(old);
+        cursor_shown
+    }
+
+    /// A reloaded diff keeps the scroll it had, rather than have it carried by line
+    /// numbers that may now be other code.
+    fn forget_view_render(&mut self) {
+        if let Some((_, render)) = self.view_render.take() {
+            self.forget_render(render);
+        }
+    }
+
+    /// Let go of a render the app held on to.
+    fn forget_render(&mut self, render: Arc<Rendered>) {
+        if Arc::strong_count(&render) == 1 {
+            self.cache.discard(render);
         }
     }
 

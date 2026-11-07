@@ -407,7 +407,9 @@ of renders.
 
 Comments anchor to a *diff line*, never a screen row, so they stay put across a
 resize, a theme switch, or a unified/side-by-side toggle. Each rendered row keeps
-the line numbers it came from, so a comment always finds its place.
+the line numbers it came from, so a comment always finds its place. The view goes
+by them too: a new width or layout keeps the line at the top of the pane at the
+top, and the line cursor on its line.
 
 ## License
 

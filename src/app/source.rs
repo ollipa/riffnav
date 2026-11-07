@@ -211,6 +211,7 @@ impl App {
         self.cache.clear();
         self.cache.index_moves(&self.files);
         self.last_width = 0; // force a re-render at the next draw
+        self.forget_view_render();
         self.finder = None; // indices changed; a stale finder would mislead
         self.restart_search(resume);
         // So did the file each of these is heading for.
@@ -295,6 +296,7 @@ impl App {
         self.restart_search(resume);
         self.last_width = 0; // force a re-render at the next draw
         self.cursor_token = None; // and let the cursor re-resolve from its anchor
+        self.forget_view_render();
         self.publish_session();
     }
 }
