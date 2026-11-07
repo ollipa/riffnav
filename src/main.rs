@@ -6,6 +6,7 @@ mod comment;
 mod config;
 mod diff;
 mod forge;
+mod git;
 mod herdr;
 mod icons;
 mod render;

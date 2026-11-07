@@ -15,7 +15,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+
+use crate::git;
 use serde::Deserialize;
 
 /// A detected source-code hosting provider for the current repository.
@@ -251,47 +253,25 @@ fn gh_available() -> bool {
 /// be resolved (not a repo, no remote, detached with no `origin`, …).
 fn remote_host() -> Option<String> {
     let remote = current_branch_remote().unwrap_or_else(|| "origin".to_string());
-    let url = git_output(&["remote", "get-url", &remote])
-        .or_else(|| git_output(&["remote", "get-url", "origin"]))?;
+    let url = git::text(&["remote", "get-url", &remote])
+        .or_else(|| git::text(&["remote", "get-url", "origin"]))?;
     parse_host(&url)
 }
 
 /// The remote tracked by the current branch (e.g. `origin`), or `None` when the
 /// branch has no configured remote or HEAD is detached.
 fn current_branch_remote() -> Option<String> {
-    let branch = git_output(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let branch = git::text(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     if branch == "HEAD" {
         return None; // detached HEAD — no branch-specific remote
     }
-    git_output(&["config", &format!("branch.{branch}.remote")])
-}
-
-/// Run a git command and return its trimmed stdout, or `None` on any failure or
-/// empty output.
-fn git_output(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!s.is_empty()).then_some(s)
+    git::text(&["config", &format!("branch.{branch}.remote")])
 }
 
 /// Run `program` to completion and map a non-zero exit into an error carrying its
 /// first stderr line (falling back to the exit status).
 fn run_quietly(program: &str, args: &[&str]) -> Result<()> {
-    let out = Command::new(program)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run `{program}`"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    match stderr.lines().map(str::trim).find(|l| !l.is_empty()) {
-        Some(line) => bail!("{line}"),
-        None => bail!("`{program}` exited with {}", out.status),
-    }
+    run_capture(program, args).map(drop)
 }
 
 /// Like [`run_quietly`], but returns the command's stdout on success. Used for
@@ -301,14 +281,7 @@ fn run_capture(program: &str, args: &[&str]) -> Result<String> {
         .args(args)
         .output()
         .with_context(|| format!("failed to run `{program}`"))?;
-    if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
-    }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    match stderr.lines().map(str::trim).find(|l| !l.is_empty()) {
-        Some(line) => bail!("{line}"),
-        None => bail!("`{program}` exited with {}", out.status),
-    }
+    git::stdout_or_error(out, program, "")
 }
 
 /// Extract the host from a git remote URL, handling both scp-like SSH

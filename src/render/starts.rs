@@ -27,7 +27,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::mem;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -38,6 +38,7 @@ use twox_hash::XxHash3_128;
 use super::highlight::{self, HunkStart, MAX_FILE_BYTES, MAX_LINE_BYTES, Parsing};
 use crate::autodiff::Tree;
 use crate::diff::{self, FileDiff, Hunk, Row, RowKind, path};
+use crate::git;
 
 /// How often a running git is checked on, to stop it if the job was cancelled.
 const GIT_POLL: Duration = Duration::from_millis(2);
@@ -253,14 +254,8 @@ struct Blob {
 /// A blob, if git has it. A cancelled job doesn't wait for git, and neither does
 /// quitting, so nothing's left running.
 fn read_blob(repo: &Path, id: &str, cancelled: &AtomicBool) -> Option<Blob> {
-    let mut git = Command::new("git")
+    let mut git = git::piped(repo)
         .args(["cat-file", "--batch"])
-        .current_dir(repo)
-        // A partial clone would otherwise go to the network for a missing blob.
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
         .spawn()
         .ok()?;
     let (stdin, stdout) = (git.stdin.take(), git.stdout.take());
@@ -298,13 +293,8 @@ pub(super) fn read_blobs(
     if specs.is_empty() {
         return Some(Vec::new());
     }
-    let mut git = Command::new("git")
+    let mut git = git::piped(repo)
         .args(["cat-file", "--batch"])
-        .current_dir(repo)
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
         .spawn()
         .ok()?;
     let (stdin, stdout) = (git.stdin.take(), git.stdout.take());
@@ -391,7 +381,7 @@ pub(super) fn grep(
     limits: (Duration, u64),
     cancelled: &AtomicBool,
 ) -> Option<Vec<GrepHit>> {
-    let mut command = Command::new("git");
+    let mut command = git::piped(repo);
     command
         .args(["grep", "--no-color", "--no-column", "-F", "-I", "-n", "-z"])
         .args(["--full-name", "-f", "-"]);
@@ -399,16 +389,7 @@ pub(super) fn grep(
         Tree::Index => command.arg("--cached"),
         Tree::Rev(rev) => command.arg(rev),
     };
-    let mut git = command
-        .arg("--")
-        .args(pathspecs)
-        .current_dir(repo)
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut git = command.arg("--").args(pathspecs).spawn().ok()?;
     let (stdin, stdout) = (git.stdin.take(), git.stdout.take());
     let (limit, max_bytes) = limits;
     let deadline = Instant::now() + limit;
@@ -504,7 +485,7 @@ fn blob_text(mut stdin: ChildStdin, stdout: ChildStdout, id: &str) -> Option<Blo
 #[cfg(test)]
 pub(super) mod tests {
     use std::fs;
-    use std::process::Output;
+    use std::process::{Command, Output};
     use std::sync::atomic::AtomicUsize;
 
     use super::*;

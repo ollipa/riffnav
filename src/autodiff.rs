@@ -17,9 +17,10 @@
 use std::ffi::OsStr;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::diff::path;
+use crate::git;
 
 /// Pin the `a/`…`b/` diff path prefixes the parser strips, overriding whatever
 /// `diff.mnemonicPrefix` / `diff.noprefix` the user's git config sets. Without
@@ -357,14 +358,14 @@ impl GitDiff {
 /// The context git gives a diff when not told otherwise: the `diff.context`
 /// setting, or git's built-in 3.
 pub fn default_context() -> u32 {
-    git(&["config", "--get", "diff.context"])
+    git::text(&["config", "--get", "diff.context"])
         .and_then(|n| n.parse().ok())
         .unwrap_or(3)
 }
 
 /// Whether the current directory is inside a git work tree.
 pub fn in_repo() -> bool {
-    git(&["rev-parse", "--is-inside-work-tree"]).as_deref() == Some("true")
+    git::text(&["rev-parse", "--is-inside-work-tree"]).as_deref() == Some("true")
 }
 
 /// Detect the base branch the current branch should be compared against. Two
@@ -375,7 +376,7 @@ pub fn in_repo() -> bool {
 /// is what a pull request would compare against. Returns `None` when neither
 /// resolves, in which case the branch-vs-base view is unavailable.
 pub fn detect_base() -> Option<String> {
-    let remote = git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]); // e.g. "origin/main"
+    let remote = git::text(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]); // e.g. "origin/main"
     let local = local_base();
     match (remote, local) {
         (Some(remote), Some(local)) => Some(if merge_base_is_newer(&local, &remote) {
@@ -392,11 +393,11 @@ pub fn detect_base() -> Option<String> {
 /// so it would render an empty diff — the common case being a local commit on
 /// `main` that hasn't been pushed, where `origin/main` is the useful base.
 fn local_base() -> Option<String> {
-    let head = git(&["rev-parse", "HEAD"]);
+    let head = git::text(&["rev-parse", "HEAD"]);
     ["main", "master"]
         .into_iter()
         .find(|name| {
-            git(&[
+            git::text(&[
                 "rev-parse",
                 "--verify",
                 "--quiet",
@@ -411,13 +412,13 @@ fn local_base() -> Option<String> {
 /// `other`'s merge-base is a proper ancestor of it. False when either merge-base
 /// can't be computed (unrelated histories), leaving the caller on its default.
 fn merge_base_is_newer(cand: &str, other: &str) -> bool {
-    let Some(cand_mb) = git(&["merge-base", cand, "HEAD"]) else {
+    let Some(cand_mb) = git::text(&["merge-base", cand, "HEAD"]) else {
         return false;
     };
-    let Some(other_mb) = git(&["merge-base", other, "HEAD"]) else {
+    let Some(other_mb) = git::text(&["merge-base", other, "HEAD"]) else {
         return false;
     };
-    cand_mb != other_mb && git_ok(&["merge-base", "--is-ancestor", &other_mb, &cand_mb])
+    cand_mb != other_mb && git::ok(&["merge-base", "--is-ancestor", &other_mb, &cand_mb])
 }
 
 /// The revision a base-relative view diffs *from*. [`DiffSource::VsBase`] keeps
@@ -431,7 +432,7 @@ fn resolve_base(source: DiffSource, base: &str) -> Result<String> {
     if source != DiffSource::All {
         return Ok(base.to_string());
     }
-    git(&["merge-base", base, "HEAD"])
+    git::text(&["merge-base", base, "HEAD"])
         .with_context(|| format!("no common ancestor between {base} and HEAD"))
 }
 
@@ -452,7 +453,7 @@ fn literal_pathspec(path: &str) -> String {
 fn is_untracked(path: &str) -> bool {
     let pathspec = path::to_os(&literal_pathspec(path));
     let flags = ["ls-files", "--others", "--exclude-standard", "--"].map(OsStr::new);
-    git_raw(flags.iter().copied().chain([pathspec.as_os_str()]))
+    git::raw(flags.iter().copied().chain([pathspec.as_os_str()]))
         .is_some_and(|list| !list.trim_ascii().is_empty())
 }
 
@@ -508,43 +509,16 @@ pub fn load_initial(base: Option<&str>) -> (DiffSource, String) {
     fallback_view(base).unwrap_or((DiffSource::AllUncommitted, String::new()))
 }
 
-/// Run `git` with `args`, returning trimmed stdout or `None` on any failure or
-/// empty output. Mirrors the helpers in `forge.rs` and `review.rs`.
-fn git(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!s.is_empty()).then_some(s)
-}
-
-/// Run `git` with `args` for its exit status alone. Unlike [`git`], a successful
-/// command that prints nothing still counts as success — needed for predicates
-/// like `merge-base --is-ancestor`, which answer purely through their status.
-fn git_ok(args: &[&str]) -> bool {
-    Command::new("git")
-        .args(args)
-        .output()
-        .is_ok_and(|out| out.status.success())
-}
-
 /// Run `git` with `args`, returning full stdout, and surfacing git's stderr in
-/// the error when it exits non-zero (unlike [`git`], the diff text is kept
+/// the error when it exits non-zero (unlike [`git::text`], the diff text is kept
 /// verbatim — leading/trailing whitespace can be significant).
 fn run_git(args: &[String]) -> Result<String> {
+    let shown = format!("git {}", args.join(" "));
     let out = Command::new("git")
         .args(args.iter().map(|arg| path::to_os(arg)))
         .output()
-        .with_context(|| format!("running `git {}`", args.join(" ")))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        match stderr.lines().map(str::trim).find(|l| !l.is_empty()) {
-            Some(line) => bail!("git {}: {line}", args.join(" ")),
-            None => bail!("`git {}` exited with {}", args.join(" "), out.status),
-        }
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        .with_context(|| format!("running `{shown}`"))?;
+    git::stdout_or_error(out, &shown, &format!("{shown}: "))
 }
 
 /// Synthetic "added file" diffs for every untracked, non-ignored file, so the
@@ -552,7 +526,7 @@ fn run_git(args: &[String]) -> Result<String> {
 /// `.gitignore`d files are excluded (`--exclude-standard`).
 fn untracked_diff() -> String {
     let flags = ["ls-files", "--others", "--exclude-standard", "-z"].map(OsStr::new);
-    let Some(list) = git_raw(flags) else {
+    let Some(list) = git::raw(flags) else {
         return String::new();
     };
     // `-z` is NUL-separated and unquoted, so paths with spaces/newlines stay intact.
@@ -580,14 +554,6 @@ fn diff_against_devnull(path: &OsStr) -> Option<String> {
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     (!text.is_empty()).then_some(text)
-}
-
-/// Run `git` and return raw, untrimmed stdout on success (or `None` on failure).
-/// Used where the bytes matter — e.g. NUL-separated lists of names — unlike [`git`],
-/// which trims.
-fn git_raw<'a>(args: impl IntoIterator<Item = &'a OsStr>) -> Option<Vec<u8>> {
-    let out = Command::new("git").args(args).output().ok()?;
-    out.status.success().then_some(out.stdout)
 }
 
 #[cfg(test)]

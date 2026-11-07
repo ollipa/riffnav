@@ -8,11 +8,12 @@
 //! stores can't drift apart.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use twox_hash::XxHash3_128;
+
+use crate::git;
 
 pub const DAY_SECS: u64 = 86_400;
 
@@ -47,8 +48,8 @@ pub fn hash_hex(s: &str) -> String {
 /// The current repo's toplevel and branch, or `None` outside a repo. A detached
 /// HEAD has no branch, so it shares one repo-level bucket.
 pub fn detect_scope() -> Option<(String, String)> {
-    let repo = git(&["rev-parse", "--show-toplevel"])?;
-    let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    let repo = git::text(&["rev-parse", "--show-toplevel"])?;
+    let branch = git::text(&["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
     let branch = if branch.is_empty() || branch == "HEAD" {
         "(detached)".to_string()
     } else {
@@ -147,17 +148,6 @@ pub fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Run a git command, returning trimmed stdout or `None` on any failure or empty
-/// output. Mirrors the helper in `forge.rs`.
-fn git(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!s.is_empty()).then_some(s)
 }
 
 #[cfg(test)]
