@@ -435,6 +435,17 @@ fn git_grep_finds_a_source_in_a_file_the_diff_leaves_alone() {
     assert_eq!(got, ["copied from src/lib/untouched.rs:41"]);
 }
 
+/// `is_source` takes `.RS` for Rust, so the search for a source has to as well.
+#[test]
+fn an_extension_in_capitals_is_the_same_language() {
+    let repo = Repo::new();
+    repo.commit("src/lib/untouched.rs", &source_file(&FUNCTION));
+    repo.commit("src/NEW.RS", &FUNCTION.join("\n"));
+    let tree = Some(Tree::Rev("HEAD".to_string()));
+    let got = git_notes(&repo, &["show", "HEAD"], tree);
+    assert_eq!(got, ["copied from src/lib/untouched.rs:41"]);
+}
+
 #[test]
 fn without_a_tree_the_rest_of_the_repository_isnt_read() {
     let repo = Repo::new();

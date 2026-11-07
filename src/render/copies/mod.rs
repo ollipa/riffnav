@@ -161,7 +161,6 @@ pub fn build(
     let extensions: HashSet<String> = runs
         .iter()
         .filter_map(|run| extension(files[run.file].path()))
-        .map(str::to_string)
         .collect();
     let mut free: Vec<Vec<bool>> = runs.iter().map(|run| vec![true; run.lines.len()]).collect();
 

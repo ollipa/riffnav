@@ -205,7 +205,9 @@ pub(super) fn says_generated<'a>(lines: impl Iterator<Item = &'a str>) -> bool {
     })
 }
 
-pub(super) fn extension(path: &str) -> Option<&str> {
+/// A file's extension in lower case, as [`is_source`] reads it.
+pub(super) fn extension(path: &str) -> Option<String> {
     let name = path.rsplit('/').next()?;
-    name.rsplit_once('.').map(|(_, ext)| ext)
+    name.rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
 }

@@ -42,7 +42,7 @@ pub(super) fn add_diff_files(
     let mut candidates = Vec::new();
     for (at, file) in files.iter().enumerate() {
         let path = file.path();
-        let same_language = extension(path).is_some_and(|ext| extensions.contains(ext));
+        let same_language = extension(path).is_some_and(|ext| extensions.contains(&ext));
         if file.new_path.is_some() && is_source(path) && same_language {
             candidates.push(at);
         }
@@ -120,7 +120,7 @@ pub(super) fn add_outside_files(
 ) -> Option<()> {
     let globs: Vec<String> = extensions
         .iter()
-        .map(|ext| format!(":(top,glob)**/*.{ext}"))
+        .map(|ext| format!(":(top,glob,icase)**/*.{ext}"))
         .collect();
     let limits = (GREP_LIMIT, MAX_GREP_BYTES);
     let repo = &reading.git.repo;
