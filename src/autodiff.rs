@@ -151,7 +151,7 @@ pub struct GitDiff {
     /// skips them.
     pub base: Option<String>,
     /// Extra arguments handed straight to git, after riffnav's own.
-    pub extra: Vec<String>,
+    extra: Vec<String>,
     /// Lines of context around each change (`-U<n>`), as widened with `+`/`-`.
     /// `None` leaves it to git — its `diff.context` setting, or 3 — which is
     /// also the floor `-` stops at (see [`default_context`]).

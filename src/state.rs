@@ -41,7 +41,7 @@ pub fn scope_path(dir: &Path, repo: &str, branch: &str) -> PathBuf {
         .join(format!("{}.json", hash_hex(branch)))
 }
 
-pub fn hash_hex(s: &str) -> String {
+fn hash_hex(s: &str) -> String {
     format!("{:032x}", XxHash3_128::oneshot(s.as_bytes()))
 }
 

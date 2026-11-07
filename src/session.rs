@@ -109,7 +109,7 @@ impl Session {
     }
 
     /// Where this scope's session file lives, or `None` outside a repo.
-    pub fn path() -> Option<PathBuf> {
+    fn path() -> Option<PathBuf> {
         let (repo, branch) = state::detect_scope()?;
         let dir = state::dir("sessions")?;
         Some(state::scope_path(&dir, &repo, &branch))

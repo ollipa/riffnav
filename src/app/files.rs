@@ -20,7 +20,7 @@ pub struct Finder {
 }
 
 impl App {
-    pub fn selected_index(&self) -> usize {
+    pub(super) fn selected_index(&self) -> usize {
         self.tree_state.selected().unwrap_or(0)
     }
 

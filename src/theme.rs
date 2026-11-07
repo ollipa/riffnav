@@ -99,8 +99,7 @@ impl DiffTheme {
     /// Background for the diff pane's line cursor. Only the background changes,
     /// so it has to stay readable behind syntax-highlighted code and behind the
     /// +/- tints it replaces on a changed line.
-    pub fn cursor_line_bg(self) -> ratatui::style::Color {
-        use ratatui::style::Color;
+    pub fn cursor_line_bg(self) -> Color {
         match self {
             // GitHub's selected-row blue-grey, flattened over each canvas.
             DiffTheme::GitHubDark => Color::Rgb(0x1c, 0x2c, 0x43),
