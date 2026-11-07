@@ -15,6 +15,7 @@ use super::terminal::{
 };
 use crate::comment::PendingComment;
 use crate::diff::path;
+use crate::git;
 
 /// Separator between a comment body and the explanatory footer, borrowed from
 /// git's `--verbose` scissors. Everything from this line down is discarded, which
@@ -114,6 +115,24 @@ fn random_hex() -> String {
     format!("{n:016x}")
 }
 
+/// Where the editor finds the diff's `path`. git names files from the top of the
+/// repository, wherever riffnav was started, so a name is found there first. A
+/// relative name is given a `./`, so one starting with `-` or `+` doesn't read as
+/// an option or a line number.
+fn editor_path(path: &str) -> PathBuf {
+    let name = Path::new(path);
+    if name.is_absolute() {
+        return path::to_os(path).into();
+    }
+    if let Some(top) = git::toplevel(Path::new(".")) {
+        let at_top = top.join(path::to_os(path));
+        if at_top.exists() || !name.exists() {
+            return at_top;
+        }
+    }
+    Path::new(".").join(path::to_os(path))
+}
+
 impl App {
     /// Suspend the TUI, run `$VISUAL`/`$EDITOR` on `path`, then resume. Returns the
     /// editor's name and how it exited, for the caller to report.
@@ -150,7 +169,7 @@ impl App {
 
     /// The `o` key: edit the selected file in place.
     pub(super) fn open_editor(&mut self, terminal: &mut DefaultTerminal, path: &str) -> Result<()> {
-        let (editor, status) = self.run_editor(terminal, &path::to_os(path));
+        let (editor, status) = self.run_editor(terminal, editor_path(path).as_os_str());
         self.set_status(match status {
             Ok(s) if s.success() => format!("Edited {path}"),
             Ok(s) => format!("{editor} exited: {s}"),
@@ -193,6 +212,20 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name git gives from the top of the repository is opened there, and none
+    /// reaches the editor looking like an option or a `+line`.
+    #[test]
+    fn the_editor_gets_a_path_it_cannot_misread() {
+        let top = git::toplevel(Path::new(".")).expect("tests run in the repository");
+        assert_eq!(editor_path("src/main.rs"), top.join("src/main.rs"));
+        for name in ["-n", "+12", "--", "no/such/-file"] {
+            let given = editor_path(name);
+            assert!(given.is_absolute(), "{given:?}");
+            assert!(given.ends_with(name), "{given:?}");
+        }
+        assert_eq!(editor_path("/etc/hosts"), Path::new("/etc/hosts"));
+    }
     use crate::comment::{Anchor, PendingComment};
 
     /// The buffer goes in a fresh private directory under a name nobody can
