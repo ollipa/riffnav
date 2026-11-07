@@ -140,18 +140,21 @@ impl App {
         }
     }
 
-    /// A few rendered lines around the cursor, as plain text, to quote back in the
-    /// editor so the author can see what they're commenting on.
+    /// The code on the rendered lines around the cursor, as plain text, to quote
+    /// back in the editor so the author can see what they're commenting on.
+    /// Headers, notes and comments in among them aren't code, so they're left out.
     fn cursor_context(&self) -> Vec<String> {
         let Some(render) = self.current_render() else {
             return Vec::new();
         };
         let first = self.diff_cursor.saturating_sub(2);
         let last = (self.diff_cursor + 3).min(render.text.lines.len());
-        render.text.lines[first..last]
-            .iter()
-            .map(|l| {
-                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+        let code = |&at: &usize| render.line_map.sources(at).iter().any(Option::is_some);
+        (first..last)
+            .filter(code)
+            .map(|at| {
+                let spans = &render.text.lines[at].spans;
+                let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
                 text.trim_end().to_string()
             })
             .collect()
@@ -261,6 +264,39 @@ mod tests {
         app.seed_render_for_test(60, seed_text());
         app.resync_cursor();
         app
+    }
+
+    /// The `$EDITOR` buffer quotes the code around the cursor, and not the hunk
+    /// header boxes or file header lines next to it.
+    #[test]
+    fn the_editor_quotes_only_code_around_the_cursor() {
+        let raw = format!(
+            "{}@@ -1,2 +1,2 @@\n one\n-two\n+2\n@@ -40,2 +40,2 @@ fn f()\n forty\n-x\n+y\n",
+            crate::diff::testing::header("a.txt")
+        );
+        let mut app = App::new(
+            crate::diff::parse(&raw),
+            false,
+            &crate::config::Config::default(),
+        );
+        app.install_comments_for_test(CommentStore::disabled());
+        app.focus = Focus::Diff;
+        crate::app::test_support::frame(&mut app);
+        for first in [true, false] {
+            let render = app.current_render().unwrap();
+            let line = if first { 1 } else { 40 };
+            let at = (0..render.lines())
+                .find(|&at| render.line_map.get(at).new == Some(line))
+                .unwrap();
+            app.set_cursor(at);
+            let context = app.cursor_context();
+            assert!(!context.is_empty());
+            for quoted in &context {
+                assert!(quoted.contains('⋮'), "{quoted:?} in {context:?}");
+            }
+            let expect = if first { "one" } else { "forty" };
+            assert!(context.iter().any(|q| q.ends_with(expect)), "{context:?}");
+        }
     }
 
     fn type_into(app: &mut App, text: &str) {
