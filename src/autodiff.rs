@@ -28,6 +28,11 @@ use crate::git;
 /// `diff.noprefix` say. Otherwise paths keep a stray `i/`/`w/` prefix and `o` opens nothing.
 const PREFIX_ARGS: [&str; 2] = ["--src-prefix=a/", "--dst-prefix=b/"];
 
+/// Name every file from the top of the repository, whatever `diff.relative` says,
+/// as riffnav's pathspecs, blob reads and editor all do. Arguments of the user's
+/// own come after it, so a `--relative` among them still wins.
+const NO_RELATIVE: &str = "--no-relative";
+
 /// Ask for git's own diff, never a `diff.external` tool's, which isn't a unified diff
 /// the parser can read.
 const NO_EXT_DIFF: &str = "--no-ext-diff";
@@ -287,6 +292,7 @@ impl GitDiff {
             .chain(QUOTE_ARGS)
             .chain([self.sub(), NO_EXT_DIFF])
             .chain(PREFIX_ARGS)
+            .chain([NO_RELATIVE])
             .map(str::to_string)
             .collect();
         argv.extend(self.context.map(|n| format!("-U{n}")));
@@ -662,7 +668,7 @@ mod tests {
             "diff",
             "--no-ext-diff",
         ];
-        let pre = ["--src-prefix=a/", "--dst-prefix=b/"];
+        let pre = ["--src-prefix=a/", "--dst-prefix=b/", "--no-relative"];
         let expect = |tail: &[&str]| -> Vec<String> {
             head.iter()
                 .chain(&pre)
@@ -958,5 +964,37 @@ mod tests {
         let text = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-* Unmerged path f\n+x\n";
         let missing = Path::new("/nonexistent/riffnav");
         assert_eq!(describe_unmerged(missing, text.to_string()), text);
+    }
+
+    /// Under `diff.relative`, a plain view started in a subdirectory still names
+    /// and shows every file from the top; a `--relative` of the user's own wins.
+    #[test]
+    fn a_relative_diff_config_does_not_change_the_names() {
+        let repo = crate::testing::Repo::new();
+        repo.write("top.txt", "x\n");
+        repo.commit("sub/low.txt", "x\n");
+        repo.git(&["config", "diff.relative", "true"]);
+        repo.write("top.txt", "y\n");
+        repo.write("sub/low.txt", "y\n");
+        let names = |extra: &[&str]| {
+            let git = GitDiff::diff(
+                DiffSource::Unstaged,
+                None,
+                extra.iter().map(|a| a.to_string()).collect(),
+            );
+            let out = Command::new("git")
+                .current_dir(repo.0.join("sub"))
+                .args(git.argv().unwrap())
+                .output()
+                .unwrap();
+            let text = String::from_utf8(out.stdout).unwrap();
+            let files = crate::diff::parse(&text);
+            files
+                .iter()
+                .map(|f| f.path().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&[]), ["sub/low.txt", "top.txt"]);
+        assert_eq!(names(&["--relative"]), ["low.txt"]);
     }
 }
