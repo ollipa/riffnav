@@ -18,6 +18,7 @@ mod desktop;
 mod notify;
 mod socket;
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -63,10 +64,19 @@ impl Herdr {
         matches!(self, Self::App(_))
     }
 
-    /// The agents in riffnav's tab, other than riffnav itself.
+    /// The agents running in riffnav's tab, other than riffnav itself. herdr
+    /// keeps listing an agent after it quits, so each is checked with `hc`.
     pub fn tab_agents(&self) -> Result<Vec<Agent>> {
         match self {
-            Self::App(app) => app.tab_agents(),
+            Self::App(app) => {
+                let mut running = Vec::new();
+                for agent in app.tab_agents()? {
+                    if notify::agent_running(OsStr::new("hc"), &agent.terminal)? {
+                        running.push(agent);
+                    }
+                }
+                Ok(running)
+            }
             Self::Tui(_) => bail!("sending comments needs the herdr app"),
         }
     }

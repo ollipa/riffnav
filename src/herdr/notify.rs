@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use super::desktop::{AppPane, run_for};
@@ -24,6 +24,16 @@ const POLL: Duration = Duration::from_secs(1);
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// `hc send`'s exit code for a program blocked on a dialog.
 const BLOCKED: i32 = 9;
+/// `hc`'s exit code for a terminal that doesn't exist.
+const NOT_FOUND: i32 = 3;
+/// How long `hc get` may take.
+const GET_TIMEOUT: Duration = Duration::from_secs(2);
+/// Programs a terminal falls back to once its agent quits. The notice must
+/// never be typed into one: a shell would run it as a command.
+const SHELLS: &[&str] = &[
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "pwsh", "elvish",
+    "xonsh",
+];
 /// Listing failures in a row that give up on the notice. One slow `herdr-app ls`
 /// shouldn't drop a notice that has been waiting for minutes.
 const LISTING_TRIES: u32 = 3;
@@ -150,20 +160,32 @@ fn deliver(
                 agent.status
             }
             Ok(Some(_)) if stopped.load(Ordering::Relaxed) => return,
-            Ok(Some(_)) => {
-                misses = 0;
-                match send(hc, &notice.terminal, &notice.text) {
-                    Ok(Sent::Yes) => {
-                        report(Progress::Sent);
-                        return;
-                    }
-                    Ok(Sent::Blocked) => Some("blocked".into()),
-                    Err(e) => {
-                        report(Progress::Failed(format!("{e:#}")));
-                        return;
+            // herdr keeps an agent's name and last status after it quits, so
+            // only what runs in the terminal right now says it's still there.
+            Ok(Some(_)) => match agent_running(hc, &notice.terminal) {
+                Ok(false) => {
+                    report(Progress::Gone);
+                    return;
+                }
+                Err(e) => {
+                    report(Progress::Failed(format!("{e:#}")));
+                    return;
+                }
+                Ok(true) => {
+                    misses = 0;
+                    match send(hc, &notice.terminal, &notice.text) {
+                        Ok(Sent::Yes) => {
+                            report(Progress::Sent);
+                            return;
+                        }
+                        Ok(Sent::Blocked) => Some("blocked".into()),
+                        Err(e) => {
+                            report(Progress::Failed(format!("{e:#}")));
+                            return;
+                        }
                     }
                 }
-            }
+            },
         };
         if let Some(status) = waiting
             && !report(Progress::Waiting(status))
@@ -172,6 +194,48 @@ fn deliver(
         }
         thread::sleep(poll);
     }
+}
+
+/// Whether an agent still runs in `terminal`: something other than a shell is
+/// in front. A terminal that's gone runs nothing.
+pub(super) fn agent_running(hc: &OsStr, terminal: &str) -> Result<bool> {
+    let done = run_for(hc, &["get", terminal, "--json"], GET_TIMEOUT)?;
+    if done.status.code() == Some(NOT_FOUND) {
+        return Ok(false);
+    }
+    if !done.status.success() {
+        match serde_json::from_str::<HcError>(&done.stderr) {
+            Ok(reply) => bail!("{}", reply.error.message),
+            Err(_) => bail!("hc get failed ({})", done.status),
+        }
+    }
+    let got: HcGet = serde_json::from_str(&done.stdout).context("parsing hc get")?;
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    Ok(got
+        .foreground
+        .is_some_and(|f| !is_shell(&f.name, program_name(&shell))))
+}
+
+fn program_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Whether `name` is a shell: a known one, or the person's own `$SHELL`.
+fn is_shell(name: &str, own_shell: &str) -> bool {
+    let name = program_name(name);
+    let name = name.strip_prefix('-').unwrap_or(name); // a login shell
+    SHELLS.contains(&name) || (!own_shell.is_empty() && name == own_shell)
+}
+
+/// `hc get --json`, keeping only what runs in front.
+#[derive(Deserialize)]
+struct HcGet {
+    foreground: Option<HcForeground>,
+}
+
+#[derive(Deserialize)]
+struct HcForeground {
+    name: String,
 }
 
 enum Sent {
@@ -256,6 +320,10 @@ mod tests {
                 &dir,
                 "hc",
                 r#"[ "$1" = --probe ] && exit
+if [ "$1" = get ]; then
+    cat get.json 2>/dev/null || echo '{"foreground":{"name":"claude"}}'
+    exit
+fi
 printf '%s|%s|%s\n' "$1" "$2" "$3" >> sent
 [ -f stderr ] && cat stderr >&2
 exit "$(cat code 2>/dev/null || echo 0)""#,
@@ -373,6 +441,29 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
         let seen = fake.run(|fake, _| fake.set("ls.json", r#"{"spaces":[]}"#));
         assert_eq!(seen, [Progress::Waiting("working".into()), Progress::Gone]);
         assert_eq!(fake.sent(), "");
+    }
+
+    /// herdr still lists an agent that quit, with its last status: the shell
+    /// left in front would run the notice as a command.
+    #[test]
+    fn an_agent_that_quit_to_its_shell_is_gone() {
+        let fake = Fake::new("quit", r#""done""#);
+        fake.set("get.json", r#"{"foreground":{"name":"fish"}}"#);
+        assert_eq!(fake.run(|_, _| {}), [Progress::Gone]);
+        fake.set("get.json", r#"{"foreground":null}"#);
+        assert_eq!(fake.run(|_, _| {}), [Progress::Gone]);
+        assert_eq!(fake.sent(), "", "nothing typed into the shell");
+    }
+
+    #[test]
+    fn shells_are_told_from_agents() {
+        for name in ["fish", "/usr/bin/zsh", "-bash", "nu", "myshell"] {
+            assert!(is_shell(name, "myshell"), "{name}");
+        }
+        for name in ["claude", "codex", "node", "pi"] {
+            assert!(!is_shell(name, "fish"), "{name}");
+        }
+        assert!(!is_shell("claude", ""));
     }
 
     #[test]
