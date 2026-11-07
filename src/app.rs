@@ -108,8 +108,8 @@ impl Direction {
 /// What the view was on: the render, or once that's gone, what it showed.
 enum ViewFrom {
     Render(Arc<Rendered>),
-    /// The code at the top, and whether the cursor was on its anchored line.
-    Top(Option<ViewTop>, bool),
+    /// The code at the top.
+    Top(Option<ViewTop>),
 }
 
 pub struct App {
@@ -580,11 +580,11 @@ impl App {
             return;
         };
         if was.file == file && was != key {
-            let (top, anchored) = match &from {
+            let top = match &from {
                 ViewFrom::Render(old) => self.view_on(old),
-                ViewFrom::Top(top, anchored) => (*top, *anchored),
+                ViewFrom::Top(top) => *top,
             };
-            self.keep_cursor = self.comments_enabled() && anchored && self.cursor_on_screen;
+            self.keep_cursor = self.comments_enabled() && self.cursor_on_screen;
             if let Some(scroll) = top.and_then(|top| now.scroll_to(top)) {
                 self.diff_scroll = scroll;
             }
@@ -595,15 +595,11 @@ impl App {
     }
 
     /// What `render` shows at the top at the current scroll, if not the top of the
-    /// file, and whether the line cursor is on the line it's anchored to. A cursor
-    /// parked on a header or a note goes back to the last numbered line it was on,
-    /// which needn't be in view, so it isn't kept in view.
-    fn view_on(&self, render: &Rendered) -> (Option<ViewTop>, bool) {
-        let top = (self.diff_scroll > 0)
+    /// file.
+    fn view_on(&self, render: &Rendered) -> Option<ViewTop> {
+        (self.diff_scroll > 0)
             .then(|| render.top_at(self.diff_scroll))
-            .flatten();
-        let anchored = render.line_map.get(self.diff_cursor).anchor() == self.cursor_anchor;
-        (top, anchored)
+            .flatten()
     }
 
     /// Keep only what the render the view is on shows, as a resize is about to
@@ -613,8 +609,8 @@ impl App {
             return;
         };
         let (key, render) = (*key, render.clone());
-        let (top, anchored) = self.view_on(&render);
-        self.view_from = Some((key, ViewFrom::Top(top, anchored)));
+        let top = self.view_on(&render);
+        self.view_from = Some((key, ViewFrom::Top(top)));
         self.forget_render(render);
     }
 

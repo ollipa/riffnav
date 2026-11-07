@@ -124,6 +124,20 @@ impl Rendered {
         at
     }
 
+    /// The diff line `line` stands for, or for a line with none, the nearest one:
+    /// looking down first if `down` is set, and otherwise the line it's part of
+    /// (a note's block, a wrapped row's start), then up.
+    pub fn anchor_near(&self, line: usize, down: bool) -> Option<Anchor> {
+        let anchor = |at: usize| self.line_map.get(at).anchor();
+        let below = || (line..self.lines()).find_map(anchor);
+        let above = || (0..line).rev().find_map(anchor);
+        if down {
+            below().or_else(above)
+        } else {
+            anchor(self.code_line(line)).or_else(above).or_else(below)
+        }
+    }
+
     fn numbered(&self, line: usize) -> bool {
         self.line_map.get(line).anchor().is_some()
     }

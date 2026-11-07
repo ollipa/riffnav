@@ -86,13 +86,27 @@ impl App {
     }
 
     /// Record the diff line the cursor now sits on, so a later re-render can put
-    /// it back. A row with no line number (a hunk header, a comment row) leaves
-    /// the previous anchor alone rather than clearing it.
+    /// it back. A row with no line number (a hunk header, a comment row) is held
+    /// by the nearest line, looking up first: the line a comment is on, or the
+    /// last one before a header.
     pub(super) fn remember_cursor_anchor(&mut self) {
-        if let Some(anchor) = self
-            .current_render()
-            .and_then(|r| r.line_map.get(self.diff_cursor).anchor())
-        {
+        self.remember_cursor_anchor_toward(false);
+    }
+
+    /// Whether the cursor is on the line it's anchored to, rather than a row with
+    /// no line held by one near it. A cursor a jump left on its line is, so one
+    /// that has moved off it onto a header or a wrapped row near it doesn't look
+    /// like it's still there.
+    pub(super) fn on_anchored_line(&self) -> bool {
+        let anchor = |r: &crate::render::Rendered| r.line_map.get(self.diff_cursor).anchor();
+        self.current_render()
+            .is_none_or(|r| anchor(r) == self.cursor_anchor)
+    }
+
+    /// The same, looking down first when `down` is set.
+    fn remember_cursor_anchor_toward(&mut self, down: bool) {
+        let near = self.current_render();
+        if let Some(anchor) = near.and_then(|r| r.anchor_near(self.diff_cursor, down)) {
             self.cursor_anchor = Some(anchor);
         }
     }
@@ -197,8 +211,11 @@ impl App {
         let last = render.line_at(scroll.saturating_add(height.saturating_sub(1)));
         let parked = self.diff_cursor.clamp(first, last.max(first));
         if parked != self.diff_cursor {
+            // Parked at the top, a row with no line is held by the line below it,
+            // which is in view, and at the foot by the one above.
+            let down = parked > self.diff_cursor;
             self.diff_cursor = parked;
-            self.remember_cursor_anchor();
+            self.remember_cursor_anchor_toward(down);
         }
     }
 
@@ -411,6 +428,112 @@ mod tests {
         frame_at(&mut app, 80, 40);
         assert!(!app.cache.is_preview(0, app.last_width, false));
         assert_eq!((top_and_cursor(&app), app.diff_scroll), (kept, scroll));
+    }
+
+    /// Many short hunks, so paging often leaves a hunk header at the top.
+    fn hunks() -> App {
+        let mut raw = crate::diff::testing::header("h.txt");
+        for at in 0..150 {
+            let start = at * 13 + 1;
+            raw.push_str(&format!("@@ -{start},4 +{start},4 @@\n"));
+            raw.push_str(&format!(
+                " a {at}\n b {at}\n-old {at}\n+new {at}\n c {at}\n"
+            ));
+        }
+        let mut app = App::new(parse(&raw), false, &Config::default());
+        app.install_comments_for_test(CommentStore::disabled());
+        app.focus = Focus::Diff;
+        app
+    }
+
+    /// Page until the cursor is parked on a row with no line number: a hunk
+    /// header, or the rest of a wrapped side-by-side row.
+    fn park_on_a_header(app: &mut App) {
+        for _ in 0..200 {
+            app.press_for_test(Char(' '), false);
+            frame_at(app, 100, 20);
+            let render = app.current_render().unwrap();
+            if render.line_map.get(app.diff_cursor).anchor().is_none() {
+                return;
+            }
+        }
+        panic!("never parked on a header");
+    }
+
+    fn cursor_in_view(app: &App) -> bool {
+        let row = app.current_render().unwrap().row_of(app.diff_cursor);
+        (app.diff_scroll..app.diff_scroll + u32::from(app.diff_height)).contains(&row)
+    }
+
+    /// A cursor paged onto a hunk header is held by the line below it, so a theme,
+    /// a width or a comment re-rendering the file leaves it in view, where it was
+    /// sent back to the line it was on before paging.
+    #[test]
+    fn a_cursor_parked_on_a_header_stays_in_view_through_a_re_render() {
+        for change in ["theme", "width", "comment"] {
+            let mut app = hunks();
+            frame_at(&mut app, 100, 20);
+            park_on_a_header(&mut app);
+            let scroll = app.diff_scroll;
+            match change {
+                "theme" => app.press_for_test(Char('T'), false),
+                "width" => {
+                    frame_at(&mut app, 90, 20);
+                }
+                _ => {
+                    let file = app.files[0].path().to_string();
+                    let note = crate::comment::testing::note(&file, 1, "far away");
+                    app.comments.update(|store| store.add(note)).unwrap();
+                    app.bump_comments();
+                }
+            }
+            frame_at(&mut app, if change == "width" { 90 } else { 100 }, 20);
+            let render = app.current_render().unwrap();
+            assert!(
+                render.line_map.get(app.diff_cursor).anchor().is_some(),
+                "{change}"
+            );
+            assert!(cursor_in_view(&app), "{change}");
+            if change != "comment" {
+                assert_eq!(app.diff_scroll, scroll, "{change}: the view stays put");
+            }
+        }
+    }
+
+    /// Side by side, paging can park the cursor on the rest of a wrapped row whose
+    /// start is above the view. It's held by the line below, so a re-render
+    /// neither moves the view nor loses the cursor.
+    #[test]
+    fn a_cursor_parked_on_a_wrapped_row_stays_put_side_by_side() {
+        let mut app = wrapping("a.txt", 400);
+        app.side_by_side = true;
+        frame_at(&mut app, 100, 20);
+        park_on_a_header(&mut app);
+        let scroll = app.diff_scroll;
+        app.press_for_test(Char('T'), false);
+        frame_at(&mut app, 100, 20);
+        assert_eq!(app.diff_scroll, scroll);
+        assert!(cursor_in_view(&app));
+        let render = app.current_render().unwrap();
+        assert!(render.line_map.get(app.diff_cursor).anchor().is_some());
+    }
+
+    /// `g` puts the cursor on the file's header, and a re-render puts it on the
+    /// first line rather than wherever it was before.
+    #[test]
+    fn g_then_a_re_render_leaves_the_cursor_at_the_top() {
+        let mut app = hunks();
+        frame_at(&mut app, 100, 20);
+        for _ in 0..10 {
+            app.press_for_test(Char(' '), false);
+        }
+        app.press_for_test(Char('j'), false);
+        app.press_for_test(Char('g'), false);
+        frame_at(&mut app, 100, 20);
+        app.press_for_test(Char('T'), false);
+        frame_at(&mut app, 100, 20);
+        assert_eq!(app.diff_scroll, 0);
+        assert!(cursor_in_view(&app));
     }
 
     /// A reload keeps the row it was on, as before, rather than following line

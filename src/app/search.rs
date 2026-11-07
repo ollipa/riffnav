@@ -183,7 +183,7 @@ impl App {
     }
 
     pub(super) fn holding_match(&self) -> bool {
-        self.find.held.is_some() && self.find.held == self.cursor_anchor
+        self.find.held.is_some() && self.find.held == self.cursor_anchor && self.on_anchored_line()
     }
 
     /// Whether the view is on its way to a match, or to a first match that's yet

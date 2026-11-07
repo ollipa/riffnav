@@ -73,7 +73,8 @@ impl App {
     pub(super) fn follow_change(&mut self) {
         let here = self.selected_file().zip(self.cursor_anchor);
         // A match the cursor is on has its own idea of where to be.
-        if here.is_none() || here != self.change_jumps.stopped || self.holding_match() {
+        let moved = here.is_none() || here != self.change_jumps.stopped;
+        if moved || !self.on_anchored_line() || self.holding_match() {
             return;
         }
         let Some(render) = self.current_render() else {
