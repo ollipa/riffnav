@@ -458,6 +458,7 @@ impl Palette {
 mod tests {
     use super::*;
     use crate::comment::store::{CommentStore, Side};
+    use crate::comment::testing::note;
 
     fn text_of(lines: &[Line<'_>]) -> Vec<String> {
         lines
@@ -481,15 +482,8 @@ mod tests {
         let mut store = CommentStore::disabled();
         for (line, author, body) in entries {
             store.add(Comment {
-                id: String::new(),
-                file: "f".to_string(),
-                side: Side::New,
-                line: *line,
-                body: body.to_string(),
                 author: author.to_string(),
-                created: 0,
-                reply_to: None,
-                diff_hash: None,
+                ..note("f", *line, body)
             });
         }
         store
@@ -544,15 +538,9 @@ mod tests {
         let mut store = store_with(&[(2, "claude", "why?")]);
         let parent = store.all()[0].id.clone();
         store.add(Comment {
-            id: String::new(),
-            file: "f".to_string(),
-            side: Side::New,
-            line: 2,
-            body: "because of the timeout".to_string(),
             author: "me".to_string(),
-            created: 0,
             reply_to: Some(parent),
-            diff_hash: None,
+            ..note("f", 2, "because of the timeout")
         });
         splice(
             &mut text,
@@ -713,15 +701,9 @@ mod tests {
         let mut store = store_with(&[(2, "claude", "why?")]);
         let parent = store.all()[0].id.clone();
         store.add(Comment {
-            id: String::new(),
-            file: "f".to_string(),
-            side: Side::New,
-            line: 2,
-            body: "because of the timeout".to_string(),
             author: "olli".to_string(),
-            created: 0,
             reply_to: Some(parent),
-            diff_hash: None,
+            ..note("f", 2, "because of the timeout")
         });
         splice(
             &mut text,
@@ -761,15 +743,9 @@ mod tests {
         let (mut text, mut map) = render(DIFF);
         let mut store = CommentStore::disabled();
         store.add(Comment {
-            id: String::new(),
-            file: "f".to_string(),
-            side: Side::New,
-            line: 1,
-            body: "old note".to_string(),
             author: "a".to_string(),
-            created: 0,
-            reply_to: None,
             diff_hash: Some(format!("{:032x}", 7u128)),
+            ..note("f", 1, "old note")
         });
         splice(
             &mut text,

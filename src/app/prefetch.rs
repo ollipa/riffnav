@@ -156,6 +156,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::comment::testing;
     use crate::comment::{Anchor, Comment, CommentStore, Side};
     use crate::config::Config;
     use crate::diff::parse;
@@ -223,14 +224,8 @@ mod tests {
     fn note(path: &str) -> Comment {
         Comment {
             id: path.to_string(),
-            file: path.to_string(),
-            side: Side::New,
-            line: 2,
-            body: "a note".to_string(),
-            author: "tester".to_string(),
             created: crate::state::now_unix(),
-            reply_to: None,
-            diff_hash: None,
+            ..testing::note(path, 2, "a note")
         }
     }
 

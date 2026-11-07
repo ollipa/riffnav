@@ -229,9 +229,9 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-
     use crate::app::test_support::{app_with, file, file_with_raw, seed_text};
     use crate::app::{App, Focus};
+    use crate::comment::testing::note;
     use crate::comment::{Comment, CommentStore};
     use crate::tree;
 
@@ -251,15 +251,9 @@ mod tests {
         // An agent in another terminal writes to the same scope file.
         let mut theirs = CommentStore::with_path(path.clone());
         theirs.add(Comment {
-            id: String::new(),
-            file: "a.rs".to_string(),
-            side: crate::comment::Side::New,
-            line: 2,
-            body: "written elsewhere".to_string(),
             author: "claude".to_string(),
             created: crate::state::now_unix(),
-            reply_to: None,
-            diff_hash: None,
+            ..note("a.rs", 2, "written elsewhere")
         });
         theirs.save();
 
@@ -280,15 +274,8 @@ mod tests {
         let mut store = CommentStore::disabled();
         for (path, line) in [("a.rs", 1u32), ("b.rs", 2)] {
             store.add(Comment {
-                id: String::new(),
-                file: path.to_string(),
-                side: crate::comment::Side::New,
-                line,
-                body: format!("a note in {path}"),
-                author: "tester".to_string(),
                 created: crate::state::now_unix(),
-                reply_to: None,
-                diff_hash: None,
+                ..note(path, line, &format!("a note in {path}"))
             });
         }
         app.install_comments_for_test(store);
@@ -348,15 +335,8 @@ mod tests {
         let mut app = app_with(vec![file_with_raw("a.rs"), file_with_raw("src/b.rs")]);
         let mut store = CommentStore::disabled();
         store.add(Comment {
-            id: String::new(),
-            file: "src/b.rs".to_string(),
-            side: crate::comment::Side::New,
-            line: 2,
-            body: "behind a fold".to_string(),
-            author: "tester".to_string(),
             created: crate::state::now_unix(),
-            reply_to: None,
-            diff_hash: None,
+            ..note("src/b.rs", 2, "behind a fold")
         });
         app.install_comments_for_test(store);
         app.collapsed.insert("src".to_string());

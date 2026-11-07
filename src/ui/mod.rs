@@ -93,6 +93,8 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::comment::Comment;
+    use crate::comment::testing::note;
     use crate::config::Config;
     use crate::diff::testing::bare;
     use crate::diff::{FileDiff, FileStatus};
@@ -239,16 +241,10 @@ mod tests {
 
         let mut store = crate::comment::CommentStore::disabled();
         for (line, author, body) in comments {
-            store.add(crate::comment::Comment {
-                id: String::new(),
-                file: path.clone(),
-                side: crate::comment::Side::New,
-                line: *line,
-                body: body.to_string(),
+            store.add(Comment {
                 author: author.to_string(),
                 created: crate::state::now_unix(),
-                reply_to: None,
-                diff_hash: None,
+                ..note(&path, *line, body)
             });
         }
         app.install_comments_for_test(store);
@@ -296,16 +292,10 @@ mod tests {
         let path = "a_file_whose_name_runs_well_past_the_pane_edge.rs";
         let mut app = App::new(vec![file(path, FileStatus::Modified, 40, 0)], false, &cfg);
         let mut store = crate::comment::CommentStore::disabled();
-        store.add(crate::comment::Comment {
-            id: String::new(),
-            file: path.to_string(),
-            side: crate::comment::Side::New,
-            line: 1,
-            body: "a note".to_string(),
+        store.add(Comment {
             author: "claude".to_string(),
             created: crate::state::now_unix(),
-            reply_to: None,
-            diff_hash: None,
+            ..note(path, 1, "a note")
         });
         app.install_comments_for_test(store);
 

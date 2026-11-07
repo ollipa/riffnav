@@ -11,6 +11,8 @@ pub mod anchor;
 pub mod compose;
 pub mod render;
 pub mod store;
+#[cfg(test)]
+pub mod testing;
 pub mod watch;
 
 pub use anchor::LineMap;

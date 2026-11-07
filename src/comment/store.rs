@@ -419,18 +419,12 @@ impl CommentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::comment::testing::note;
 
     fn draft(file: &str, line: u32, body: &str) -> Comment {
         Comment {
-            id: String::new(),
-            file: file.to_string(),
-            side: Side::New,
-            line,
-            body: body.to_string(),
-            author: "tester".to_string(),
             created: 100,
-            reply_to: None,
-            diff_hash: None,
+            ..note(file, line, body)
         }
     }
 

@@ -473,6 +473,7 @@ fn file_hint(session: &Session) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::comment::testing::note;
 
     fn session() -> Session {
         let files = crate::diff::parse(
@@ -488,15 +489,10 @@ mod tests {
     fn store_with(file: &str, line: u32, diff_hash: Option<&str>) -> (CommentStore, String) {
         let mut store = CommentStore::disabled();
         let id = store.add(Comment {
-            id: String::new(),
-            file: file.to_string(),
-            side: Side::New,
-            line,
-            body: "parent".to_string(),
             author: "claude".to_string(),
             created: 100,
-            reply_to: None,
             diff_hash: diff_hash.map(str::to_string),
+            ..note(file, line, "parent")
         });
         (store, id)
     }

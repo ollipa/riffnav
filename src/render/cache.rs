@@ -938,6 +938,7 @@ impl RenderCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::comment::testing;
     use crate::diff::testing::{hunk, one};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -945,7 +946,6 @@ mod tests {
 
     use ratatui::text::Line;
 
-    use crate::comment::Side;
     use crate::comment::store::{Anchor, Comment};
     use crate::diff::{self, FileDiff, parse};
     use crate::render::highlight::Parsing;
@@ -1170,14 +1170,8 @@ mod tests {
     fn note(file: &str, line: u32, body: &str) -> Comment {
         Comment {
             id: format!("id{line}"),
-            file: file.to_string(),
-            side: Side::New,
-            line,
-            body: body.to_string(),
             author: "agent".to_string(),
-            created: 0,
-            reply_to: None,
-            diff_hash: None,
+            ..testing::note(file, line, body)
         }
     }
 

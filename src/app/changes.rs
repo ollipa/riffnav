@@ -221,7 +221,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::comment::{Comment, CommentStore, Side};
+    use crate::comment::testing;
+    use crate::comment::{Comment, CommentStore};
     use crate::config::Config;
     use crate::diff::parse;
     use crate::diff::testing::hunk;
@@ -496,14 +497,8 @@ mod tests {
     fn note(path: &str, line: u32) -> Comment {
         Comment {
             id: format!("{path}{line}"),
-            file: path.to_string(),
-            side: Side::New,
-            line,
-            body: "a note".to_string(),
-            author: "tester".to_string(),
             created: crate::state::now_unix(),
-            reply_to: None,
-            diff_hash: None,
+            ..testing::note(path, line, "a note")
         }
     }
 
