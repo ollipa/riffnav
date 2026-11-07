@@ -58,31 +58,35 @@ impl CommentBlock {
     }
 }
 
+/// What one file's threads are drawn for.
+pub struct Card<'a> {
+    pub file: &'a str,
+    /// The name this window records as the author of its own comments, which is
+    /// what tells a note the reader wrote from one an agent left.
+    pub me: &'a str,
+    pub width: u16,
+    /// The file's diff as it is now, which tells a note left on another one.
+    pub diff_hash: u128,
+    pub theme: DiffTheme,
+}
+
 /// Splice each thread of `comments` into `text`, keeping `map` index-aligned.
 ///
 /// Returns one block per thread, ascending by row — what `]` and `[` step
 /// through. Threads whose anchor is no longer in the render are appended at the
 /// end rather than dropped, so a comment can never go missing because the code
 /// moved underneath it.
-///
-/// `me` is the name this window records as the author of its own comments, which
-/// is what tells a note the reader wrote from one an agent left.
-#[allow(clippy::too_many_arguments)]
 pub fn splice(
     text: &mut Text<'static>,
     map: &mut LineMap,
     threads: &[(Anchor, Vec<&Comment>)],
-    file: &str,
-    me: &str,
-    width: u16,
-    diff_hash: u128,
-    theme: DiffTheme,
+    card: &Card,
 ) -> Vec<CommentBlock> {
     if threads.is_empty() {
         return Vec::new();
     }
     let now = state::now_unix();
-    let palette = Palette::for_theme(theme);
+    let palette = Palette::for_theme(card.theme);
 
     // Resolve every anchor first, then insert from the bottom up so the indices
     // computed here stay valid as earlier rows shift down.
@@ -91,9 +95,7 @@ pub fn splice(
         let orphaned = map.row_for(*anchor).is_none();
         // An orphan goes after the last line; several of them stack in order.
         let row = map.row_for(*anchor).map_or(text.lines.len(), |r| r + 1);
-        let (lines, entries) = block(
-            comments, file, me, *anchor, width, diff_hash, now, &palette, orphaned,
-        );
+        let (lines, entries) = block(comments, *anchor, orphaned, card, now, &palette);
         placed.push(Placed {
             row,
             lines,
@@ -151,18 +153,21 @@ struct Placed {
 ///
 /// `orphaned` means the anchored line is no longer in the render, so the header
 /// spells out where the note used to live.
-#[allow(clippy::too_many_arguments)]
 fn block(
     comments: &[&Comment],
-    file: &str,
-    me: &str,
     anchor: Anchor,
-    width: u16,
-    diff_hash: u128,
+    orphaned: bool,
+    card: &Card,
     now: u64,
     palette: &Palette,
-    orphaned: bool,
 ) -> (Vec<Line<'static>>, Vec<(usize, String)>) {
+    let &Card {
+        file,
+        me,
+        width,
+        diff_hash,
+        ..
+    } = card;
     let cols = width as usize;
     let body_cols = cols.saturating_sub(FRAME).max(1);
     let mut out = Vec::new();
@@ -503,11 +508,13 @@ mod tests {
             &mut text,
             &mut map,
             &store.threads("f"),
-            "f",
-            "me",
-            40,
-            0,
-            DiffTheme::GitHubDark,
+            &Card {
+                file: "f",
+                me: "me",
+                width: 40,
+                diff_hash: 0,
+                theme: DiffTheme::GitHubDark,
+            },
         );
         let out = text_of(&text.lines);
         assert_eq!(rows.iter().map(|b| b.start).collect::<Vec<_>>(), vec![2]);
@@ -546,11 +553,13 @@ mod tests {
             &mut text,
             &mut map,
             &store.threads("f"),
-            "f",
-            "me",
-            40,
-            0,
-            DiffTheme::GitHubDark,
+            &Card {
+                file: "f",
+                me: "me",
+                width: 40,
+                diff_hash: 0,
+                theme: DiffTheme::GitHubDark,
+            },
         );
         let out = text_of(&text.lines);
         // One box, opened once and closed once, with a divider carrying the
@@ -572,11 +581,13 @@ mod tests {
             &mut text,
             &mut map,
             &store.threads("f"),
-            "f",
-            "me",
-            40,
-            0,
-            DiffTheme::GitHubDark,
+            &Card {
+                file: "f",
+                me: "me",
+                width: 40,
+                diff_hash: 0,
+                theme: DiffTheme::GitHubDark,
+            },
         );
         let out = text_of(&text.lines);
         // Two boxes, three rows each; the later one is pushed down by the first.
@@ -607,11 +618,13 @@ mod tests {
             &mut text,
             &mut map,
             &store.threads("f"),
-            "f",
-            "me",
-            40,
-            0,
-            DiffTheme::GitHubDark,
+            &Card {
+                file: "f",
+                me: "me",
+                width: 40,
+                diff_hash: 0,
+                theme: DiffTheme::GitHubDark,
+            },
         );
         let out = text_of(&text.lines);
         assert_eq!(rows[0].start, before);
@@ -631,11 +644,13 @@ mod tests {
             &mut text,
             &mut map,
             &store.threads("f"),
-            "f",
-            "me",
-            24,
-            0,
-            DiffTheme::GitHubDark,
+            &Card {
+                file: "f",
+                me: "me",
+                width: 24,
+                diff_hash: 0,
+                theme: DiffTheme::GitHubDark,
+            },
         );
         for row in text_of(&text.lines) {
             assert!(display_width(&row) <= 24, "row overflows the pane: {row:?}");
@@ -709,11 +724,13 @@ mod tests {
             &mut text,
             &mut map,
             &store.threads("f"),
-            "f",
-            "olli",
-            40,
-            0,
-            DiffTheme::GitHubDark,
+            &Card {
+                file: "f",
+                me: "olli",
+                width: 40,
+                diff_hash: 0,
+                theme: DiffTheme::GitHubDark,
+            },
         );
         // The name span of each header: the agent's is hashed, mine is the accent.
         let color_of = |row: usize, name: &str| {
@@ -751,11 +768,13 @@ mod tests {
             &mut text,
             &mut map,
             &store.threads("f"),
-            "f",
-            "me",
-            60,
-            9, // the file's diff hash is no longer 7
-            DiffTheme::GitHubDark,
+            &Card {
+                file: "f",
+                me: "me",
+                width: 60,
+                diff_hash: 9, // the file's diff hash is no longer 7
+                theme: DiffTheme::GitHubDark,
+            },
         );
         assert!(text_of(&text.lines)[1].contains("code changed since"));
     }

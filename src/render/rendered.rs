@@ -11,8 +11,8 @@ use super::spec::CommentLayer;
 use super::wrap::{WRAP, rows_of, skip_rows};
 use crate::comment::LineMap;
 use crate::comment::anchor::Source;
-use crate::comment::render as comment_render;
 use crate::comment::render::CommentBlock;
+use crate::comment::render::{self as comment_render, Card};
 use crate::search::Hit;
 use crate::theme::DiffTheme;
 
@@ -306,16 +306,14 @@ pub(super) fn splice_and_measure(
     theme: DiffTheme,
     cancelled: &AtomicBool,
 ) -> Rendered {
-    let comment_rows = comment_render::splice(
-        &mut text,
-        &mut map,
-        &comments.threads,
-        comments.file,
-        comments.me,
+    let card = Card {
+        file: comments.file,
+        me: comments.me,
         width,
-        comments.diff_hash,
+        diff_hash: comments.diff_hash,
         theme,
-    );
+    };
+    let comment_rows = comment_render::splice(&mut text, &mut map, &comments.threads, &card);
     let (height, row_offsets) = measure(&text, width, side_by_side, cancelled);
     let row_starts = row_starts(&map);
     let changes = change_starts(&map);
