@@ -5,8 +5,8 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
-# Least privilege at the top level; the build job elevates to write only to
-# publish release assets.
+# Least privilege at the top level; only the release job can write, to create
+# the GitHub release.
 permissions:
   contents: read
 
@@ -17,8 +17,6 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write # create the release and upload the built binary
     strategy:
       fail-fast: false
       matrix:
@@ -54,11 +52,34 @@ jobs:
           tar -czf "$archive" -C "$(dirname "$bin")" riffnav
           echo "ASSET=$archive" >> "$GITHUB_ENV"
 
-      - name: Upload to release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          files: ${{ env.ASSET }}
-          fail_on_unmatched_files: true
+          name: ${{ matrix.target }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Releases are immutable once published, so every binary goes up in one
+      # call: gh creates a draft, uploads the files, then publishes it.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
 
   publish:
     name: Publish to crates.io
