@@ -1369,6 +1369,47 @@ mod tests {
         index.notes().map(|(_, _, note)| note.to_string()).collect()
     }
 
+    /// A merge of two edits to line 2 of `old`, resolved as `merged`.
+    fn merged(old: &str, merged: &str) -> Repo {
+        let repo = Repo::new();
+        repo.commit("a.rs", old);
+        repo.git(&["checkout", "-qb", "side"]);
+        repo.commit("a.rs", &old.replacen("\n", "\n// side\n", 1));
+        repo.git(&["checkout", "-q", "-"]);
+        repo.commit("a.rs", &old.replacen("\n", "\n// main\n", 1));
+        repo.run(&["merge", "side"]);
+        repo.write("a.rs", merged);
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-qm", "merge"]);
+        repo
+    }
+
+    #[test]
+    fn a_merge_has_only_its_context_to_find_a_source_in() {
+        let top = "// top\n// bottom\n".to_string();
+        let pad = "const PAD: u32 = 1;\n".repeat(30);
+        let block = FUNCTION.join("\n") + "\n";
+        // Outside the hunk it takes the blob to see it, and a merge has no one blob.
+        let old = format!("{top}{pad}{block}");
+        let new = format!("// top\n// both\n// bottom\n{pad}{block}\n{block}");
+        let repo = merged(&old, &new);
+        let got = git_notes(&repo, &["show", "HEAD"], None);
+        assert!(got.is_empty(), "{got:?}");
+
+        // In the hunk it's context, which is there to see.
+        let raw =
+            "diff --cc a.rs\nindex 1,2..3\n--- a/a.rs\n+++ b/a.rs\n@@@ -1,12 -1,12 +1,24 @@@\n";
+        let mut raw = raw.to_string();
+        for line in FUNCTION {
+            raw.push_str(&format!("  {line}\n"));
+        }
+        for line in FUNCTION {
+            raw.push_str(&format!("++{line}\n"));
+        }
+        let got: Vec<String> = notes_in(&raw).into_iter().map(|(_, note)| note).collect();
+        assert_eq!(got, ["copied from line 1"]);
+    }
+
     #[test]
     fn the_old_blob_finds_a_source_outside_the_hunks() {
         let repo = Repo::new();

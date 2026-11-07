@@ -199,7 +199,10 @@ fn changed_lines(files: &[Vec<Row>]) -> (Vec<Line>, Vec<Line>) {
     let mut run = 0;
     for (file, rows) in files.iter().enumerate() {
         for (old, new) in change_runs(rows) {
-            removed.extend(old.into_iter().map(|row| line(file, row, run)));
+            // A merge's line that only another parent lost was never on the old
+            // side, and there'd be no number to say it moved from.
+            let old = old.into_iter().filter(|&row| rows[row].old.is_some());
+            removed.extend(old.map(|row| line(file, row, run)));
             added.extend(new.into_iter().map(|row| line(file, row, run)));
             run += 1;
         }
@@ -418,6 +421,26 @@ mod tests {
 
     fn hint_of(rows: &[(char, String, Option<String>)], sign: char) -> Option<&str> {
         rows.iter().find(|r| r.0 == sign)?.2.as_deref()
+    }
+
+    #[test]
+    fn a_merge_moves_what_the_first_parent_had() {
+        let merge = |marker: &str| {
+            let mut raw = "diff --cc f\n--- a/f\n+++ b/f\n@@@ -1,9 -1,9 +1,9 @@@\n".to_string();
+            for line in FN_A {
+                raw.push_str(&format!("{marker}{line}\n"));
+            }
+            raw.push_str("  kept\n");
+            for line in FN_A {
+                raw.push_str(&format!("++{line}\n"));
+            }
+            raw
+        };
+        let got = moved(&merge("- "));
+        assert_eq!(hint_of(&got[0], '+'), Some("moved from line 1"));
+        // Only the second parent lost these, so nothing moved as far as the old
+        // side goes, and they have no line to say it from.
+        assert_eq!(moved(&merge(" -")), [[]]);
     }
 
     #[test]

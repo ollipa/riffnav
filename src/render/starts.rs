@@ -622,6 +622,27 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_merge_keeps_its_hunks_starting_afresh() {
+        // Each hunk is inside a comment, but which blob would say so?
+        let repo = Repo::new();
+        repo.commit("a.rs", &commented());
+        repo.git(&["checkout", "-qb", "side"]);
+        repo.commit("a.rs", &with_line(&commented(), 20, "let side = 1;"));
+        repo.git(&["checkout", "-q", "-"]);
+        repo.commit("a.rs", &with_line(&commented(), 20, "let main = 1;"));
+        repo.run(&["merge", "side"]);
+        repo.write("a.rs", &with_line(&commented(), 20, "let both = 1;"));
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-qm", "merge"]);
+
+        let file = repo.diff(&["show", "HEAD"]);
+        assert!(file.raw.starts_with("diff --cc a.rs"), "{}", file.raw);
+        assert!(repo.starts(&file).is_empty());
+        let fresh = colored(&file, &[]);
+        assert!(!single_color(&fresh["let both = 1;"]), "parsed as code");
+    }
+
+    #[test]
     fn each_side_gets_its_own_state() {
         // The comment opens on the new side only, far above the second hunk.
         let code = "fn a() {}\n".repeat(60);

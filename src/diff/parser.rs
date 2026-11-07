@@ -43,6 +43,7 @@ fn parse_one(raw: &str) -> FileDiff {
     // doesn't overwrite an explicit `/dev/null` (added/deleted) side.
     let mut saw_minus = false;
     let mut saw_plus = false;
+    let combined = is_combined(raw);
 
     for line in raw.lines() {
         if line.starts_with("@@") {
@@ -80,7 +81,7 @@ fn parse_one(raw: &str) -> FileDiff {
         } else if let Some(p) = line.strip_prefix("--- ") {
             // `--combined-all-paths` gives a line per parent, and the old side
             // follows the first.
-            if !saw_minus {
+            if !(combined && saw_minus) {
                 old_path = side_path(p).or(old_path);
             }
             saw_minus = true;
@@ -108,7 +109,7 @@ fn parse_one(raw: &str) -> FileDiff {
     }
 
     // The marker columns can't be read without knowing where a combined hunk ends.
-    if is_combined(raw) {
+    if combined {
         (additions, deletions) = count_changes(raw);
     }
 
