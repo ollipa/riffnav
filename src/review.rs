@@ -108,6 +108,17 @@ impl ReviewStore {
         self.files.contains_key(&hash)
     }
 
+    /// Move a mark kept under `legacy` to `hash`, the key it has now.
+    pub fn rekey(&mut self, legacy: u128, hash: u128) {
+        if legacy != hash
+            && !self.files.contains_key(&hash)
+            && let Some(entry) = self.files.remove(&legacy)
+        {
+            self.files.insert(hash, entry);
+            self.dirty = true;
+        }
+    }
+
     pub fn count_viewed(&self, hashes: &[u128]) -> usize {
         hashes.iter().filter(|h| self.is_viewed(**h)).count()
     }
@@ -163,11 +174,17 @@ impl ReviewStore {
     }
 }
 
-/// The stable identity of a file's change: an XXH3-128 hash of its diff with the
-/// volatile `index <sha>..<sha>` header lines removed, so blob-SHA churn alone
-/// never re-flags a file. 128 bits makes a collision (a wrongly shared viewed
-/// mark) a non-issue.
+/// The stable identity of a file's change: an XXH3-128 hash of
+/// [`crate::diff::change_identity`], so neither blob-SHA churn nor a wider or
+/// narrower context re-flags a file. 128 bits makes a collision (a wrongly
+/// shared viewed mark) a non-issue.
 pub fn file_hash(raw: &str) -> u128 {
+    XxHash3_128::oneshot(&crate::diff::change_identity(raw))
+}
+
+/// The hash marks were keyed on before 1.1.1: the whole diff but its `index`
+/// lines, context included. Only read, to carry old marks over.
+pub fn legacy_file_hash(raw: &str) -> u128 {
     let mut buf = Vec::with_capacity(raw.len());
     for line in raw.lines() {
         if line.starts_with("index ") {
@@ -204,6 +221,44 @@ mod tests {
     #[test]
     fn hash_is_stable_for_identical_diffs() {
         assert_eq!(file_hash(RAW), file_hash(RAW));
+    }
+
+    /// `+`/`-` shows more or fewer rows: the same change with more context.
+    #[test]
+    fn hash_ignores_context() {
+        let narrow = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -2,3 +2,3 @@ fn x\n b\n-c\n+C\n d\n";
+        let wide =
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,5 +1,5 @@\n a\n b\n-c\n+C\n d\n e\n";
+        assert_eq!(file_hash(narrow), file_hash(wide));
+        // The same edit on another line is another change.
+        let elsewhere = narrow.replace("-2,3 +2,3", "-7,3 +7,3");
+        assert_ne!(file_hash(narrow), file_hash(&elsewhere));
+        assert_ne!(file_hash(narrow), file_hash(&narrow.replace("+C", "+X")));
+        // A missing newline counts on a changed line, not on a context one.
+        let eof = |ctx: &str| format!("{narrow}{ctx}");
+        assert_eq!(
+            file_hash(&eof("\\ No newline at end of file\n")),
+            file_hash(narrow)
+        );
+        let changed_eof = narrow.replace(" d\n", "\\ No newline at end of file\n d\n");
+        assert_ne!(file_hash(&changed_eof), file_hash(narrow));
+    }
+
+    #[test]
+    fn hash_of_a_merge_ignores_context() {
+        let narrow = "diff --cc f\n--- a/f\n+++ b/f\n@@@ -2,2 -2,2 +2,3 @@@\n  b\n++C\n  d\n";
+        let wide = "diff --cc f\n--- a/f\n+++ b/f\n@@@ -1,3 -1,3 +1,4 @@@\n  a\n  b\n++C\n  d\n";
+        assert_eq!(file_hash(narrow), file_hash(wide));
+        assert_ne!(file_hash(narrow), file_hash(&narrow.replace("++C", " +C")));
+    }
+
+    #[test]
+    fn old_marks_move_to_the_new_hash() {
+        let mut store = ReviewStore::disabled();
+        store.toggle(legacy_file_hash(RAW), "f");
+        store.rekey(legacy_file_hash(RAW), file_hash(RAW));
+        assert!(store.is_viewed(file_hash(RAW)));
+        assert!(!store.is_viewed(legacy_file_hash(RAW)));
     }
 
     #[test]

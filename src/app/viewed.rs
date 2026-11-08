@@ -35,6 +35,13 @@ impl App {
     /// stays session-only. Call after `files` are in place.
     pub fn enable_review(&mut self, retention_days: u64) {
         self.review = ReviewStore::load(retention_days);
+        // Carry over marks made before the hash stopped counting context. The
+        // diff is at git's default context here, as it was when they were made.
+        for (file, hash) in self.files.iter().zip(&self.file_hashes) {
+            self.review
+                .rekey(crate::review::legacy_file_hash(&file.raw), *hash);
+        }
+        self.review.save();
         // Resume on the first file still needing review, not the top of the list.
         self.select_first_unviewed();
     }

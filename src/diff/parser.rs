@@ -137,6 +137,68 @@ pub fn hunks(raw: &str) -> Vec<Hunk> {
     raw.lines().filter_map(parse_hunk_header).collect()
 }
 
+/// What identifies one file's change, whatever the context it was diffed with:
+/// the file header without its `index <sha>..<sha>` line (blob-SHA churn alone
+/// isn't a new change), and each changed line with its line number. Context
+/// lines and hunk headers grow and shrink with `-U`, so they're left out.
+pub fn change_identity(raw: &str) -> Vec<u8> {
+    let combined = is_combined(raw);
+    let mut out = Vec::with_capacity(raw.len());
+    let mut in_hunks = false;
+    // The next line number on the old and new side; a combined diff tracks
+    // only the result's.
+    let (mut old, mut new) = (0u32, 0u32);
+    let mut parents = 1;
+    let mut after_change = false;
+    for line in raw.lines() {
+        let header = if combined {
+            parse_combined_header(line).map(|c| {
+                parents = c.parents.len();
+                c.hunk
+            })
+        } else {
+            parse_hunk_header(line)
+        };
+        if let Some(hunk) = header {
+            in_hunks = true;
+            (old, new) = (hunk.old_start, hunk.new_start);
+            after_change = false;
+            continue;
+        }
+        if !in_hunks {
+            if !line.starts_with("index ") {
+                out.extend_from_slice(line.as_bytes());
+                out.push(b'\n');
+            }
+            continue;
+        }
+        if line.starts_with('\\') {
+            // `\ No newline at end of file` belongs to the line before it.
+            if after_change {
+                out.extend_from_slice(line.as_bytes());
+                out.push(b'\n');
+            }
+            continue;
+        }
+        let width = if combined { parents } else { 1 };
+        let marks = line.get(..width).unwrap_or(line);
+        let text = line.get(width..).unwrap_or("");
+        after_change = marks.bytes().any(|b| b != b' ');
+        let removed = marks.contains('-');
+        if after_change {
+            let at = if removed && !combined { old } else { new };
+            out.extend_from_slice(format!("{marks}{at}:{text}\n").as_bytes());
+        }
+        if !marks.contains('+') {
+            old += 1;
+        }
+        if !removed {
+            new += 1;
+        }
+    }
+    out
+}
+
 /// The path in a combined diff's file header, which has just the one, unprefixed.
 fn combined_path(line: &str) -> Option<&str> {
     line.strip_prefix("diff --cc ")
