@@ -34,6 +34,10 @@ const SHELLS: &[&str] = &[
     "sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "pwsh", "elvish",
     "xonsh",
 ];
+/// How long `hc read` may take.
+const READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// The status a notice waits on while the person has text in the agent's prompt.
+const DRAFT: &str = "draft in prompt";
 /// Listing failures in a row that give up on the notice. One slow `herdr-app ls`
 /// shouldn't drop a notice that has been waiting for minutes.
 const LISTING_TRIES: u32 = 3;
@@ -173,16 +177,25 @@ fn deliver(
                 }
                 Ok(true) => {
                     misses = 0;
-                    match send(hc, &notice.terminal, &notice.text) {
-                        Ok(Sent::Yes) => {
-                            report(Progress::Sent);
-                            return;
-                        }
-                        Ok(Sent::Blocked) => Some("blocked".into()),
+                    match has_draft(hc, &notice.terminal) {
+                        // Typed after the person's unsent text, the notice
+                        // would go out as part of their message.
+                        Ok(true) => Some(DRAFT.into()),
                         Err(e) => {
                             report(Progress::Failed(format!("{e:#}")));
                             return;
                         }
+                        Ok(false) => match send(hc, &notice.terminal, &notice.text) {
+                            Ok(Sent::Yes) => {
+                                report(Progress::Sent);
+                                return;
+                            }
+                            Ok(Sent::Blocked) => Some("blocked".into()),
+                            Err(e) => {
+                                report(Progress::Failed(format!("{e:#}")));
+                                return;
+                            }
+                        },
                     }
                 }
             },
@@ -257,6 +270,49 @@ enum Sent {
     Yes,
     /// The program put up a dialog first; typing now would answer it.
     Blocked,
+}
+
+/// Whether the person has typed text into the agent's prompt and not sent it.
+pub(super) fn has_draft(hc: &OsStr, terminal: &str) -> Result<bool> {
+    let done = run_for(hc, &["read", terminal, "--json"], READ_TIMEOUT)?;
+    if !done.status.success() {
+        match serde_json::from_str::<HcError>(&done.stderr) {
+            Ok(reply) => bail!("{}", reply.error.message),
+            Err(_) => bail!("hc read failed ({})", done.status),
+        }
+    }
+    let read: HcRead = serde_json::from_str(&done.stdout).context("parsing hc read")?;
+    Ok(prompt_draft(&read.text))
+}
+
+/// Whether the screen shows Claude Code's prompt box with text in it: the last
+/// `❯` line right under a rule, and any lines up to the rule that closes it.
+/// A screen without that box (another agent) never reads as holding a draft.
+fn prompt_draft(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let is_rule = |l: &str| {
+        let l = l.trim();
+        l.chars().count() >= 3 && l.chars().all(|c| c == '─')
+    };
+    let Some(start) = (1..lines.len())
+        .rev()
+        .find(|&i| lines[i].starts_with('❯') && is_rule(lines[i - 1]))
+    else {
+        return false;
+    };
+    let Some(len) = lines[start..].iter().position(|l| is_rule(l)) else {
+        return false;
+    };
+    let first = lines[start].trim_start_matches('❯');
+    std::iter::once(first)
+        .chain(lines[start + 1..start + len].iter().copied())
+        .any(|l| !l.trim().is_empty())
+}
+
+/// `hc read --json`, keeping only the screen's text.
+#[derive(Deserialize)]
+struct HcRead {
+    text: String,
 }
 
 fn send(hc: &OsStr, terminal: &str, text: &str) -> Result<Sent> {
@@ -339,6 +395,10 @@ if [ "$1" = get ]; then
     cat get.json 2>/dev/null || echo '{"foreground":{"name":"claude"}}'
     exit
 fi
+if [ "$1" = read ]; then
+    cat read.json 2>/dev/null || printf '%s\n' '{"text":"done\n────\n❯ \n────\n  status"}'
+    exit
+fi
 printf '%s|%s|%s\n' "$1" "$2" "$3" >> sent
 [ -f stderr ] && cat stderr >&2
 exit "$(cat code 2>/dev/null || echo 0)""#,
@@ -416,6 +476,39 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
             1,
             "typed only once it was free"
         );
+    }
+
+    /// Typed after the person's unsent text, the notice would go out as part
+    /// of their message.
+    #[test]
+    fn a_draft_in_the_prompt_is_waited_out() {
+        let fake = Fake::new("draft", r#""idle""#);
+        fake.set(
+            "read.json",
+            r#"{"text":"────\n❯ How configurable is\n────"}"#,
+        );
+        let seen = fake.run(|fake, n| {
+            if n == 2 {
+                fake.set("read.json", r#"{"text":"────\n❯ \n────"}"#);
+            }
+        });
+        let draft = Progress::Waiting(DRAFT.into());
+        assert_eq!(seen, [draft.clone(), draft, Progress::Sent]);
+        assert_eq!(fake.sent().lines().count(), 1);
+    }
+
+    #[test]
+    fn drafts_are_read_off_claudes_prompt_box() {
+        let rule = "─".repeat(40);
+        let screen = |prompt: &str| format!("● Done.\n\n{rule}\n{prompt}\n{rule}\n  Opus  ⏵⏵ auto");
+        assert!(!prompt_draft(&screen("❯ ")));
+        assert!(!prompt_draft(&screen("❯")));
+        assert!(prompt_draft(&screen("❯ fix it")));
+        assert!(prompt_draft(&screen("❯ \n  second line")));
+        // A menu's cursor isn't the prompt, nor is a screen without the box.
+        assert!(!prompt_draft("Pick one\n❯ 1. Yes\n  2. No"));
+        assert!(!prompt_draft("› codex prompt"));
+        assert!(!prompt_draft(""));
     }
 
     #[test]
