@@ -196,8 +196,8 @@ fn deliver(
     }
 }
 
-/// Whether an agent still runs in `terminal`: something other than a shell is
-/// in front. A terminal that's gone runs nothing.
+/// Whether an agent still runs in `terminal`: something other than a shell at
+/// its prompt is in front. A terminal that's gone runs nothing.
 pub(super) fn agent_running(hc: &OsStr, terminal: &str) -> Result<bool> {
     let done = run_for(hc, &["get", terminal, "--json"], GET_TIMEOUT)?;
     if done.status.code() == Some(NOT_FOUND) {
@@ -213,7 +213,20 @@ pub(super) fn agent_running(hc: &OsStr, terminal: &str) -> Result<bool> {
     let shell = std::env::var("SHELL").unwrap_or_default();
     Ok(got
         .foreground
-        .is_some_and(|f| !is_shell(&f.name, program_name(&shell))))
+        .is_some_and(|f| !is_shell(&f.name, program_name(&shell)) || runs_command(&f.argv)))
+}
+
+/// Whether a shell's `argv` has it running a command (`fish -ic 'claude'`)
+/// rather than waiting at its prompt. A program the shell runs that way can
+/// stay in the shell's process group, so `hc` reports the shell in front.
+fn runs_command(argv: &[String]) -> bool {
+    argv.iter()
+        .skip(1)
+        .take_while(|arg| arg.starts_with('-'))
+        .any(|arg| match arg.strip_prefix("--") {
+            Some(long) => long == "command",
+            None => arg[1..].contains('c'),
+        })
 }
 
 fn program_name(path: &str) -> &str {
@@ -236,6 +249,8 @@ struct HcGet {
 #[derive(Deserialize)]
 struct HcForeground {
     name: String,
+    #[serde(default)]
+    argv: Vec<String>,
 }
 
 enum Sent {
@@ -450,6 +465,11 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
         let fake = Fake::new("quit", r#""done""#);
         fake.set("get.json", r#"{"foreground":{"name":"fish"}}"#);
         assert_eq!(fake.run(|_, _| {}), [Progress::Gone]);
+        fake.set(
+            "get.json",
+            r#"{"foreground":{"name":"fish","argv":["/usr/bin/fish","-i"]}}"#,
+        );
+        assert_eq!(fake.run(|_, _| {}), [Progress::Gone]);
         fake.set("get.json", r#"{"foreground":null}"#);
         assert_eq!(fake.run(|_, _| {}), [Progress::Gone]);
         assert_eq!(fake.sent(), "", "nothing typed into the shell");
@@ -464,6 +484,31 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
             assert!(!is_shell(name, "fish"), "{name}");
         }
         assert!(!is_shell("claude", ""));
+    }
+
+    /// An agent started as `fish -ic 'command claude; exec fish -i'` runs in
+    /// fish's process group, so fish is reported in front until it quits.
+    #[test]
+    fn a_shell_running_a_command_is_not_at_its_prompt() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for a in [
+            &["fish", "-ic", "command claude", "fish", "claude"][..],
+            &["bash", "-c", "claude"],
+            &["/bin/zsh", "-l", "-c", "claude"],
+            &["fish", "--command", "claude"],
+        ] {
+            assert!(runs_command(&argv(a)), "{a:?}");
+        }
+        for a in [
+            &["fish"][..],
+            &["fish", "-i"],
+            &["-bash"],
+            &["bash", "script-c.sh"],
+            &["bash", "--login"],
+            &[],
+        ] {
+            assert!(!runs_command(&argv(a)), "{a:?}");
+        }
     }
 
     #[test]
