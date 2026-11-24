@@ -52,6 +52,14 @@ use self::terminal::{
 };
 
 const MIN_DIFF_WIDTH: u16 = 20;
+
+/// The widest the tree starts in a terminal `total` columns wide, so a phone
+/// screen keeps most of its width for the diff. An 80-column terminal still fits
+/// the default 32.
+fn narrow_tree_cap(total: u16) -> u16 {
+    total * 2 / 5
+}
+
 const HALF_PAGE: i32 = 15;
 /// How long a transient status message stays on screen before clearing itself.
 const STATUS_TTL: Duration = Duration::from_secs(3);
@@ -129,8 +137,11 @@ pub struct App {
     pub show_footer: bool,
     pub tree_width: u16,
     /// The tree width the session started with, which dragging the divider
-    /// never shrinks below.
+    /// never shrinks below, except on a narrow terminal.
     tree_width_min: u16,
+    /// Whether the divider has been dragged. Until then a narrow terminal shrinks
+    /// the tree so it doesn't crowd out the diff.
+    tree_resized: bool,
     dragging_divider: bool,
     /// Screen rects of the panes from the last render, for mapping mouse events.
     /// `None` before the first draw; `tree_area` is also `None` while the tree is
@@ -277,6 +288,7 @@ impl App {
             show_footer: cfg.show_footer,
             tree_width: cfg.tree_width.max(MIN_DIFF_WIDTH),
             tree_width_min: cfg.tree_width.max(MIN_DIFF_WIDTH),
+            tree_resized: false,
             dragging_divider: false,
             tree_area: None,
             diff_area: None,
@@ -709,9 +721,20 @@ impl App {
             .min()
     }
 
-    fn diff_pane_width(&self, total: u16) -> u16 {
-        let used = if self.show_tree { self.tree_width } else { 0 };
-        total.saturating_sub(used).max(MIN_DIFF_WIDTH)
+    pub(crate) fn diff_pane_width(&self, total: u16) -> u16 {
+        total
+            .saturating_sub(self.tree_pane_width(total))
+            .max(MIN_DIFF_WIDTH)
+    }
+
+    /// Columns the tree takes in a terminal `total` columns wide: none when it's
+    /// hidden, and at most 2/5 of a narrow screen unless the divider was dragged.
+    pub(crate) fn tree_pane_width(&self, total: u16) -> u16 {
+        match (self.show_tree, self.tree_resized) {
+            (false, _) => 0,
+            (true, true) => self.tree_width,
+            (true, false) => self.tree_width.min(narrow_tree_cap(total)),
+        }
     }
 
     /// The render cache is keyed by theme, so cycling back to a theme already seen

@@ -34,9 +34,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, diff_width: u16) {
 
     // The diff pane fills the body, minus the tree when it's shown.
     let diff_area = if app.show_tree {
-        let [tree_area, diff_area] =
-            Layout::horizontal([Constraint::Length(app.tree_width), Constraint::Min(0)])
-                .areas(body);
+        let [tree_area, diff_area] = Layout::horizontal([
+            Constraint::Length(app.tree_pane_width(body.width)),
+            Constraint::Min(0),
+        ])
+        .areas(body);
         // Remember the tree rect so mouse events can hit-test rows.
         app.tree_area = Some(tree_area);
         filetree::render(frame, tree_area, app, tree_focused);
@@ -144,7 +146,7 @@ mod tests {
 
     fn render(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let diff_width = width.saturating_sub(app.tree_width);
+        let diff_width = app.diff_pane_width(width);
         terminal.draw(|f| draw(f, app, diff_width)).unwrap();
         buffer_text(terminal.backend().buffer())
     }
@@ -224,7 +226,7 @@ mod tests {
         };
         let mut app = sample_app(&cfg); // unified mode, first file selected
         let (width, height) = (64, 12);
-        let diff_width = width - app.tree_width; // the diff pane
+        let diff_width = app.diff_pane_width(width); // the diff pane
 
         // One line several pane-widths long, with no spaces so wrapping has to
         // break mid-token.
@@ -277,7 +279,7 @@ mod tests {
                 .map(|n| Line::from(format!("{n:>5}⋮{n:>5}│let x{n} = {n};")))
                 .collect::<Vec<_>>(),
         );
-        app.seed_render_for_test(width - app.tree_width, text);
+        app.seed_render_for_test(app.diff_pane_width(width), text);
         (app, width, height)
     }
 
@@ -368,7 +370,7 @@ mod tests {
         let line = app.selected_file().and_then(|idx| {
             let r = app.cache.get(Key {
                 file: idx,
-                width: width - app.tree_width,
+                width: app.diff_pane_width(width),
                 side_by_side: false,
                 theme: app.diff_theme,
             })?;
@@ -494,7 +496,7 @@ mod tests {
             .cache
             .get(Key {
                 file: app.selected_file().unwrap(),
-                width: width - app.tree_width,
+                width: app.diff_pane_width(width),
                 side_by_side: false,
                 theme: app.diff_theme,
             })
@@ -529,7 +531,7 @@ mod tests {
             .cache
             .get(Key {
                 file: idx,
-                width: width - app.tree_width,
+                width: app.diff_pane_width(width),
                 side_by_side: false,
                 theme: app.diff_theme,
             })

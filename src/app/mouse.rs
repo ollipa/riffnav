@@ -3,7 +3,7 @@
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 
-use super::{App, Focus, MIN_DIFF_WIDTH};
+use super::{App, Focus, MIN_DIFF_WIDTH, narrow_tree_cap};
 use crate::tree::RowKind;
 
 impl App {
@@ -47,10 +47,11 @@ impl App {
             return;
         };
         let total = tree.width + diff.width;
-        let max = total
-            .saturating_sub(MIN_DIFF_WIDTH)
-            .max(self.tree_width_min);
-        self.tree_width = (x.saturating_sub(tree.x) + 1).clamp(self.tree_width_min, max);
+        // A narrow screen lowers the floor along with the starting width.
+        let min = self.tree_width_min.min(narrow_tree_cap(total));
+        let max = total.saturating_sub(MIN_DIFF_WIDTH).max(min);
+        self.tree_width = (x.saturating_sub(tree.x) + 1).clamp(min, max);
+        self.tree_resized = true;
     }
 
     /// Left-click: select (or fold) the tree row under the cursor, or focus the
@@ -133,6 +134,23 @@ mod tests {
         // …and the diff keeps its minimum width at the other extreme.
         app.drag_divider(99);
         assert_eq!(app.tree_width, 100 - MIN_DIFF_WIDTH);
+    }
+
+    #[test]
+    fn narrow_terminal_shrinks_the_tree_until_dragged() {
+        let mut app = app_with(vec![file("a.rs")]);
+        // A phone-sized terminal: the default 32 would take over half of it.
+        assert_eq!(app.tree_pane_width(80), 32);
+        assert_eq!(app.tree_pane_width(50), 20);
+        assert_eq!(app.diff_pane_width(50), 30);
+
+        // The narrow width is also the drag floor, and a drag sticks.
+        app.tree_area = Some(Rect::new(0, 0, 20, 10));
+        app.diff_area = Some(Rect::new(20, 1, 30, 9));
+        app.drag_divider(0);
+        assert_eq!(app.tree_pane_width(50), 20);
+        app.drag_divider(24);
+        assert_eq!(app.tree_pane_width(50), 25);
     }
 
     #[test]
