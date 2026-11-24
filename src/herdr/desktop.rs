@@ -166,10 +166,10 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Whether text typed now would land in the middle of something: a turn in
-    /// progress, or a question waiting on the person, which it would answer.
+    /// Whether text typed now would answer a question waiting on the person.
+    /// Text typed mid-turn is fine: the agent queues it.
     pub fn busy(&self) -> bool {
-        matches!(self.status.as_deref(), Some("working" | "blocked"))
+        self.status.as_deref() == Some("blocked")
     }
 
     fn from(t: &AppTerminal) -> Option<Self> {
@@ -571,7 +571,7 @@ mod tests {
     const AGENTS: &str = r#"{"spaces":[{"tabs":[
         {"id":"a","terminals":[
             {"terminal":"t1","pane":"p1","app":null,"name":null,"status":null},
-            {"terminal":"t2","pane":"p2","app":"claude-code","name":"review","status":"working"},
+            {"terminal":"t2","pane":"p2","app":"claude-code","name":"review","status":"blocked"},
             {"terminal":"t3","pane":"p3","app":"codex","name":null,"status":"done"},
             {"terminal":"t4","pane":"p4"}]},
         {"id":"b","terminals":[{"terminal":"t5","pane":"p5","app":"claude-code","status":"idle"}]}

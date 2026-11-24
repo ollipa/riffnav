@@ -135,8 +135,9 @@ Inside [herdr](https://herdr.dev), the terminal multiplexer or the desktop app,
 In the desktop app, `S` tells the agent in riffnav's tab about the comments you
 left since the last `S`, by typing a one-line `[riffnav]` notice into its
 terminal. With several agents in the tab, riffnav asks which one and remembers
-the choice. A busy agent gets the notice once it's free; the header shows what
-is unsent or queued.
+the choice. An agent mid-turn gets the notice right away and queues it. One
+waiting on a question, or with your unsent text in its prompt, gets it once
+that clears; the header shows what is unsent or queued.
 
 ## License
 

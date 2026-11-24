@@ -340,18 +340,20 @@ mod tests {
     fn a_notice_marks_its_comments_sent_only_once_it_goes() {
         let (mut app, ids) = app_with_comments();
         let (delivery, progress) = Delivery::fake(notice(&ids[..1]));
-        app.queue(delivery, &agent("t2", Some("working")));
+        app.queue(delivery, &agent("t2", Some("blocked")));
         assert_eq!(app.unsent_ids(), [ids[1].clone()], "queued isn't unsent");
         assert_eq!(
             app.queued_label().as_deref(),
-            Some("✉ 1 queued for review (working)")
+            Some("✉ 1 queued for review (blocked)")
         );
 
-        progress.send(Progress::Waiting("blocked".into())).unwrap();
+        progress
+            .send(Progress::Waiting("draft in prompt".into()))
+            .unwrap();
         app.drain_delivery();
         assert_eq!(
             app.queued_label().as_deref(),
-            Some("✉ 1 queued for review (blocked)")
+            Some("✉ 1 queued for review (draft in prompt)")
         );
 
         progress.send(Progress::Sent).unwrap();

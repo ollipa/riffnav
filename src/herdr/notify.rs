@@ -1,9 +1,10 @@
 //! Telling an agent in the desktop app that the person left it review comments.
 //!
 //! A notice is typed into the agent's terminal with `hc send`, as if the person
-//! had typed it. An agent mid-turn, or waiting on a question the text would
-//! answer, isn't typed at: the notice waits in a background thread until the
-//! agent is free, and reports how it's getting on over a channel.
+//! had typed it. An agent mid-turn gets it at once, as the agent queues it. An
+//! agent waiting on a question the text would answer isn't typed at: the notice
+//! waits in a background thread until the agent is free, and reports how it's
+//! getting on over a channel.
 
 use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
@@ -446,7 +447,7 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
 
     #[test]
     fn a_free_agent_is_sent_to_at_once() {
-        for status in ["null", r#""idle""#, r#""done""#] {
+        for status in ["null", r#""idle""#, r#""done""#, r#""working""#] {
             let fake = Fake::new("free", status);
             assert_eq!(fake.run(|_, _| {}), [Progress::Sent], "{status}");
             assert_eq!(fake.sent(), "send|t2|[riffnav] hello\n");
@@ -454,23 +455,15 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
     }
 
     #[test]
-    fn a_busy_agent_is_waited_for() {
-        let fake = Fake::new("busy", r#""working""#);
-        let seen = fake.run(|fake, n| match n {
-            2 => fake.set("ls.json", &ls(r#""blocked""#)),
-            3 => fake.set("ls.json", &ls(r#""idle""#)),
-            _ => {}
+    fn an_agent_waiting_on_the_person_is_waited_for() {
+        let fake = Fake::new("busy", r#""blocked""#);
+        let seen = fake.run(|fake, n| {
+            if n == 2 {
+                fake.set("ls.json", &ls(r#""working""#));
+            }
         });
-        let waiting = |s: &str| Progress::Waiting(s.into());
-        assert_eq!(
-            seen,
-            [
-                waiting("working"),
-                waiting("working"),
-                waiting("blocked"),
-                Progress::Sent
-            ]
-        );
+        let blocked = Progress::Waiting("blocked".into());
+        assert_eq!(seen, [blocked.clone(), blocked, Progress::Sent]);
         assert_eq!(
             fake.sent().lines().count(),
             1,
@@ -545,9 +538,9 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
 
     #[test]
     fn an_agent_that_leaves_is_gone() {
-        let fake = Fake::new("gone", r#""working""#);
+        let fake = Fake::new("gone", r#""blocked""#);
         let seen = fake.run(|fake, _| fake.set("ls.json", r#"{"spaces":[]}"#));
-        assert_eq!(seen, [Progress::Waiting("working".into()), Progress::Gone]);
+        assert_eq!(seen, [Progress::Waiting("blocked".into()), Progress::Gone]);
         assert_eq!(fake.sent(), "");
     }
 
@@ -615,7 +608,7 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
 
     #[test]
     fn nobody_listening_stops_the_wait() {
-        let fake = Fake::new("dropped", r#""working""#);
+        let fake = Fake::new("dropped", r#""blocked""#);
         let mut looks = 0;
         deliver(
             &fake.pane,
@@ -636,7 +629,7 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
     /// agent must not be typed once that agent comes free.
     #[test]
     fn a_stopped_delivery_never_types() {
-        let fake = Fake::new("stopped", r#""working""#);
+        let fake = Fake::new("stopped", r#""blocked""#);
         let stopped = AtomicBool::new(false);
         let mut seen = Vec::new();
         deliver(
@@ -652,7 +645,7 @@ exit "$(cat code 2>/dev/null || echo 0)""#,
                 seen.len() < 5
             },
         );
-        assert_eq!(seen, [Progress::Waiting("working".into())]);
+        assert_eq!(seen, [Progress::Waiting("blocked".into())]);
         assert_eq!(fake.sent(), "");
     }
 
