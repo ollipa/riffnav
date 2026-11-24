@@ -34,7 +34,7 @@ pub struct Config {
     /// where that is.
     pub detect_copies: bool,
     /// Columns reserved for the file-tree pane, including its right border. On a
-    /// narrow terminal the tree starts at no more than 2/5 of the width.
+    /// narrow terminal the tree starts at no more than a third of the width.
     pub tree_width: u16,
     /// Show the file tree on launch.
     pub show_tree: bool,

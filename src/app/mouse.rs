@@ -140,17 +140,19 @@ mod tests {
     fn narrow_terminal_shrinks_the_tree_until_dragged() {
         let mut app = app_with(vec![file("a.rs")]);
         // A phone-sized terminal: the default 32 would take over half of it.
-        assert_eq!(app.tree_pane_width(80), 32);
-        assert_eq!(app.tree_pane_width(50), 20);
-        assert_eq!(app.diff_pane_width(50), 30);
+        assert_eq!(app.tree_pane_width(96), 32);
+        assert_eq!(app.tree_pane_width(50), 16);
+        assert_eq!(app.diff_pane_width(50), 34);
 
         // The narrow width is also the drag floor, and a drag sticks.
-        app.tree_area = Some(Rect::new(0, 0, 20, 10));
-        app.diff_area = Some(Rect::new(20, 1, 30, 9));
+        app.tree_area = Some(Rect::new(0, 0, 16, 10));
+        app.diff_area = Some(Rect::new(16, 1, 34, 9));
         app.drag_divider(0);
-        assert_eq!(app.tree_pane_width(50), 20);
+        assert_eq!(app.tree_pane_width(50), 16);
         app.drag_divider(24);
         assert_eq!(app.tree_pane_width(50), 25);
+        // Shrinking the terminal after a drag still leaves the diff its minimum.
+        assert_eq!(app.tree_pane_width(40), 40 - MIN_DIFF_WIDTH);
     }
 
     #[test]

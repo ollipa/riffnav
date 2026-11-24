@@ -27,7 +27,7 @@
 # detect_copies = true
 
 # Columns reserved for the file-tree pane, including its right border. On a
-# narrow terminal the tree starts at no more than 2/5 of the width.
+# narrow terminal the tree starts at no more than a third of the width.
 # tree_width = 32
 
 # Show the file tree on launch (toggle at runtime with `e`).

@@ -54,10 +54,10 @@ use self::terminal::{
 const MIN_DIFF_WIDTH: u16 = 20;
 
 /// The widest the tree starts in a terminal `total` columns wide, so a phone
-/// screen keeps most of its width for the diff. An 80-column terminal still fits
-/// the default 32.
+/// screen keeps most of its width for the diff. From 96 columns up the default 32
+/// fits.
 fn narrow_tree_cap(total: u16) -> u16 {
-    total * 2 / 5
+    total / 3
 }
 
 const HALF_PAGE: i32 = 15;
@@ -728,11 +728,13 @@ impl App {
     }
 
     /// Columns the tree takes in a terminal `total` columns wide: none when it's
-    /// hidden, and at most 2/5 of a narrow screen unless the divider was dragged.
+    /// hidden, and at most a third of a narrow screen unless the divider was dragged.
+    /// A dragged tree still leaves the diff its minimum width when the terminal
+    /// shrinks.
     pub(crate) fn tree_pane_width(&self, total: u16) -> u16 {
         match (self.show_tree, self.tree_resized) {
             (false, _) => 0,
-            (true, true) => self.tree_width,
+            (true, true) => self.tree_width.min(total.saturating_sub(MIN_DIFF_WIDTH)),
             (true, false) => self.tree_width.min(narrow_tree_cap(total)),
         }
     }
